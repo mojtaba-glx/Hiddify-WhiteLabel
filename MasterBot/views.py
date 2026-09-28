@@ -11,7 +11,8 @@ from Shared.timeutils import format_tehran, parse_utc
 
 
 MAIN_MENU = (
-    ("👥 مشتریان", "menu:tenants"),
+    ("👤 کاربران فروشگاه", "menu:customers"),
+    ("🤖 ربات‌های مشتریان", "menu:tenants"),
     ("🔐 لایسنس‌ها", "menu:licenses"),
     ("📦 پلن‌ها", "menu:plans"),
     ("📊 آمار", "menu:stats"),
@@ -46,6 +47,70 @@ def _pager(prefix: str, page: Page) -> list[InlineKeyboardButton]:
             InlineKeyboardButton("➡️", callback_data=f"{prefix}:{page.page + 1}")
         )
     return buttons
+
+
+
+def platform_customers_view(
+    page: Page, *, query: str = ""
+) -> tuple[str, InlineKeyboardMarkup]:
+    text = "👤 کاربران فروشگاه"
+    if query:
+        text += f"\n🔎 نتیجه جست‌وجو: {query[:40]}"
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in page.items:
+        icon = "🟢" if item["status"] == "active" else "🔴"
+        username = f"@{item['username']}" if item.get("username") else str(item["telegram_user_id"])
+        rows.append([
+            InlineKeyboardButton(
+                f"{icon} {item['display_name']} · {username}",
+                callback_data=f"customeradmin:view:{int(item['id'])}",
+            )
+        ])
+    if not page.items:
+        text += "\n\nکاربری پیدا نشد."
+    rows.append(_pager("customeradmin:page", page))
+    rows.append([InlineKeyboardButton("🔎 جست‌وجو", callback_data="customeradmin:search")])
+    rows.append([InlineKeyboardButton("↩️ منوی اصلی", callback_data="menu:main")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def platform_customer_detail(customer: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+    username = f"@{customer['username']}" if customer.get("username") else "—"
+    wallets = customer.get("wallets") or []
+    wallet_text = "ندارد"
+    if wallets:
+        wallet_text = " | ".join(
+            f"{int(item['balance']):,} {item['currency']}" for item in wallets
+        )
+    lines = [
+        f"👤 کاربر فروشگاه #{int(customer['id'])}",
+        "",
+        f"نام: {customer['display_name']}",
+        f"یوزرنیم: {username}",
+        f"شناسه تلگرام: {int(customer['telegram_user_id'])}",
+        f"وضعیت: {'فعال' if customer['status'] == 'active' else 'مسدود'}",
+        f"کیف پول: {wallet_text}",
+        f"سفارش‌ها: {int(customer.get('order_count') or 0)}",
+        f"ربات‌های ساخته‌شده: {int(customer.get('tenant_count') or 0)}",
+        f"رسید در انتظار: {int(customer.get('pending_receipts') or 0)}",
+    ]
+    recent = customer.get("recent_orders") or []
+    if recent:
+        lines.extend(["", "🧾 آخرین سفارش‌ها:"])
+        for order in recent:
+            lines.append(
+                f"• {order['public_id']} · {order['kind']} · "
+                f"{int(order['amount']):,} {order['currency']} · {order['status']}"
+            )
+    next_status = "blocked" if customer["status"] == "active" else "active"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "⛔ مسدودکردن" if next_status == "blocked" else "✅ فعال‌کردن",
+            callback_data=f"customeradmin:status:{int(customer['id'])}:{next_status}",
+        )],
+        [InlineKeyboardButton("↩️ کاربران فروشگاه", callback_data="customeradmin:page:0")],
+    ])
+    return "\n".join(lines), keyboard
 
 
 def tenants_view(page: Page, *, query: str = "") -> tuple[str, InlineKeyboardMarkup]:
