@@ -104,6 +104,9 @@ def test_bootstrap_uses_dedicated_service_account_and_opt_path() -> None:
     assert "--system" in content
     assert "--user-group" in content
     assert "git clone" in content
+    assert "SERVICE_GROUP=" in content
+    assert 'mkdir -p "$(dirname "$INSTALL_DIR")"' in content
+    assert 'install -d -m 0755 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$INSTALL_DIR"' in content
     assert "install.sh\" update" in content or "install.sh\" install" in content
 
 
