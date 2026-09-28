@@ -47,6 +47,7 @@ from MasterBot.views import (
     tenant_detail,
     tenants_view,
     trial_plan_picker,
+    warnings_text,
 )
 from Shared.access import is_master_admin
 from Shared.redaction import get_logger, safe_format_exception
@@ -88,14 +89,14 @@ async def access_gate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if update.callback_query and str(update.callback_query.data or "").startswith("customer:"):
         return
     if update.callback_query:
-        await update.callback_query.answer("Access denied", show_alert=True)
+        await update.callback_query.answer("دسترسی مجاز نیست.", show_alert=True)
         raise ApplicationHandlerStop
     if update.effective_message:
         text = str(getattr(update.effective_message, "text", "") or "").strip()
         if text.startswith("/") and text.split(maxsplit=1)[0].split("@", 1)[0] not in {
             "/start", "/menu", "/cancel"
         }:
-            await update.effective_message.reply_text("Access denied")
+            await update.effective_message.reply_text("دسترسی مجاز نیست.")
             raise ApplicationHandlerStop
         # Customer text, image receipts and the three public commands proceed.
         return
@@ -568,7 +569,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             context.user_data["flow"] = {"kind": "tenant_new"}
             await _render(
                 update,
-                "➕ اطلاعات مشتری را بفرستید:\nنام | slug | شناسه عددی مالک",
+                "➕ اطلاعات ربات مشتری را بفرستید:\nنام | شناسه انگلیسی | شناسه عددی مالک",
                 back_keyboard("tenant:page:0"),
             )
             return
@@ -576,13 +577,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             context.user_data["flow"] = {"kind": "provision_details"}
             await _render(
                 update,
-                "🚀 اطلاعات مشتری را بفرستید:\nنام | slug | شناسه عددی مالک",
+                "🚀 اطلاعات ربات مشتری را بفرستید:\nنام | شناسه انگلیسی | شناسه عددی مالک",
                 back_keyboard("tenant:page:0"),
             )
             return
         if data == "tenant:search":
             context.user_data["flow"] = {"kind": "tenant_search"}
-            await _render(update, "🔎 نام، slug یا شناسه مالک را بفرستید:", back_keyboard("tenant:page:0"))
+            await _render(update, "🔎 نام، شناسه انگلیسی یا شناسه مالک را بفرستید:", back_keyboard("tenant:page:0"))
             return
         if data.startswith("tenant:view:"):
             await _show_tenant(update, context, _parse_int(data.rsplit(":", 1)[1], "tenant id"))
@@ -593,7 +594,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             context.user_data["flow"] = {"kind": "tenant_edit", "tenant_id": tenant_id}
             await _render(
                 update,
-                "✏️ اطلاعات جدید را بفرستید:\nنام | slug | شناسه عددی مالک",
+                "✏️ اطلاعات جدید را بفرستید:\nنام | شناسه انگلیسی | شناسه عددی مالک",
                 back_keyboard(f"tenant:view:{tenant_id}"),
             )
             return
@@ -902,11 +903,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data == "menu:warnings" or data.startswith("warning:page:"):
             page_no = 0 if data == "menu:warnings" else _parse_int(data.rsplit(":", 1)[1], "page")
             page = service.list_warnings(actor, page=page_no)
-            lines = ["⚠️ هشدارهای باز"]
-            for item in page.items:
-                lines.append(f"#{int(item['id'])} · {item['event_type']} · {item['status']}")
-            if not page.items:
-                lines.append("هشداری وجود ندارد.")
             buttons = []
             if page.has_previous:
                 buttons.append(InlineKeyboardButton("⬅️", callback_data=f"warning:page:{page.page-1}"))
@@ -914,7 +910,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 buttons.append(InlineKeyboardButton("➡️", callback_data=f"warning:page:{page.page+1}"))
             rows = [buttons] if buttons else []
             rows.append([InlineKeyboardButton("↩️ منوی اصلی", callback_data="menu:main")])
-            await _render(update, "\n".join(lines), InlineKeyboardMarkup(rows))
+            await _render(update, warnings_text(page.items), InlineKeyboardMarkup(rows))
             return
         if data == "menu:audit" or data.startswith("audit:page:"):
             page_no = 0 if data == "menu:audit" else _parse_int(data.rsplit(":", 1)[1], "page")
@@ -1017,7 +1013,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "owner_telegram_id": _parse_int(fields[2], "owner id"),
             }
             await update.effective_message.reply_text(
-                "🔐 توکن AdminBot مشتری را بفرستید؛ پیام بلافاصله حذف می‌شود.",
+                "🔐 توکن ربات مدیریت مشتری را بفرستید؛ پیام بلافاصله حذف می‌شود.",
                 reply_markup=back_keyboard("tenant:page:0"),
             )
             return
@@ -1038,7 +1034,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 flow["admin_bot"] = prepared
                 flow["kind"] = "provision_user_token"
                 await update.effective_chat.send_message(
-                    "✅ AdminBot تأیید شد. اکنون توکن UserBot مشتری را بفرستید.",
+                    "✅ ربات مدیریت تأیید شد. اکنون توکن ربات کاربران را بفرستید.",
                     reply_markup=back_keyboard("tenant:page:0"),
                 )
                 return
@@ -1055,10 +1051,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             context.user_data.pop("flow", None)
             await update.effective_chat.send_message(
-                "🔐 Secretهای یک‌بارمصرف Webhook\n\n"
-                f"AdminBot: {result.webhook_secrets.admin}\n"
-                f"UserBot: {result.webhook_secrets.user}\n\n"
-                "پس از ثبت Webhook این پیام را حذف کنید؛ فقط Hash در دیتابیس ذخیره شده است.",
+                "🔐 کلیدهای یک‌بارمصرف وب‌هوک\n\n"
+                f"ربات مدیریت: {result.webhook_secrets.admin}\n"
+                f"ربات کاربران: {result.webhook_secrets.user}\n\n"
+                "پس از ثبت وب‌هوک این پیام را حذف کنید؛ فقط نسخه هش‌شده در دیتابیس ذخیره شده است.",
                 protect_content=True,
             )
             row = service.get_tenant(actor, result.tenant_id)
@@ -1279,8 +1275,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data.pop("flow", None)
             await update.effective_chat.send_message(
                 f"✅ ربات @{enrollment.bot.telegram_username or 'unknown'} ثبت شد.\n"
-                f"Webhook secret: {enrollment.webhook_secret}\n"
-                "این Secret فقط همین یک‌بار نمایش داده می‌شود؛ پس از استفاده پیام را حذف کنید.",
+                f"کلید وب‌هوک: {enrollment.webhook_secret}\n"
+                "این کلید فقط همین یک‌بار نمایش داده می‌شود؛ پس از استفاده پیام را حذف کنید.",
                 reply_markup=back_keyboard(f"tenant:view:{int(flow['tenant_id'])}"),
                 protect_content=True,
             )
