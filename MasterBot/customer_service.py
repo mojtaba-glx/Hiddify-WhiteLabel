@@ -16,7 +16,7 @@ from typing import Any, Callable, Optional
 from Database.connection import transaction
 from Database.repositories import AuditRepository, LicenseRepository, PlanRepository
 from LicenseService.service import renew_license
-from MasterBot.service import MasterService, NotFoundError
+from MasterBot.service import MasterService, NotFoundError, Page
 from MasterBot.platform_settings import PlatformSettingsService
 from Provisioning.service import PreparedBot, ProvisioningResult
 from Shared.access import require_master_admin
@@ -446,6 +446,113 @@ class CustomerPortalService:
                 entity_id=str(order_id), metadata={"kind": str(order["kind"])},
             )
         return ProvisionedPurchase(provisioning=result, license=license_row)
+
+    # ---- owner customer administration ----
+
+    def list_platform_customers(
+        self,
+        actor_id: int,
+        *,
+        page: int = 0,
+        page_size: int = 8,
+        query: str = "",
+    ) -> Page:
+        require_master_admin(actor_id, self.master_admin_id)
+        safe_page = max(0, int(page))
+        safe_size = max(1, min(int(page_size), 20))
+        offset = safe_page * safe_size
+        text = str(query or "").strip()
+        where = ""
+        params: list[Any] = []
+        if text:
+            like = f"%{text}%"
+            clauses = ["c.display_name LIKE ?", "c.username LIKE ?"]
+            params.extend([like, like])
+            if text.isdigit():
+                clauses.extend(["c.telegram_user_id = ?", "c.id = ?"])
+                params.extend([int(text), int(text)])
+            where = " WHERE " + " OR ".join(clauses)
+        rows = self.conn.execute(
+            "SELECT c.*,"
+            " (SELECT COUNT(*) FROM customer_orders AS o WHERE o.customer_id = c.id) AS order_count,"
+            " (SELECT COUNT(*) FROM tenants AS t WHERE t.owner_telegram_id = c.telegram_user_id) AS tenant_count,"
+            " (SELECT COUNT(*) FROM payment_receipts AS r"
+            "   JOIN customer_orders AS po ON po.id = r.order_id"
+            "   WHERE po.customer_id = c.id AND r.status = 'pending') AS pending_receipts"
+            " FROM platform_customers AS c"
+            + where
+            + " ORDER BY c.id DESC LIMIT ? OFFSET ?",
+            tuple(params + [safe_size + 1, offset]),
+        ).fetchall()
+        items = [dict(row) for row in rows]
+        return Page(
+            items=items[:safe_size],
+            page=safe_page,
+            page_size=safe_size,
+            has_previous=safe_page > 0,
+            has_next=len(items) > safe_size,
+        )
+
+    def get_platform_customer_admin(
+        self, actor_id: int, customer_id: int
+    ) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        row = self.conn.execute(
+            "SELECT c.*,"
+            " (SELECT COUNT(*) FROM customer_orders AS o WHERE o.customer_id = c.id) AS order_count,"
+            " (SELECT COUNT(*) FROM tenants AS t WHERE t.owner_telegram_id = c.telegram_user_id) AS tenant_count,"
+            " (SELECT COUNT(*) FROM payment_receipts AS r"
+            "   JOIN customer_orders AS po ON po.id = r.order_id"
+            "   WHERE po.customer_id = c.id AND r.status = 'pending') AS pending_receipts"
+            " FROM platform_customers AS c WHERE c.id = ?",
+            (int(customer_id),),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("platform customer not found")
+        result = dict(row)
+        wallets = self.conn.execute(
+            "SELECT currency, balance FROM wallet_accounts"
+            " WHERE customer_id = ? ORDER BY currency",
+            (int(customer_id),),
+        ).fetchall()
+        result["wallets"] = [dict(item) for item in wallets]
+        recent_orders = self.conn.execute(
+            "SELECT o.id, o.public_id, o.kind, o.amount, o.currency, o.status,"
+            " p.name AS plan_name, o.created_at"
+            " FROM customer_orders AS o"
+            " LEFT JOIN license_plans AS p ON p.id = o.plan_id"
+            " WHERE o.customer_id = ? ORDER BY o.id DESC LIMIT 5",
+            (int(customer_id),),
+        ).fetchall()
+        result["recent_orders"] = [dict(item) for item in recent_orders]
+        return result
+
+    def set_platform_customer_status(
+        self, actor_id: int, customer_id: int, status: str
+    ) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        if status not in ("active", "blocked"):
+            raise ValueError("invalid platform customer status")
+        current = self.get_platform_customer_admin(actor_id, customer_id)
+        if current["status"] == status:
+            return current
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE platform_customers SET status = ?, updated_at = ? WHERE id = ?",
+                (status, now, int(customer_id)),
+            )
+            if changed.rowcount != 1:
+                raise NotFoundError("platform customer not found")
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id),
+                tenant_id=None,
+                action="platform_customer.status",
+                entity_type="platform_customer",
+                entity_id=str(int(customer_id)),
+                metadata={"from": str(current["status"]), "to": status},
+            )
+        return self.get_platform_customer_admin(actor_id, customer_id)
 
     # ---- owner-only commerce administration ----
 
