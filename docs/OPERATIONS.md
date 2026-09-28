@@ -57,9 +57,10 @@ The main menu provides:
 13. Remove systemd services while preserving project/data
 14. Full uninstall
 
-The Settings submenu allows the operator to change the MasterBot token,
-Master admin Telegram ID, and runtime shard count. Secret token input is hidden
-and the helper updates `.env` atomically without printing the token.
+The Settings submenu shows the current non-secret configuration and allows the
+operator to change the MasterBot token, Master admin Telegram ID, runtime shard
+count and display timezone. Secret token input is hidden and the helper updates
+`.env` atomically without printing the token.
 
 The Logs submenu provides recent and live journal output for MasterBot and
 TenantRuntime shards plus a combined warnings/errors view.
@@ -81,6 +82,7 @@ sudo whitelabel migrate
 sudo whitelabel token
 sudo whitelabel admin-id
 sudo whitelabel shards
+sudo whitelabel timezone
 sudo whitelabel version
 ```
 
@@ -94,13 +96,18 @@ sudo whitelabel version
 4. Installs pinned Python requirements.
 5. Runs the complete offline pytest suite **before downtime**.
 6. If tests fail, restores the previous source commit.
-7. Stops the running bots only after tests pass.
-8. Applies pending database migrations.
-9. Re-renders systemd units and shard instances.
-10. Starts services and runs health checks.
+7. Creates a private consistent SQLite + `.env` rollback snapshot.
+8. Stops the running bots only after tests and snapshot creation succeed.
+9. Applies pending database migrations.
+10. Re-renders systemd units and shard instances.
+11. Starts services and runs health checks.
+12. If migration, startup or health validation fails, restores the pre-update
+    database, environment and source commit, re-renders the old units and
+    starts the previous version again.
 
-The database, `.env`, runtime state and ignored data directories are not
-replaced by the Git update.
+Successful updates retain the private rollback snapshot under
+`runtime/update-rollback/`. This snapshot is for local emergency rollback;
+it is not a substitute for the encrypted off-server backup.
 
 ## Service model
 
