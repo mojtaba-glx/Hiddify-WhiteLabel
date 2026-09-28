@@ -567,7 +567,10 @@ class TenantBusinessService:
             "external_ref=excluded.external_ref, "
             "is_primary=excluded.is_primary, status=excluded.status, "
             "usage_bytes=excluded.usage_bytes, last_online=excluded.last_online, "
-            "last_error=excluded.last_error, updated_at=excluded.updated_at",
+            "last_error=excluded.last_error, "
+            "fail_count=CASE WHEN excluded.last_error IS NULL THEN 0 ELSE fail_count END, "
+            "frozen_at=CASE WHEN excluded.last_error IS NULL THEN NULL ELSE frozen_at END, "
+            "updated_at=excluded.updated_at",
             (
                 self.tenant_id,
                 int(subscription_id),
@@ -1805,7 +1808,9 @@ class TenantBusinessService:
             changed = self.conn.execute(
                 "UPDATE tenant_subscriptions "
                 "SET plan_id=?, traffic_bytes=?, usage_bytes=?, expires_at=?, "
-                "status='active', expired_at=NULL, last_online=?, last_synced_at=?, updated_at=? "
+                "status='active', expired_at=NULL, enforcement_pending=0, "
+                "enforcement_error=NULL, enforced_at=NULL, "
+                "last_online=?, last_synced_at=?, updated_at=? "
                 "WHERE id=? AND tenant_id=? AND server_id=? AND external_ref=?",
                 (
                     next_plan_id,
