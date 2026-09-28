@@ -17,6 +17,7 @@ from Database.connection import transaction
 from Database.repositories import AuditRepository, LicenseRepository, PlanRepository
 from LicenseService.service import renew_license
 from MasterBot.service import MasterService, NotFoundError
+from MasterBot.platform_settings import PlatformSettingsService
 from Provisioning.service import PreparedBot, ProvisioningResult
 from Shared.access import require_master_admin
 from Shared.timeutils import iso_utc, utcnow
@@ -67,6 +68,10 @@ class CustomerPortalService:
         self.master = master_service
         self.master_admin_id = int(master_service.master_admin_id)
         self.cache_invalidator = cache_invalidator
+        self.settings = PlatformSettingsService(conn)
+
+    def storefront_settings(self) -> dict[str, Any]:
+        return self.settings.all()
 
     def _customer(self, actor_id: int, *, active: bool = True) -> dict[str, Any]:
         row = self.conn.execute(
@@ -118,6 +123,8 @@ class CustomerPortalService:
 
     def create_purchase_order(self, actor_id: int, plan_id: int) -> dict[str, Any]:
         customer = self._customer(actor_id)
+        if not self.settings.get_bool("sales_enabled"):
+            raise CustomerPortalError(self.settings.get("maintenance_message"))
         plan = self.get_public_plan(plan_id)
         now = iso_utc(utcnow())
         with transaction(self.conn):
@@ -136,6 +143,8 @@ class CustomerPortalService:
         self, actor_id: int, *, tenant_id: int, plan_id: int
     ) -> dict[str, Any]:
         customer = self._customer(actor_id)
+        if not self.settings.get_bool("sales_enabled"):
+            raise CustomerPortalError(self.settings.get("maintenance_message"))
         tenant = self.conn.execute(
             "SELECT * FROM tenants WHERE id = ? AND owner_telegram_id = ?",
             (int(tenant_id), int(actor_id)),
@@ -310,6 +319,8 @@ class CustomerPortalService:
 
     def claim_trial(self, actor_id: int) -> dict[str, Any]:
         customer = self._customer(actor_id)
+        if not self.settings.get_bool("trial_enabled"):
+            raise CustomerPortalError("trial is disabled")
         plan_row = self.conn.execute(
             "SELECT * FROM license_plans WHERE status = 'active' AND is_public = 1"
             " AND trial_days > 0 ORDER BY id LIMIT 1"
@@ -494,6 +505,99 @@ class CustomerPortalService:
         row = PlanRepository(self.conn).get_by_id(int(plan_id))
         assert row is not None
         return row
+
+    def get_platform_settings(self, actor_id: int) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        return self.settings.all()
+
+    def set_platform_text_setting(
+        self, actor_id: int, key: str, value: str
+    ) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        limits = {
+            "store_name": 80,
+            "support_contact": 120,
+            "maintenance_message": 500,
+        }
+        if key not in limits:
+            raise ValueError("invalid text setting")
+        clean_value = "" if key == "support_contact" and str(value).strip() == "-" else value
+        result = self.settings.set_text(key, clean_value, maximum=limits[key])
+        with transaction(self.conn):
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id), tenant_id=None,
+                action="platform_setting.update", entity_type="platform_setting",
+                entity_id=key, metadata={"configured": bool(result)},
+            )
+        return self.settings.all()
+
+    def set_platform_bool_setting(
+        self, actor_id: int, key: str, enabled: bool
+    ) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        self.settings.set_bool(key, bool(enabled))
+        with transaction(self.conn):
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id), tenant_id=None,
+                action="platform_setting.update", entity_type="platform_setting",
+                entity_id=key, metadata={"enabled": bool(enabled)},
+            )
+        return self.settings.all()
+
+    def get_payment_method_admin(self, actor_id: int, method_id: int) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        row = self.conn.execute(
+            "SELECT * FROM payment_methods WHERE id = ?", (int(method_id),)
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("payment method not found")
+        return dict(row)
+
+    def update_payment_method(
+        self,
+        actor_id: int,
+        method_id: int,
+        *,
+        title: str,
+        currency: str,
+        destination: str,
+        recipient: Optional[str] = None,
+        network: Optional[str] = None,
+        instructions: str = "",
+    ) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        current = self.get_payment_method_admin(actor_id, method_id)
+        code = _clean_text(currency, maximum=8).upper()
+        if not 3 <= len(code) <= 8 or not code.isalnum():
+            raise ValueError("currency must be 3-8 alphanumeric characters")
+        clean_recipient = (
+            _clean_text(recipient, maximum=100, required=False) or None
+            if current["kind"] == "card" else None
+        )
+        clean_network = (
+            _clean_text(network, maximum=40, required=False) or None
+            if current["kind"] == "crypto" else None
+        )
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE payment_methods SET title = ?, currency = ?, destination = ?,"
+                " recipient = ?, network = ?, instructions = ?, updated_at = ? WHERE id = ?",
+                (
+                    _clean_text(title, maximum=80), code,
+                    _clean_text(destination, maximum=180), clean_recipient, clean_network,
+                    _clean_text(instructions, maximum=500, required=False),
+                    now, int(method_id),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise NotFoundError("payment method not found")
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id), tenant_id=None,
+                action="payment_method.update", entity_type="payment_method",
+                entity_id=str(int(method_id)), metadata={"kind": str(current["kind"]), "currency": code},
+            )
+        return self.get_payment_method_admin(actor_id, method_id)
 
     def list_all_payment_methods(self, actor_id: int) -> list[dict[str, Any]]:
         require_master_admin(actor_id, self.master_admin_id)
