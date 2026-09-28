@@ -149,7 +149,9 @@ def test_settings_include_timezone_and_nonsecret_summary() -> None:
     assert "Change display timezone" in content
     assert "change_timezone()" in content
     assert "MasterBot token: $token_state" in content
-    assert "MASTER_BOT_TOKEN=" not in content.split("show_nonsecret_settings() {", 1)[1].split("}", 1)[0]
+    summary = content.split("show_nonsecret_settings() {", 1)[1].split("logs_menu() {", 1)[0]
+    assert "sed -n 's/^MASTER_BOT_TOKEN=//p'" not in summary
+    assert 'echo "$master_token"' not in summary
 
 
 def test_admin_change_has_env_rollback() -> None:
