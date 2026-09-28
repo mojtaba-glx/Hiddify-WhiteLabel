@@ -1,6 +1,6 @@
 # Operations guide
 
-Version: 0.9.2
+Version: 0.9.3
 
 ## Supported host
 
