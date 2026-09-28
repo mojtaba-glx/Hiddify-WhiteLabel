@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import stat
+import sys
 import tempfile
 from pathlib import Path
 
@@ -77,9 +78,9 @@ def main() -> int:
     parser.add_argument("--env-file", required=True)
     parser.add_argument("--key", required=True, choices=sorted(ALLOWED_KEYS))
     args = parser.parse_args()
-    value = os.environ.get("WL_ENV_VALUE")
-    if value is None:
-        raise SystemExit("WL_ENV_VALUE is required")
+    value = sys.stdin.read().rstrip("\r\n")
+    if not value:
+        raise SystemExit("value is required on stdin")
     update_env(Path(args.env_file).resolve(), args.key, value)
     return 0
 
