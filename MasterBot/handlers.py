@@ -36,7 +36,9 @@ from MasterBot.views import (
     financial_dashboard_view,
     order_detail_view,
     orders_view,
+    payment_history_view,
     payment_method_detail,
+    payment_receipt_detail,
     platform_customer_detail,
     platform_customers_view,
     platform_settings_view,
@@ -240,6 +242,37 @@ async def _show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await _render(update, text, keyboard)
 
 
+async def _show_payment_history(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, page_number: int = 0
+) -> None:
+    actor = int(_actor_id(update) or 0)
+    status = str(context.user_data.get("receipt_status_filter") or "all")
+    query = str(context.user_data.get("receipt_query") or "")
+    page = _portal(context).list_receipts_admin(
+        actor, page=page_number, status=status, query=query
+    )
+    text, keyboard = payment_history_view(page, status=status, query=query)
+    await _render(update, text, keyboard)
+
+
+async def _show_receipt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    receipt_id: int,
+    *,
+    send_image: bool = False,
+) -> None:
+    actor = int(_actor_id(update) or 0)
+    receipt = _portal(context).get_receipt_admin(actor, int(receipt_id))
+    text, keyboard = payment_receipt_detail(receipt)
+    await _render(update, text, keyboard)
+    if send_image and receipt.get("telegram_file_id") and update.effective_chat:
+        await update.effective_chat.send_photo(
+            photo=str(receipt["telegram_file_id"]),
+            caption=f"تصویر رسید #{int(receipt_id)}",
+        )
+
+
 async def _show_payment_method(
     update: Update, context: ContextTypes.DEFAULT_TYPE, method_id: int
 ) -> None:
@@ -277,6 +310,7 @@ async def _show_payments(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             callback_data=f"payment:view:{int(method['id'])}",
         )])
     rows.extend([
+        [InlineKeyboardButton("📚 تاریخچه پرداخت‌ها", callback_data="payment:history")],
         [
             InlineKeyboardButton("➕ کارت‌به‌کارت", callback_data="payment:add:card"),
             InlineKeyboardButton("➕ ارز دیجیتال", callback_data="payment:add:crypto"),
@@ -334,6 +368,40 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 update, context, _parse_int(data.rsplit(":", 1)[1], "order id")
             )
             return
+        if data == "payment:history":
+            context.user_data["receipt_status_filter"] = "all"
+            context.user_data.pop("receipt_query", None)
+            await _show_payment_history(update, context)
+            return
+        if data.startswith("payment:history:filter:"):
+            status = data.split(":", 3)[3]
+            context.user_data["receipt_status_filter"] = status
+            context.user_data.pop("receipt_query", None)
+            await _show_payment_history(update, context)
+            return
+        if data.startswith("payment:history:page:"):
+            parts = data.split(":")
+            if len(parts) != 5:
+                raise ValueError("invalid receipt page callback")
+            context.user_data["receipt_status_filter"] = parts[3]
+            await _show_payment_history(update, context, _parse_int(parts[4], "page"))
+            return
+        if data == "payment:history:search":
+            context.user_data["flow"] = {"kind": "receipt_search"}
+            await _render(
+                update,
+                "🔎 شناسه پرداخت، سفارش، نام، یوزرنیم یا کد پیگیری را بفرستید:",
+                back_keyboard("payment:history"),
+            )
+            return
+        if data.startswith("payment:history:view:"):
+            await _show_receipt(
+                update,
+                context,
+                _parse_int(data.rsplit(":", 1)[1], "receipt id"),
+                send_image=True,
+            )
+            return
         if data == "menu:payments":
             await _show_payments(update, context)
             return
@@ -381,34 +449,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         if data.startswith("payment:receipt:"):
             receipt_id = _parse_int(data.rsplit(":", 1)[1], "receipt id")
-            receipt = next(
-                (row for row in _portal(context).list_pending_receipts(actor, limit=100)
-                 if int(row["id"]) == receipt_id),
-                None,
-            )
-            if receipt is None:
-                raise NotFoundError("receipt not found")
-            reference = str(receipt.get("reference") or "تصویر رسید")
-            text = (
-                f"🧾 رسید #{receipt_id}\n\n"
-                f"مشتری: {receipt['display_name']} · {receipt['telegram_user_id']}\n"
-                f"سفارش: {receipt['public_id']} · {receipt['kind']}\n"
-                f"مبلغ: {int(receipt['amount']):,} {receipt['currency']}\n"
-                f"روش: {receipt['method_title']}\n"
-                f"پیگیری: {reference}"
-            )
-            context.user_data["receipt_preview"] = receipt
-            await _render(
-                update, text, InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ تأیید پرداخت", callback_data=f"payment:approve:{receipt_id}")],
-                    [InlineKeyboardButton("❌ رد پرداخت", callback_data=f"payment:reject:{receipt_id}")],
-                    [InlineKeyboardButton("↩️ پرداخت‌ها", callback_data="menu:payments")],
-                ])
-            )
-            if receipt.get("telegram_file_id") and update.effective_chat:
-                await update.effective_chat.send_photo(
-                    photo=str(receipt["telegram_file_id"]), caption=f"تصویر رسید #{receipt_id}"
-                )
+            await _show_receipt(update, context, receipt_id, send_image=True)
             return
         if data.startswith("payment:approve:") or data.startswith("payment:reject:"):
             parts = data.split(":")
@@ -916,6 +957,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             context.user_data.pop("flow", None)
             await _show_tenant(update, context, int(row["id"]))
+            return
+        if kind == "receipt_search":
+            context.user_data.pop("flow", None)
+            context.user_data["receipt_query"] = text[:100]
+            await _show_payment_history(update, context)
             return
         if kind == "order_search":
             context.user_data.pop("flow", None)
