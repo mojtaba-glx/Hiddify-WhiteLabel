@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import stat
 import subprocess
 from pathlib import Path
@@ -11,8 +10,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _run(env_file: Path, key: str, value: str) -> subprocess.CompletedProcess[str]:
-    env = dict(os.environ)
-    env["WL_ENV_VALUE"] = value
     return subprocess.run(
         [
             "python3",
@@ -22,7 +19,7 @@ def _run(env_file: Path, key: str, value: str) -> subprocess.CompletedProcess[st
             "--key",
             key,
         ],
-        env=env,
+        input=value,
         capture_output=True,
         text=True,
         timeout=10,
@@ -65,3 +62,10 @@ def test_env_editor_rejects_invalid_shard_count(tmp_path) -> None:
     result = _run(env_file, "RUNTIME_SHARD_COUNT", "65")
     assert result.returncode != 0
     assert env_file.read_text(encoding="utf-8") == "RUNTIME_SHARD_COUNT=4\n"
+
+
+def test_installer_does_not_pass_secret_values_via_env_command_arguments() -> None:
+    content = (ROOT / "install.sh").read_text(encoding="utf-8")
+    assert "env WL_ENV_VALUE=" not in content
+    assert "env WL_BOT_TOKEN=" not in content
+    assert "printf '%s' \"$token\"" in content
