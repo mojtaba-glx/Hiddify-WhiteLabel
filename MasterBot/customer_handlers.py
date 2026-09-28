@@ -21,6 +21,7 @@ from MasterBot.customer_views import (
     customer_main_keyboard,
     features_text,
     guide_text,
+    orders_keyboard,
     orders_text,
     payment_instructions,
     payment_keyboard,
@@ -326,10 +327,39 @@ async def handle_customer_callback(
             return True
         if data == "customer:orders":
             context.user_data.pop("customer_flow", None)
+            orders = service.list_orders(actor)
             await render(
                 update,
-                orders_text(service.list_orders(actor)),
-                InlineKeyboardMarkup([[InlineKeyboardButton("🏠 منوی مشتری", callback_data="customer:home")]]),
+                orders_text(orders),
+                orders_keyboard(orders),
+            )
+            return True
+        if data.startswith("customer:cancelorder:confirm:"):
+            order_id = int(data.rsplit(":", 1)[1])
+            cancelled = service.cancel_order(actor, order_id)
+            orders = service.list_orders(actor)
+            await render(
+                update,
+                f"✅ سفارش {cancelled['public_id']} لغو شد.\n\n" + orders_text(orders),
+                orders_keyboard(orders),
+            )
+            return True
+        if data.startswith("customer:cancelorder:"):
+            order_id = int(data.rsplit(":", 1)[1])
+            order = service.get_order(actor, order_id)
+            if order["status"] != "pending_payment":
+                raise CustomerPortalError("فقط سفارش در انتظار پرداخت قابل لغو است.")
+            await render(
+                update,
+                f"❌ سفارش {order['public_id']} لغو شود؟\n"
+                f"مبلغ: {int(order['amount']):,} {order['currency']}",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "✅ بله، لغو شود",
+                        callback_data=f"customer:cancelorder:confirm:{order_id}",
+                    )],
+                    [InlineKeyboardButton("↩️ بازگشت", callback_data="customer:orders")],
+                ]),
             )
             return True
         if data == "customer:services":
