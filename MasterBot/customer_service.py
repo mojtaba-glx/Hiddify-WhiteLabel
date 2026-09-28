@@ -1166,9 +1166,15 @@ class CustomerPortalService:
         return [dict(row) for row in rows]
 
     def review_receipt(
-        self, actor_id: int, receipt_id: int, *, approve: bool
+        self,
+        actor_id: int,
+        receipt_id: int,
+        *,
+        approve: bool,
+        review_note: str = "",
     ) -> dict[str, Any]:
         require_master_admin(actor_id, self.master_admin_id)
+        note = _clean_text(review_note, maximum=300, required=False)
         now = iso_utc(utcnow())
         with transaction(self.conn):
             receipt_row = self.conn.execute(
@@ -1185,9 +1191,15 @@ class CustomerPortalService:
             receipt_status = "approved" if approve else "rejected"
             order_status = "paid" if approve else "rejected"
             changed = self.conn.execute(
-                "UPDATE payment_receipts SET status = ?, reviewed_by = ?, reviewed_at = ?"
-                " WHERE id = ? AND status = 'pending'",
-                (receipt_status, int(actor_id), now, int(receipt_id)),
+                "UPDATE payment_receipts SET status = ?, reviewed_by = ?, reviewed_at = ?,"
+                " review_note = ? WHERE id = ? AND status = 'pending'",
+                (
+                    receipt_status,
+                    int(actor_id),
+                    now,
+                    note or None,
+                    int(receipt_id),
+                ),
             )
             if changed.rowcount != 1:
                 raise PaymentStateError("وضعیت رسید تغییر کرده است؛ دوباره بررسی کنید.")
@@ -1225,7 +1237,11 @@ class CustomerPortalService:
                 tenant_id=(int(receipt["tenant_id"]) if receipt["tenant_id"] is not None else None),
                 action="payment.receipt_review", entity_type="payment_receipt",
                 entity_id=str(int(receipt_id)),
-                metadata={"approved": bool(approve), "order_kind": str(receipt["kind"])},
+                metadata={
+                    "approved": bool(approve),
+                    "order_kind": str(receipt["kind"]),
+                    "review_note_set": bool(note),
+                },
             )
         row = self.conn.execute(
             "SELECT r.*, o.status AS order_status, o.kind AS order_kind,"
