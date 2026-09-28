@@ -13,6 +13,7 @@ from Shared.crypto import TokenCipher
 from TenantRuntime.handlers import register_runtime_handlers
 from TenantRuntime.state import StateScope, TenantStateStore
 from TenantRuntime.business import TenantBusinessService
+from TenantRuntime.panels import build_default_panel_adapter
 
 
 class RuntimeWorkerError(RuntimeError):
@@ -48,6 +49,7 @@ def build_tenant_application(
         tenant_id=spec.tenant_id,
         owner_telegram_id=spec.owner_telegram_id,
         secret_cipher=secret_cipher,
+        panel_adapter=build_default_panel_adapter(),
     )
     register_runtime_handlers(application)
     return application
