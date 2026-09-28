@@ -16,7 +16,8 @@ from typing import Any, Callable, Optional
 from Database.connection import transaction
 from Database.repositories import AuditRepository, LicenseRepository, PlanRepository
 from LicenseService.service import renew_license
-from MasterBot.service import MasterService, NotFoundError
+from MasterBot.service import MasterService, NotFoundError, Page
+from MasterBot.platform_settings import PlatformSettingsService
 from Provisioning.service import PreparedBot, ProvisioningResult
 from Shared.access import require_master_admin
 from Shared.timeutils import iso_utc, utcnow
@@ -67,6 +68,10 @@ class CustomerPortalService:
         self.master = master_service
         self.master_admin_id = int(master_service.master_admin_id)
         self.cache_invalidator = cache_invalidator
+        self.settings = PlatformSettingsService(conn)
+
+    def storefront_settings(self) -> dict[str, Any]:
+        return self.settings.all()
 
     def _customer(self, actor_id: int, *, active: bool = True) -> dict[str, Any]:
         row = self.conn.execute(
@@ -77,7 +82,7 @@ class CustomerPortalService:
             raise NotFoundError("customer is not registered")
         result = dict(row)
         if active and result["status"] != "active":
-            raise CustomerBlockedError("customer account is blocked")
+            raise CustomerBlockedError("⛔ حساب شما غیرفعال است.")
         return result
 
     def register_customer(
@@ -118,6 +123,8 @@ class CustomerPortalService:
 
     def create_purchase_order(self, actor_id: int, plan_id: int) -> dict[str, Any]:
         customer = self._customer(actor_id)
+        if not self.settings.get_bool("sales_enabled"):
+            raise CustomerPortalError(self.settings.get("maintenance_message"))
         plan = self.get_public_plan(plan_id)
         now = iso_utc(utcnow())
         with transaction(self.conn):
@@ -136,6 +143,8 @@ class CustomerPortalService:
         self, actor_id: int, *, tenant_id: int, plan_id: int
     ) -> dict[str, Any]:
         customer = self._customer(actor_id)
+        if not self.settings.get_bool("sales_enabled"):
+            raise CustomerPortalError(self.settings.get("maintenance_message"))
         tenant = self.conn.execute(
             "SELECT * FROM tenants WHERE id = ? AND owner_telegram_id = ?",
             (int(tenant_id), int(actor_id)),
@@ -144,7 +153,7 @@ class CustomerPortalService:
             raise NotFoundError("owned service not found")
         current = LicenseRepository(self.conn).latest_by_tenant(int(tenant_id))
         if current is None:
-            raise CustomerPortalError("service has no renewable license")
+            raise CustomerPortalError("این سرویس در حال حاضر قابل تمدید نیست.")
         plan = self.get_public_plan(plan_id)
         now = iso_utc(utcnow())
         with transaction(self.conn):
@@ -196,6 +205,31 @@ class CustomerPortalService:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def cancel_order(self, actor_id: int, order_id: int) -> dict[str, Any]:
+        order = self.get_order(actor_id, int(order_id))
+        if order["status"] != "pending_payment":
+            raise PaymentStateError("فقط سفارش در انتظار پرداخت قابل لغو است.")
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE customer_orders SET status = 'cancelled', updated_at = ?"
+                " WHERE id = ? AND customer_id = ? AND status = 'pending_payment'",
+                (now, int(order_id), int(order["customer_id"])),
+            )
+            if changed.rowcount != 1:
+                raise PaymentStateError("وضعیت سفارش تغییر کرده است؛ دوباره بررسی کنید.")
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id),
+                tenant_id=(
+                    int(order["tenant_id"]) if order.get("tenant_id") is not None else None
+                ),
+                action="customer.order_cancel",
+                entity_type="customer_order",
+                entity_id=str(int(order_id)),
+                metadata={"kind": str(order["kind"]), "public_id": str(order["public_id"])},
+            )
+        return self.get_order(actor_id, int(order_id))
+
     def list_services(self, actor_id: int) -> list[dict[str, Any]]:
         self._customer(actor_id)
         rows = self.conn.execute(
@@ -236,7 +270,7 @@ class CustomerPortalService:
     ) -> dict[str, Any]:
         order = self.get_order(actor_id, order_id)
         if order["status"] != "pending_payment":
-            raise PaymentStateError("order is not awaiting payment")
+            raise PaymentStateError("این سفارش در انتظار پرداخت نیست.")
         method = self.get_payment_method(payment_method_id, currency=str(order["currency"]))
         clean_reference = _clean_text(reference, maximum=160, required=False) or None
         clean_file = _clean_text(telegram_file_id, maximum=256, required=False) or None
@@ -250,7 +284,7 @@ class CustomerPortalService:
                 (now, int(order_id), int(order["customer_id"])),
             )
             if changed.rowcount != 1:
-                raise PaymentStateError("order state changed")
+                raise PaymentStateError("وضعیت سفارش تغییر کرده است؛ دوباره بررسی کنید.")
             cursor = self.conn.execute(
                 "INSERT INTO payment_receipts"
                 " (order_id, payment_method_id, reference, telegram_file_id, status, created_at)"
@@ -274,11 +308,12 @@ class CustomerPortalService:
     def pay_order_from_wallet(self, actor_id: int, order_id: int) -> dict[str, Any]:
         order = self.get_order(actor_id, order_id)
         if order["status"] != "pending_payment" or order["kind"] == "wallet_topup":
-            raise PaymentStateError("order cannot be paid from wallet")
+            raise PaymentStateError("این سفارش از کیف پول قابل پرداخت نیست.")
         amount = int(order["amount"])
         currency = str(order["currency"])
         customer_id = int(order["customer_id"])
         now = iso_utc(utcnow())
+        final_status = "paid"
         with transaction(self.conn):
             self.conn.execute(
                 "INSERT INTO wallet_accounts (customer_id, currency, balance, updated_at)"
@@ -291,7 +326,7 @@ class CustomerPortalService:
                 (amount, now, customer_id, currency, amount),
             )
             if changed.rowcount != 1:
-                raise PaymentStateError("wallet balance is insufficient")
+                raise PaymentStateError("موجودی کیف پول کافی نیست.")
             balance = self.wallet_balance(actor_id, currency)
             self.conn.execute(
                 "INSERT INTO wallet_transactions"
@@ -299,32 +334,56 @@ class CustomerPortalService:
                 " VALUES (?, ?, ?, 'purchase', ?, ?, ?, ?)",
                 (customer_id, currency, -amount, int(order_id), f"wallet-order:{order_id}", balance, now),
             )
+            if order["kind"] == "renewal":
+                plan = PlanRepository(self.conn).get_by_id(int(order["plan_id"]))
+                tenant_id = int(order["tenant_id"] or 0)
+                license_row = LicenseRepository(self.conn).latest_by_tenant(tenant_id)
+                if plan is None or tenant_id <= 0 or license_row is None:
+                    raise PaymentStateError("سرویس موردنظر برای تمدید در دسترس نیست.")
+                renew_license(
+                    self.conn,
+                    license_id=int(license_row["id"]),
+                    tenant_id=tenant_id,
+                    extra_days=int(plan["duration_days"]),
+                    actor_id=int(actor_id),
+                )
+                final_status = "fulfilled"
             changed = self.conn.execute(
-                "UPDATE customer_orders SET status = 'paid', updated_at = ?"
+                "UPDATE customer_orders SET status = ?, paid_at = ?, updated_at = ?"
                 " WHERE id = ? AND customer_id = ? AND status = 'pending_payment'",
-                (now, int(order_id), customer_id),
+                (final_status, now, now, int(order_id), customer_id),
             )
             if changed.rowcount != 1:
-                raise PaymentStateError("order state changed")
+                raise PaymentStateError("وضعیت سفارش تغییر کرده است؛ دوباره بررسی کنید.")
         return self.get_order(actor_id, order_id)
 
     def claim_trial(self, actor_id: int) -> dict[str, Any]:
         customer = self._customer(actor_id)
-        plan_row = self.conn.execute(
-            "SELECT * FROM license_plans WHERE status = 'active' AND is_public = 1"
-            " AND trial_days > 0 ORDER BY id LIMIT 1"
-        ).fetchone()
+        if not self.settings.get_bool("trial_enabled"):
+            raise CustomerPortalError("🎁 لایسنس تست در حال حاضر غیرفعال است.")
+        selected_plan_id = self.settings.all().get("trial_plan_id")
+        if selected_plan_id is not None:
+            plan_row = self.conn.execute(
+                "SELECT * FROM license_plans WHERE id = ? AND status = 'active'"
+                " AND is_public = 1 AND trial_days > 0",
+                (int(selected_plan_id),),
+            ).fetchone()
+        else:
+            plan_row = self.conn.execute(
+                "SELECT * FROM license_plans WHERE status = 'active' AND is_public = 1"
+                " AND trial_days > 0 ORDER BY price ASC, id ASC LIMIT 1"
+            ).fetchone()
         if plan_row is None:
-            raise CustomerPortalError("trial is not configured")
+            raise CustomerPortalError("🎁 در حال حاضر پلن تست فعالی وجود ندارد.")
         plan = dict(plan_row)
         now = iso_utc(utcnow())
         try:
             with transaction(self.conn):
                 cursor = self.conn.execute(
                     "INSERT INTO customer_orders"
-                    " (public_id, customer_id, plan_id, tenant_id, kind, amount, currency, status, created_at, updated_at)"
-                    " VALUES (?, ?, ?, NULL, 'trial', 0, ?, 'paid', ?, ?)",
-                    (_public_id("try"), int(customer["id"]), int(plan["id"]), str(plan["currency"]), now, now),
+                    " (public_id, customer_id, plan_id, tenant_id, kind, amount, currency, status, paid_at, created_at, updated_at)"
+                    " VALUES (?, ?, ?, NULL, 'trial', 0, ?, 'paid', ?, ?, ?)",
+                    (_public_id("try"), int(customer["id"]), int(plan["id"]), str(plan["currency"]), now, now, now),
                 )
                 order_id = int(cursor.lastrowid or 0)
                 self.conn.execute(
@@ -334,7 +393,7 @@ class CustomerPortalService:
                     (int(customer["id"]), int(plan["id"]), order_id, now, now),
                 )
         except sqlite3.IntegrityError as exc:
-            raise CustomerPortalError("trial was already claimed") from exc
+            raise CustomerPortalError("❌ شما قبلاً از لایسنس تست استفاده کرده‌اید.") from exc
         return self.get_order(actor_id, order_id)
 
     def setup_candidates(self, actor_id: int) -> list[dict[str, Any]]:
@@ -353,7 +412,7 @@ class CustomerPortalService:
     ) -> PreparedBot:
         order = self.get_order(actor_id, order_id)
         if order["status"] != "paid" or order["tenant_id"] is not None:
-            raise PaymentStateError("order is not ready for setup")
+            raise PaymentStateError("این سفارش هنوز آماده راه‌اندازی نیست.")
         # The privileged provisioner remains private behind this ownership and
         # paid-order gate; raw tokens are never persisted by the portal flow.
         return await self.master.prepare_tenant_bot(
@@ -372,7 +431,7 @@ class CustomerPortalService:
     ) -> ProvisionedPurchase:
         order = self.get_order(actor_id, order_id)
         if order["status"] != "paid" or order["tenant_id"] is not None:
-            raise PaymentStateError("order is not ready for setup")
+            raise PaymentStateError("این سفارش هنوز آماده راه‌اندازی نیست.")
         plan = PlanRepository(self.conn).get_by_id(int(order["plan_id"]))
         if plan is None:
             raise NotFoundError("plan not found")
@@ -380,12 +439,12 @@ class CustomerPortalService:
         if order["kind"] == "trial":
             duration = int(plan.get("trial_days") or 0)
             if duration <= 0:
-                raise CustomerPortalError("trial is no longer configured")
+                raise CustomerPortalError("پلن تست دیگر فعال نیست.")
         now_dt = utcnow()
         with transaction(self.conn):
             fresh = self.get_order(actor_id, order_id)
             if fresh["status"] != "paid" or fresh["tenant_id"] is not None:
-                raise PaymentStateError("order state changed")
+                raise PaymentStateError("وضعیت سفارش تغییر کرده است؛ دوباره بررسی کنید.")
             result = self.master.provision_tenant_prepared(
                 self.master_admin_id,
                 name=_clean_text(name, maximum=120),
@@ -407,7 +466,7 @@ class CustomerPortalService:
                 (int(result.tenant_id), iso_utc(utcnow()), int(order_id), int(order["customer_id"])),
             )
             if changed.rowcount != 1:
-                raise PaymentStateError("order state changed")
+                raise PaymentStateError("وضعیت سفارش تغییر کرده است؛ دوباره بررسی کنید.")
             if order["kind"] == "trial":
                 self.conn.execute(
                     "UPDATE trial_claims SET tenant_id = ?, status = 'issued', updated_at = ?"
@@ -420,6 +479,359 @@ class CustomerPortalService:
                 entity_id=str(order_id), metadata={"kind": str(order["kind"])},
             )
         return ProvisionedPurchase(provisioning=result, license=license_row)
+
+    # ---- owner customer administration ----
+
+    def list_platform_customers(
+        self,
+        actor_id: int,
+        *,
+        page: int = 0,
+        page_size: int = 8,
+        query: str = "",
+    ) -> Page:
+        require_master_admin(actor_id, self.master_admin_id)
+        safe_page = max(0, int(page))
+        safe_size = max(1, min(int(page_size), 20))
+        offset = safe_page * safe_size
+        text = str(query or "").strip()
+        where = ""
+        params: list[Any] = []
+        if text:
+            like = f"%{text}%"
+            clauses = ["c.display_name LIKE ?", "c.username LIKE ?"]
+            params.extend([like, like])
+            if text.isdigit():
+                clauses.extend(["c.telegram_user_id = ?", "c.id = ?"])
+                params.extend([int(text), int(text)])
+            where = " WHERE " + " OR ".join(clauses)
+        rows = self.conn.execute(
+            "SELECT c.*,"
+            " (SELECT COUNT(*) FROM customer_orders AS o WHERE o.customer_id = c.id) AS order_count,"
+            " (SELECT COUNT(*) FROM tenants AS t WHERE t.owner_telegram_id = c.telegram_user_id) AS tenant_count,"
+            " (SELECT COUNT(*) FROM payment_receipts AS r"
+            "   JOIN customer_orders AS po ON po.id = r.order_id"
+            "   WHERE po.customer_id = c.id AND r.status = 'pending') AS pending_receipts"
+            " FROM platform_customers AS c"
+            + where
+            + " ORDER BY c.id DESC LIMIT ? OFFSET ?",
+            tuple(params + [safe_size + 1, offset]),
+        ).fetchall()
+        items = [dict(row) for row in rows]
+        return Page(
+            items=items[:safe_size],
+            page=safe_page,
+            page_size=safe_size,
+            has_previous=safe_page > 0,
+            has_next=len(items) > safe_size,
+        )
+
+    def get_platform_customer_admin(
+        self, actor_id: int, customer_id: int
+    ) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        row = self.conn.execute(
+            "SELECT c.*,"
+            " (SELECT COUNT(*) FROM customer_orders AS o WHERE o.customer_id = c.id) AS order_count,"
+            " (SELECT COUNT(*) FROM tenants AS t WHERE t.owner_telegram_id = c.telegram_user_id) AS tenant_count,"
+            " (SELECT COUNT(*) FROM payment_receipts AS r"
+            "   JOIN customer_orders AS po ON po.id = r.order_id"
+            "   WHERE po.customer_id = c.id AND r.status = 'pending') AS pending_receipts"
+            " FROM platform_customers AS c WHERE c.id = ?",
+            (int(customer_id),),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("platform customer not found")
+        result = dict(row)
+        wallets = self.conn.execute(
+            "SELECT currency, balance FROM wallet_accounts"
+            " WHERE customer_id = ? ORDER BY currency",
+            (int(customer_id),),
+        ).fetchall()
+        result["wallets"] = [dict(item) for item in wallets]
+        recent_orders = self.conn.execute(
+            "SELECT o.id, o.public_id, o.kind, o.amount, o.currency, o.status,"
+            " p.name AS plan_name, o.created_at"
+            " FROM customer_orders AS o"
+            " LEFT JOIN license_plans AS p ON p.id = o.plan_id"
+            " WHERE o.customer_id = ? ORDER BY o.id DESC LIMIT 5",
+            (int(customer_id),),
+        ).fetchall()
+        result["recent_orders"] = [dict(item) for item in recent_orders]
+        return result
+
+    def adjust_customer_wallet(
+        self,
+        actor_id: int,
+        customer_id: int,
+        *,
+        currency: str,
+        amount: int,
+        note: str = "",
+    ) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        customer = self.get_platform_customer_admin(actor_id, int(customer_id))
+        code = _clean_text(currency, maximum=8).upper()
+        if not 3 <= len(code) <= 8 or not code.isalnum():
+            raise ValueError("currency must be 3-8 alphanumeric characters")
+        delta = int(amount)
+        if delta == 0:
+            raise ValueError("wallet adjustment must be non-zero")
+        clean_note = _clean_text(note, maximum=180, required=False)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            self.conn.execute(
+                "INSERT INTO wallet_accounts (customer_id, currency, balance, updated_at)"
+                " VALUES (?, ?, 0, ?) ON CONFLICT(customer_id, currency) DO NOTHING",
+                (int(customer_id), code, now),
+            )
+            if delta > 0:
+                changed = self.conn.execute(
+                    "UPDATE wallet_accounts SET balance = balance + ?, updated_at = ?"
+                    " WHERE customer_id = ? AND currency = ?",
+                    (delta, now, int(customer_id), code),
+                )
+            else:
+                changed = self.conn.execute(
+                    "UPDATE wallet_accounts SET balance = balance + ?, updated_at = ?"
+                    " WHERE customer_id = ? AND currency = ? AND balance >= ?",
+                    (delta, now, int(customer_id), code, abs(delta)),
+                )
+            if changed.rowcount != 1:
+                raise PaymentStateError("موجودی برای این کاهش کافی نیست.")
+            row = self.conn.execute(
+                "SELECT balance FROM wallet_accounts WHERE customer_id = ? AND currency = ?",
+                (int(customer_id), code),
+            ).fetchone()
+            assert row is not None
+            balance = int(row["balance"])
+            self.conn.execute(
+                "INSERT INTO wallet_transactions"
+                " (customer_id, currency, amount, kind, order_id, idempotency_key,"
+                " resulting_balance, created_at)"
+                " VALUES (?, ?, ?, 'admin', NULL, ?, ?, ?)",
+                (
+                    int(customer_id), code, delta,
+                    f"admin-adjust:{secrets.token_hex(12)}", balance, now,
+                ),
+            )
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id),
+                tenant_id=None,
+                action="wallet.admin_adjust",
+                entity_type="platform_customer",
+                entity_id=str(int(customer_id)),
+                metadata={
+                    "currency": code,
+                    "amount": delta,
+                    "resulting_balance": balance,
+                    "note": clean_note,
+                    "telegram_user_id": int(customer["telegram_user_id"]),
+                },
+            )
+        return {
+            "customer_id": int(customer_id),
+            "currency": code,
+            "amount": delta,
+            "balance": balance,
+        }
+
+    def set_platform_customer_status(
+        self, actor_id: int, customer_id: int, status: str
+    ) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        if status not in ("active", "blocked"):
+            raise ValueError("invalid platform customer status")
+        current = self.get_platform_customer_admin(actor_id, customer_id)
+        if current["status"] == status:
+            return current
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE platform_customers SET status = ?, updated_at = ? WHERE id = ?",
+                (status, now, int(customer_id)),
+            )
+            if changed.rowcount != 1:
+                raise NotFoundError("platform customer not found")
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id),
+                tenant_id=None,
+                action="platform_customer.status",
+                entity_type="platform_customer",
+                entity_id=str(int(customer_id)),
+                metadata={"from": str(current["status"]), "to": status},
+            )
+        return self.get_platform_customer_admin(actor_id, customer_id)
+
+    # ---- owner sales / finance administration ----
+
+    def financial_summary(self, actor_id: int) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        since_24h = iso_utc(utcnow() - timedelta(hours=24))
+
+        def grouped(sql: str, params: tuple[Any, ...] = ()) -> dict[str, int]:
+            rows = self.conn.execute(sql, params).fetchall()
+            return {str(row["currency"]): int(row["amount"] or 0) for row in rows}
+
+        service_sales = grouped(
+            "SELECT currency, COALESCE(SUM(amount), 0) AS amount"
+            " FROM customer_orders"
+            " WHERE kind IN ('purchase', 'renewal')"
+            " AND status IN ('paid', 'fulfilled') GROUP BY currency"
+        )
+        service_sales_24h = grouped(
+            "SELECT currency, COALESCE(SUM(amount), 0) AS amount"
+            " FROM customer_orders"
+            " WHERE kind IN ('purchase', 'renewal')"
+            " AND status IN ('paid', 'fulfilled') AND paid_at >= ?"
+            " GROUP BY currency",
+            (since_24h,),
+        )
+        approved_receipts = grouped(
+            "SELECT o.currency, COALESCE(SUM(o.amount), 0) AS amount"
+            " FROM payment_receipts AS r"
+            " JOIN customer_orders AS o ON o.id = r.order_id"
+            " WHERE r.status = 'approved' GROUP BY o.currency"
+        )
+        wallet_topups = grouped(
+            "SELECT currency, COALESCE(SUM(amount), 0) AS amount"
+            " FROM customer_orders"
+            " WHERE kind = 'wallet_topup' AND status = 'fulfilled'"
+            " GROUP BY currency"
+        )
+        wallet_balances = grouped(
+            "SELECT currency, COALESCE(SUM(balance), 0) AS amount"
+            " FROM wallet_accounts GROUP BY currency"
+        )
+
+        status_rows = self.conn.execute(
+            "SELECT status, COUNT(*) AS total FROM customer_orders GROUP BY status"
+        ).fetchall()
+        kind_rows = self.conn.execute(
+            "SELECT kind, COUNT(*) AS total FROM customer_orders GROUP BY kind"
+        ).fetchall()
+        return {
+            "customers_total": int(
+                self.conn.execute("SELECT COUNT(*) FROM platform_customers").fetchone()[0]
+            ),
+            "customers_active": int(
+                self.conn.execute(
+                    "SELECT COUNT(*) FROM platform_customers WHERE status = 'active'"
+                ).fetchone()[0]
+            ),
+            "orders_total": int(
+                self.conn.execute("SELECT COUNT(*) FROM customer_orders").fetchone()[0]
+            ),
+            "pending_receipts": int(
+                self.conn.execute(
+                    "SELECT COUNT(*) FROM payment_receipts WHERE status = 'pending'"
+                ).fetchone()[0]
+            ),
+            "service_sales": service_sales,
+            "service_sales_24h": service_sales_24h,
+            "approved_receipts": approved_receipts,
+            "wallet_topups": wallet_topups,
+            "wallet_balances": wallet_balances,
+            "orders_by_status": {
+                str(row["status"]): int(row["total"]) for row in status_rows
+            },
+            "orders_by_kind": {
+                str(row["kind"]): int(row["total"]) for row in kind_rows
+            },
+        }
+
+    def list_all_orders(
+        self,
+        actor_id: int,
+        *,
+        page: int = 0,
+        page_size: int = 8,
+        status: str = "all",
+        query: str = "",
+    ) -> Page:
+        require_master_admin(actor_id, self.master_admin_id)
+        allowed = {
+            "all", "pending_payment", "payment_review", "paid",
+            "fulfilled", "rejected", "cancelled",
+        }
+        state = str(status or "all").strip()
+        if state not in allowed:
+            raise ValueError("invalid order status filter")
+        safe_page = max(0, int(page))
+        safe_size = max(1, min(int(page_size), 20))
+        offset = safe_page * safe_size
+        clauses: list[str] = []
+        params: list[Any] = []
+        if state != "all":
+            clauses.append("o.status = ?")
+            params.append(state)
+        text = str(query or "").strip()
+        if text:
+            like = f"%{text}%"
+            search_parts = [
+                "o.public_id LIKE ?",
+                "c.display_name LIKE ?",
+                "c.username LIKE ?",
+            ]
+            params.extend([like, like, like])
+            if text.isdigit():
+                search_parts.extend([
+                    "c.telegram_user_id = ?",
+                    "o.id = ?",
+                ])
+                params.extend([int(text), int(text)])
+            clauses.append("(" + " OR ".join(search_parts) + ")")
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = self.conn.execute(
+            "SELECT o.*, c.telegram_user_id, c.display_name, c.username,"
+            " p.name AS plan_name, t.name AS tenant_name"
+            " FROM customer_orders AS o"
+            " JOIN platform_customers AS c ON c.id = o.customer_id"
+            " LEFT JOIN license_plans AS p ON p.id = o.plan_id"
+            " LEFT JOIN tenants AS t ON t.id = o.tenant_id"
+            + where
+            + " ORDER BY o.id DESC LIMIT ? OFFSET ?",
+            tuple(params + [safe_size + 1, offset]),
+        ).fetchall()
+        items = [dict(row) for row in rows]
+        return Page(
+            items=items[:safe_size],
+            page=safe_page,
+            page_size=safe_size,
+            has_previous=safe_page > 0,
+            has_next=len(items) > safe_size,
+        )
+
+    def get_order_admin(self, actor_id: int, order_id: int) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        row = self.conn.execute(
+            "SELECT o.*, c.telegram_user_id, c.display_name, c.username,"
+            " p.name AS plan_name, p.duration_days, t.name AS tenant_name"
+            " FROM customer_orders AS o"
+            " JOIN platform_customers AS c ON c.id = o.customer_id"
+            " LEFT JOIN license_plans AS p ON p.id = o.plan_id"
+            " LEFT JOIN tenants AS t ON t.id = o.tenant_id"
+            " WHERE o.id = ?",
+            (int(order_id),),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("order not found")
+        result = dict(row)
+        receipts = self.conn.execute(
+            "SELECT r.*, m.title AS method_title, m.kind AS method_kind"
+            " FROM payment_receipts AS r"
+            " JOIN payment_methods AS m ON m.id = r.payment_method_id"
+            " WHERE r.order_id = ? ORDER BY r.id DESC",
+            (int(order_id),),
+        ).fetchall()
+        result["receipts"] = [dict(item) for item in receipts]
+        wallet_tx = self.conn.execute(
+            "SELECT id, amount, kind, resulting_balance, created_at"
+            " FROM wallet_transactions WHERE order_id = ? ORDER BY id DESC",
+            (int(order_id),),
+        ).fetchall()
+        result["wallet_transactions"] = [dict(item) for item in wallet_tx]
+        return result
 
     # ---- owner-only commerce administration ----
 
@@ -495,6 +907,141 @@ class CustomerPortalService:
         assert row is not None
         return row
 
+    def get_platform_settings(self, actor_id: int) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        result = self.settings.all()
+        plan_id = result.get("trial_plan_id")
+        result["trial_plan_name"] = None
+        if plan_id is not None:
+            plan = PlanRepository(self.conn).get_by_id(int(plan_id))
+            if plan is not None:
+                result["trial_plan_name"] = str(plan["name"])
+        return result
+
+    def set_trial_plan(self, actor_id: int, plan_id: Optional[int]) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        selected: Optional[dict[str, Any]] = None
+        if plan_id is not None:
+            selected = PlanRepository(self.conn).get_by_id(int(plan_id))
+            if selected is None:
+                raise NotFoundError("plan not found")
+            if selected["status"] != "active":
+                raise ValueError("trial plan must be active")
+            if not int(selected.get("is_public", 1)):
+                raise ValueError("trial plan must be public")
+            if int(selected.get("trial_days", 0)) <= 0:
+                raise ValueError("trial plan must have trial days")
+        value = "" if selected is None else str(int(selected["id"]))
+        with transaction(self.conn):
+            self.settings.set_text("trial_plan_id", value, maximum=20)
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id),
+                tenant_id=None,
+                action="platform_setting.trial_plan",
+                entity_type="license_plan",
+                entity_id=value or "auto",
+                metadata={"plan_name": selected["name"] if selected else None},
+            )
+        return self.get_platform_settings(actor_id)
+
+    def list_trial_plan_candidates(self, actor_id: int) -> list[dict[str, Any]]:
+        require_master_admin(actor_id, self.master_admin_id)
+        rows = self.conn.execute(
+            "SELECT * FROM license_plans"
+            " WHERE status = 'active' AND is_public = 1 AND trial_days > 0"
+            " ORDER BY price ASC, id ASC"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_platform_text_setting(
+        self, actor_id: int, key: str, value: str
+    ) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        limits = {
+            "store_name": 80,
+            "support_contact": 120,
+            "maintenance_message": 500,
+        }
+        if key not in limits:
+            raise ValueError("invalid text setting")
+        clean_value = "" if key == "support_contact" and str(value).strip() == "-" else value
+        with transaction(self.conn):
+            result = self.settings.set_text(key, clean_value, maximum=limits[key])
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id), tenant_id=None,
+                action="platform_setting.update", entity_type="platform_setting",
+                entity_id=key, metadata={"configured": bool(result)},
+            )
+        return self.settings.all()
+
+    def set_platform_bool_setting(
+        self, actor_id: int, key: str, enabled: bool
+    ) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        with transaction(self.conn):
+            self.settings.set_bool(key, bool(enabled))
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id), tenant_id=None,
+                action="platform_setting.update", entity_type="platform_setting",
+                entity_id=key, metadata={"enabled": bool(enabled)},
+            )
+        return self.settings.all()
+
+    def get_payment_method_admin(self, actor_id: int, method_id: int) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        row = self.conn.execute(
+            "SELECT * FROM payment_methods WHERE id = ?", (int(method_id),)
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("payment method not found")
+        return dict(row)
+
+    def update_payment_method(
+        self,
+        actor_id: int,
+        method_id: int,
+        *,
+        title: str,
+        currency: str,
+        destination: str,
+        recipient: Optional[str] = None,
+        network: Optional[str] = None,
+        instructions: str = "",
+    ) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        current = self.get_payment_method_admin(actor_id, method_id)
+        code = _clean_text(currency, maximum=8).upper()
+        if not 3 <= len(code) <= 8 or not code.isalnum():
+            raise ValueError("currency must be 3-8 alphanumeric characters")
+        clean_recipient = (
+            _clean_text(recipient, maximum=100, required=False) or None
+            if current["kind"] == "card" else None
+        )
+        clean_network = (
+            _clean_text(network, maximum=40, required=False) or None
+            if current["kind"] == "crypto" else None
+        )
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE payment_methods SET title = ?, currency = ?, destination = ?,"
+                " recipient = ?, network = ?, instructions = ?, updated_at = ? WHERE id = ?",
+                (
+                    _clean_text(title, maximum=80), code,
+                    _clean_text(destination, maximum=180), clean_recipient, clean_network,
+                    _clean_text(instructions, maximum=500, required=False),
+                    now, int(method_id),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise NotFoundError("payment method not found")
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id), tenant_id=None,
+                action="payment_method.update", entity_type="payment_method",
+                entity_id=str(int(method_id)), metadata={"kind": str(current["kind"]), "currency": code},
+            )
+        return self.get_payment_method_admin(actor_id, method_id)
+
     def list_all_payment_methods(self, actor_id: int) -> list[dict[str, Any]]:
         require_master_admin(actor_id, self.master_admin_id)
         return [dict(row) for row in self.conn.execute(
@@ -523,6 +1070,88 @@ class CustomerPortalService:
         assert row is not None
         return dict(row)
 
+    def list_receipts_admin(
+        self,
+        actor_id: int,
+        *,
+        page: int = 0,
+        page_size: int = 8,
+        status: str = "all",
+        query: str = "",
+    ) -> Page:
+        require_master_admin(actor_id, self.master_admin_id)
+        allowed = {"all", "pending", "approved", "rejected"}
+        state = str(status or "all").strip()
+        if state not in allowed:
+            raise ValueError("invalid receipt status filter")
+        safe_page = max(0, int(page))
+        safe_size = max(1, min(int(page_size), 20))
+        offset = safe_page * safe_size
+        clauses: list[str] = []
+        params: list[Any] = []
+        if state != "all":
+            clauses.append("r.status = ?")
+            params.append(state)
+        text = str(query or "").strip()
+        if text:
+            like = f"%{text}%"
+            parts = [
+                "o.public_id LIKE ?",
+                "c.display_name LIKE ?",
+                "c.username LIKE ?",
+                "r.reference LIKE ?",
+            ]
+            params.extend([like, like, like, like])
+            if text.isdigit():
+                parts.extend([
+                    "c.telegram_user_id = ?",
+                    "r.id = ?",
+                    "o.id = ?",
+                ])
+                params.extend([int(text), int(text), int(text)])
+            clauses.append("(" + " OR ".join(parts) + ")")
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = self.conn.execute(
+            "SELECT r.*, o.public_id, o.amount, o.currency, o.kind,"
+            " o.status AS order_status, o.customer_id,"
+            " c.telegram_user_id, c.display_name, c.username,"
+            " m.title AS method_title, m.kind AS method_kind"
+            " FROM payment_receipts AS r"
+            " JOIN customer_orders AS o ON o.id = r.order_id"
+            " JOIN platform_customers AS c ON c.id = o.customer_id"
+            " JOIN payment_methods AS m ON m.id = r.payment_method_id"
+            + where
+            + " ORDER BY r.id DESC LIMIT ? OFFSET ?",
+            tuple(params + [safe_size + 1, offset]),
+        ).fetchall()
+        items = [dict(row) for row in rows]
+        return Page(
+            items=items[:safe_size],
+            page=safe_page,
+            page_size=safe_size,
+            has_previous=safe_page > 0,
+            has_next=len(items) > safe_size,
+        )
+
+    def get_receipt_admin(self, actor_id: int, receipt_id: int) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        row = self.conn.execute(
+            "SELECT r.*, o.public_id, o.amount, o.currency, o.kind,"
+            " o.status AS order_status, o.customer_id,"
+            " c.telegram_user_id, c.display_name, c.username,"
+            " m.title AS method_title, m.kind AS method_kind,"
+            " m.destination AS method_destination"
+            " FROM payment_receipts AS r"
+            " JOIN customer_orders AS o ON o.id = r.order_id"
+            " JOIN platform_customers AS c ON c.id = o.customer_id"
+            " JOIN payment_methods AS m ON m.id = r.payment_method_id"
+            " WHERE r.id = ?",
+            (int(receipt_id),),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("receipt not found")
+        return dict(row)
+
     def list_pending_receipts(self, actor_id: int, *, limit: int = 30) -> list[dict[str, Any]]:
         require_master_admin(actor_id, self.master_admin_id)
         rows = self.conn.execute(
@@ -537,9 +1166,15 @@ class CustomerPortalService:
         return [dict(row) for row in rows]
 
     def review_receipt(
-        self, actor_id: int, receipt_id: int, *, approve: bool
+        self,
+        actor_id: int,
+        receipt_id: int,
+        *,
+        approve: bool,
+        review_note: str = "",
     ) -> dict[str, Any]:
         require_master_admin(actor_id, self.master_admin_id)
+        note = _clean_text(review_note, maximum=300, required=False)
         now = iso_utc(utcnow())
         with transaction(self.conn):
             receipt_row = self.conn.execute(
@@ -552,16 +1187,22 @@ class CustomerPortalService:
                 raise NotFoundError("receipt not found")
             receipt = dict(receipt_row)
             if receipt["status"] != "pending" or receipt["order_status"] != "payment_review":
-                raise PaymentStateError("receipt was already reviewed")
+                raise PaymentStateError("این رسید قبلاً بررسی شده است.")
             receipt_status = "approved" if approve else "rejected"
             order_status = "paid" if approve else "rejected"
             changed = self.conn.execute(
-                "UPDATE payment_receipts SET status = ?, reviewed_by = ?, reviewed_at = ?"
-                " WHERE id = ? AND status = 'pending'",
-                (receipt_status, int(actor_id), now, int(receipt_id)),
+                "UPDATE payment_receipts SET status = ?, reviewed_by = ?, reviewed_at = ?,"
+                " review_note = ? WHERE id = ? AND status = 'pending'",
+                (
+                    receipt_status,
+                    int(actor_id),
+                    now,
+                    note or None,
+                    int(receipt_id),
+                ),
             )
             if changed.rowcount != 1:
-                raise PaymentStateError("receipt state changed")
+                raise PaymentStateError("وضعیت رسید تغییر کرده است؛ دوباره بررسی کنید.")
             if approve and receipt["kind"] == "wallet_topup":
                 self._credit_wallet(
                     int(receipt["customer_id"]), str(receipt["currency"]),
@@ -572,7 +1213,7 @@ class CustomerPortalService:
                 plan = PlanRepository(self.conn).get_by_id(int(receipt["plan_id"]))
                 license_row = LicenseRepository(self.conn).latest_by_tenant(int(receipt["tenant_id"]))
                 if plan is None or license_row is None:
-                    raise PaymentStateError("renewal target is unavailable")
+                    raise PaymentStateError("سرویس موردنظر برای تمدید در دسترس نیست.")
                 renew_license(
                     self.conn, license_id=int(license_row["id"]),
                     tenant_id=int(receipt["tenant_id"]), extra_days=int(plan["duration_days"]),
@@ -580,21 +1221,31 @@ class CustomerPortalService:
                 )
                 order_status = "fulfilled"
             changed = self.conn.execute(
-                "UPDATE customer_orders SET status = ?, updated_at = ?"
+                "UPDATE customer_orders SET status = ?, paid_at = ?, updated_at = ?"
                 " WHERE id = ? AND status = 'payment_review'",
-                (order_status, now, int(receipt["order_id"])),
+                (
+                    order_status,
+                    now if approve else None,
+                    now,
+                    int(receipt["order_id"]),
+                ),
             )
             if changed.rowcount != 1:
-                raise PaymentStateError("order state changed")
+                raise PaymentStateError("وضعیت سفارش تغییر کرده است؛ دوباره بررسی کنید.")
             AuditRepository(self.conn).append(
                 actor_id=int(actor_id),
                 tenant_id=(int(receipt["tenant_id"]) if receipt["tenant_id"] is not None else None),
                 action="payment.receipt_review", entity_type="payment_receipt",
                 entity_id=str(int(receipt_id)),
-                metadata={"approved": bool(approve), "order_kind": str(receipt["kind"])},
+                metadata={
+                    "approved": bool(approve),
+                    "order_kind": str(receipt["kind"]),
+                    "review_note_set": bool(note),
+                },
             )
         row = self.conn.execute(
-            "SELECT r.*, o.status AS order_status, c.telegram_user_id"
+            "SELECT r.*, o.status AS order_status, o.kind AS order_kind,"
+            " o.public_id, o.amount, o.currency, c.telegram_user_id"
             " FROM payment_receipts AS r JOIN customer_orders AS o ON o.id = r.order_id"
             " JOIN platform_customers AS c ON c.id = o.customer_id WHERE r.id = ?",
             (int(receipt_id),),

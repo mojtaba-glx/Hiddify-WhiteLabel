@@ -35,12 +35,23 @@ def customer_main_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def customer_home_text(display_name: str) -> str:
-    return (
-        f"👋 سلام {display_name}، خوش آمدید.\n\n"
-        "از اینجا می‌توانید ربات اختصاصی خود را بخرید، پرداخت را ثبت کنید، "
-        "سرویس‌ها و کیف پول را ببینید و ربات‌هایتان را راه‌اندازی کنید."
-    )
+def customer_home_text(
+    display_name: str,
+    *,
+    store_name: str = "فروش ربات اختصاصی",
+    support_contact: str = "",
+) -> str:
+    lines = [
+        f"👋 سلام {display_name}، خوش آمدید.",
+        "",
+        f"🤖 {store_name}",
+        "ربات فروش اختصاصی خودتان را تهیه کنید؛ راه‌اندازی، میزبانی و بروزرسانی از سمت سیستم انجام می‌شود.",
+        "",
+        "از منوی پایین می‌توانید خرید، سرویس‌ها، کیف پول و راه‌اندازی ربات را مدیریت کنید.",
+    ]
+    if support_contact:
+        lines.extend(["", f"☎️ پشتیبانی: {support_contact}"])
+    return "\n".join(lines)
 
 
 def plans_keyboard(plans: Iterable[dict[str, Any]]) -> InlineKeyboardMarkup:
@@ -115,7 +126,24 @@ def payment_instructions(method: dict[str, Any], order: dict[str, Any]) -> str:
 def services_text(services: Iterable[dict[str, Any]], *, timezone_name: str) -> str:
     rows = list(services)
     if not rows:
-        return "📋 سرویس‌های من\n\nهنوز رباتی راه‌اندازی نشده است."
+        return (
+            "📋 سرویس‌های من\n\n"
+            "❌ هنوز ربات فعالی ندارید.\n"
+            "برای شروع از «🛒 خرید ربات» یک پلن تهیه کنید."
+        )
+    tenant_status = {
+        "active": "🟢 فعال",
+        "suspended": "🟠 معلق",
+        "disabled": "🔴 غیرفعال",
+    }
+    license_status = {
+        "pending": "⏳ در انتظار",
+        "active": "🟢 فعال",
+        "grace": "🟡 مهلت تمدید",
+        "suspended": "🟠 معلق",
+        "expired": "🔴 منقضی",
+        "cancelled": "❌ لغوشده",
+    }
     lines = ["📋 سرویس‌های من"]
     for item in rows:
         expiry = "نامشخص"
@@ -123,9 +151,9 @@ def services_text(services: Iterable[dict[str, Any]], *, timezone_name: str) -> 
             expiry = format_tehran(parse_utc(str(item["expires_at"])), timezone_name)
         lines.extend([
             "",
-            f"🤖 {item['name']} · {item['slug']}",
-            f"وضعیت سرویس: {item['status']}",
-            f"لایسنس: {item.get('license_status') or 'ندارد'}",
+            f"🤖 {item['name']}",
+            f"وضعیت: {tenant_status.get(str(item['status']), str(item['status']))}",
+            f"لایسنس: {license_status.get(str(item.get('license_status') or ''), 'ندارد')}",
             f"پلن: {item.get('plan_name') or 'نامشخص'}",
             f"انقضا: {expiry}",
         ])
@@ -155,42 +183,78 @@ def orders_text(orders: Iterable[dict[str, Any]]) -> str:
     rows = list(orders)
     if not rows:
         return "🧾 سفارش‌های من\n\nسفارشی ثبت نشده است."
+    status_labels = {
+        "pending_payment": "⏳ در انتظار پرداخت",
+        "payment_review": "🔎 در انتظار بررسی",
+        "paid": "✅ پرداخت‌شده",
+        "fulfilled": "✅ تکمیل‌شده",
+        "cancelled": "❌ لغوشده",
+        "rejected": "🔴 ردشده",
+    }
+    kind_labels = {
+        "purchase": "خرید ربات",
+        "renewal": "تمدید",
+        "wallet_topup": "شارژ کیف پول",
+        "trial": "لایسنس تست",
+    }
     lines = ["🧾 سفارش‌های من"]
     for item in rows:
+        title = item.get("plan_name") or kind_labels.get(str(item["kind"]), "سفارش")
         lines.append(
-            f"\n{item['public_id']} · {item.get('plan_name') or 'شارژ کیف پول'}\n"
-            f"{int(item['amount']):,} {item['currency']} · {item['status']}"
+            f"\n{item['public_id']} · {title}\n"
+            f"{int(item['amount']):,} {item['currency']} · "
+            f"{status_labels.get(str(item['status']), str(item['status']))}"
         )
     return "\n".join(lines)
+
+
+def orders_keyboard(orders: Iterable[dict[str, Any]]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in orders:
+        if item["status"] == "pending_payment":
+            rows.append([InlineKeyboardButton(
+                f"❌ لغو {item['public_id']}",
+                callback_data=f"customer:cancelorder:{int(item['id'])}",
+            )])
+    rows.append([InlineKeyboardButton("🏠 منوی مشتری", callback_data="customer:home")])
+    return InlineKeyboardMarkup(rows)
 
 
 def features_text(plans: Iterable[dict[str, Any]]) -> str:
     rows = list(plans)
     lines = [
         "⭐ امکانات ربات اختصاصی", "",
-        "• AdminBot و UserBot مستقل با برند و توکن خودتان",
-        "• سرورها، نودها، کاربران و داده‌های جداشده با tenant_id",
-        "• کنترل لایسنس و توقف بدون حذف داده",
-        "• اجرای کم‌منبع روی Runtime مشترک و شاردشده",
-        "• مدیریت پلن، پرداخت، تیکت و گزارش‌ها در نسخه کامل",
+        "🤖 ربات مدیریت و ربات کاربران با نام و توکن خودتان",
+        "☁️ اجرا روی زیرساخت مرکزی؛ بدون نیاز به نصب ربات روی سرور شما",
+        "🔐 نگهداری امن و جداگانه اطلاعات هر مشتری",
+        "🛒 فروش و تمدید اشتراک",
+        "👛 کیف پول و مدیریت پرداخت",
+        "🖥 مدیریت سرور، نود و پلن‌های فروش",
+        "🔗 لینک هوشمند اشتراک",
+        "🎫 تیکت و پشتیبانی",
+        "📊 گزارش و مدیریت سرویس‌ها",
+        "♻️ بروزرسانی و نگهداری متمرکز",
     ]
     if rows:
         lines.extend(["", "📦 پلن‌های قابل خرید:"])
         for plan in rows:
             lines.append(
-                f"• {plan['name']}: {int(plan['price']):,} {plan['currency']} / {int(plan['duration_days'])} روز"
+                f"• {plan['name']} · {int(plan['price']):,} {plan['currency']} · "
+                f"{int(plan['duration_days'])} روز"
             )
     return "\n".join(lines)
 
 
 def guide_text() -> str:
     return (
-        "📝 راهنمای استفاده\n\n"
-        "1. از «خرید ربات» یک پلن انتخاب کنید.\n"
-        "2. پرداخت را با کارت‌به‌کارت یا ارز دیجیتال انجام دهید و رسید بفرستید.\n"
-        "3. پس از تأیید، از «راه‌اندازی ربات» نام و دو توکن BotFather را ثبت کنید.\n"
-        "4. سرویس و تاریخ لایسنس را از «سرویس‌های من» مدیریت کنید.\n\n"
-        "توکن‌ها بلافاصله از چت حذف و فقط به‌صورت رمزنگاری‌شده ذخیره می‌شوند."
+        "📝 راهنمای راه‌اندازی\n\n"
+        "1️⃣ از «🛒 خرید ربات» پلن موردنظر را انتخاب کنید.\n"
+        "2️⃣ هزینه را از کیف پول یا یکی از روش‌های پرداخت فعال پرداخت کنید.\n"
+        "3️⃣ بعد از تأیید پرداخت، وارد «🔑 راه‌اندازی ربات» شوید.\n"
+        "4️⃣ در BotFather دو ربات بسازید: یکی برای مدیریت و یکی برای کاربران.\n"
+        "5️⃣ توکن‌ها را طبق مراحل ربات ارسال کنید. شناسه تلگرام شما به‌صورت خودکار تشخیص داده می‌شود.\n"
+        "6️⃣ پس از تأیید توکن‌ها، ربات‌های اختصاصی شما روی سیستم راه‌اندازی می‌شوند.\n\n"
+        "🔐 پیام حاوی توکن پس از دریافت حذف می‌شود و توکن فقط به‌صورت رمزنگاری‌شده نگهداری می‌شود."
     )
 
 

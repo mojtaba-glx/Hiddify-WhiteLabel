@@ -641,10 +641,17 @@ class LicenseRepository:
         except sqlite3.IntegrityError as exc:
             # Re-read to detect whether the failure was a current-license
             # conflict (partial unique index) or a FK/CHECK violation.
+            # sqlite_errorname is not consistently available on Python 3.10,
+            # so retain a message fallback for the supported runtime matrix.
             existing = self.current_usable(int(tenant_id))
+            error_name = str(getattr(exc, "sqlite_errorname", "") or "")
+            unique_error = (
+                error_name == "SQLITE_CONSTRAINT_UNIQUE"
+                or "UNIQUE constraint failed" in str(exc)
+            )
             if (
                 status in CURRENT_LICENSE_STATUSES
-                and getattr(exc, "sqlite_errorname", "") == "SQLITE_CONSTRAINT_UNIQUE"
+                and unique_error
                 and existing is not None
             ):
                 raise LicenseConflictError(

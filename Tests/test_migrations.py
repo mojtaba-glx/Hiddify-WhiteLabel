@@ -54,6 +54,8 @@ def test_migration_is_idempotent(db_path) -> None:
     assert "0004_customer_commerce" in versions
     assert "0005_tenant_business" in versions
     assert "0006_panel_credentials" in versions
+    assert "0007_platform_settings" in versions
+    assert "0008_order_paid_at" in versions
 
 
 def test_foreign_keys_enforced(conn, factories) -> None:
@@ -84,6 +86,8 @@ def test_checksums_recorded(db_path) -> None:
     assert len(recorded["0004_customer_commerce"]) == 64
     assert len(recorded["0005_tenant_business"]) == 64
     assert len(recorded["0006_panel_credentials"]) == 64
+    assert len(recorded["0007_platform_settings"]) == 64
+    assert len(recorded["0008_order_paid_at"]) == 64
 
 
 def test_checksum_mismatch_detected(db_path, tmp_path) -> None:

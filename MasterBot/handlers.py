@@ -33,10 +33,21 @@ from MasterBot.views import (
     license_detail,
     licenses_view,
     main_menu_keyboard,
+    financial_dashboard_view,
+    order_detail_view,
+    orders_view,
+    payment_history_view,
+    payment_method_detail,
+    payment_receipt_detail,
+    platform_customer_detail,
+    platform_customers_view,
+    platform_settings_view,
     plan_detail,
     plans_view,
     tenant_detail,
     tenants_view,
+    trial_plan_picker,
+    warnings_text,
 )
 from Shared.access import is_master_admin
 from Shared.redaction import get_logger, safe_format_exception
@@ -78,14 +89,14 @@ async def access_gate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if update.callback_query and str(update.callback_query.data or "").startswith("customer:"):
         return
     if update.callback_query:
-        await update.callback_query.answer("Access denied", show_alert=True)
+        await update.callback_query.answer("دسترسی مجاز نیست.", show_alert=True)
         raise ApplicationHandlerStop
     if update.effective_message:
         text = str(getattr(update.effective_message, "text", "") or "").strip()
         if text.startswith("/") and text.split(maxsplit=1)[0].split("@", 1)[0] not in {
             "/start", "/menu", "/cancel"
         }:
-            await update.effective_message.reply_text("Access denied")
+            await update.effective_message.reply_text("دسترسی مجاز نیست.")
             raise ApplicationHandlerStop
         # Customer text, image receipts and the three public commands proceed.
         return
@@ -106,7 +117,8 @@ async def show_main(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.clear()
     await _render(
         update,
-        "🧭 مدیریت White-Label\n\nبخش موردنظر را انتخاب کنید:",
+        "🧭 پنل مدیریت سیستم فروش ربات\n\n"
+        "از این بخش کاربران، ربات‌ها، لایسنس‌ها، پرداخت‌ها و تنظیمات کل سیستم را مدیریت می‌کنید.",
         main_menu_keyboard(),
     )
 
@@ -123,6 +135,49 @@ def _parse_int(raw: str, label: str) -> int:
     if value < 0:
         raise ValueError(f"{label} must be non-negative")
     return value
+
+
+async def _show_orders(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, page_number: int = 0
+) -> None:
+    actor = int(_actor_id(update) or 0)
+    status = str(context.user_data.get("order_status_filter") or "all")
+    query = str(context.user_data.get("order_query") or "")
+    page = _portal(context).list_all_orders(
+        actor, page=page_number, status=status, query=query
+    )
+    text, keyboard = orders_view(page, status=status, query=query)
+    await _render(update, text, keyboard)
+
+
+async def _show_order(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: int
+) -> None:
+    actor = int(_actor_id(update) or 0)
+    order = _portal(context).get_order_admin(actor, int(order_id))
+    text, keyboard = order_detail_view(order)
+    await _render(update, text, keyboard)
+
+
+async def _show_platform_customers(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, page_number: int = 0
+) -> None:
+    actor = int(_actor_id(update) or 0)
+    query = str(context.user_data.get("platform_customer_query") or "")
+    page = _portal(context).list_platform_customers(
+        actor, page=page_number, query=query
+    )
+    text, keyboard = platform_customers_view(page, query=query)
+    await _render(update, text, keyboard)
+
+
+async def _show_platform_customer(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, customer_id: int
+) -> None:
+    actor = int(_actor_id(update) or 0)
+    customer = _portal(context).get_platform_customer_admin(actor, int(customer_id))
+    text, keyboard = platform_customer_detail(customer)
+    await _render(update, text, keyboard)
 
 
 async def _show_tenants(
@@ -162,6 +217,18 @@ async def _show_plans(
     await _render(update, text, keyboard)
 
 
+async def _show_plan(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, plan_id: int
+) -> None:
+    actor = int(_actor_id(update) or 0)
+    row = _service(context).get_plan(actor, int(plan_id))
+    settings = _portal(context).get_platform_settings(actor)
+    text, keyboard = plan_detail(
+        row, trial_plan_id=settings.get("trial_plan_id")
+    )
+    await _render(update, text, keyboard)
+
+
 async def _show_licenses(
     update: Update, context: ContextTypes.DEFAULT_TYPE, page_number: int = 0
 ) -> None:
@@ -179,6 +246,53 @@ async def _show_license(
     row = _service(context).get_license(int(_actor_id(update) or 0), license_id)
     timezone_name = str(context.application.bot_data.get("display_timezone") or "Asia/Tehran")
     text, keyboard = license_detail(row, timezone_name=timezone_name)
+    await _render(update, text, keyboard)
+
+
+async def _show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    actor = int(_actor_id(update) or 0)
+    settings = _portal(context).get_platform_settings(actor)
+    text, keyboard = platform_settings_view(settings)
+    await _render(update, text, keyboard)
+
+
+async def _show_payment_history(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, page_number: int = 0
+) -> None:
+    actor = int(_actor_id(update) or 0)
+    status = str(context.user_data.get("receipt_status_filter") or "all")
+    query = str(context.user_data.get("receipt_query") or "")
+    page = _portal(context).list_receipts_admin(
+        actor, page=page_number, status=status, query=query
+    )
+    text, keyboard = payment_history_view(page, status=status, query=query)
+    await _render(update, text, keyboard)
+
+
+async def _show_receipt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    receipt_id: int,
+    *,
+    send_image: bool = False,
+) -> None:
+    actor = int(_actor_id(update) or 0)
+    receipt = _portal(context).get_receipt_admin(actor, int(receipt_id))
+    text, keyboard = payment_receipt_detail(receipt)
+    await _render(update, text, keyboard)
+    if send_image and receipt.get("telegram_file_id") and update.effective_chat:
+        await update.effective_chat.send_photo(
+            photo=str(receipt["telegram_file_id"]),
+            caption=f"تصویر رسید #{int(receipt_id)}",
+        )
+
+
+async def _show_payment_method(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, method_id: int
+) -> None:
+    actor = int(_actor_id(update) or 0)
+    method = _portal(context).get_payment_method_admin(actor, int(method_id))
+    text, keyboard = payment_method_detail(method)
     await _render(update, text, keyboard)
 
 
@@ -205,12 +319,12 @@ async def _show_payments(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     for method in methods:
         state = "🟢" if method["status"] == "active" else "⚫"
         lines.append(f"{state} #{int(method['id'])} · {method['kind']} · {method['title']} · {method['currency']}")
-        next_state = "disabled" if method["status"] == "active" else "active"
         rows.append([InlineKeyboardButton(
-            f"{'⛔' if next_state == 'disabled' else '✅'} {method['title']}",
-            callback_data=f"payment:method:{int(method['id'])}:{next_state}",
+            f"{state} {method['title']} · {method['currency']}",
+            callback_data=f"payment:view:{int(method['id'])}",
         )])
     rows.extend([
+        [InlineKeyboardButton("📚 تاریخچه پرداخت‌ها", callback_data="payment:history")],
         [
             InlineKeyboardButton("➕ کارت‌به‌کارت", callback_data="payment:add:card"),
             InlineKeyboardButton("➕ ارز دیجیتال", callback_data="payment:add:crypto"),
@@ -237,8 +351,97 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data == "menu:main":
             await show_main(update, context)
             return
+        if data == "menu:orders":
+            context.user_data["order_status_filter"] = "all"
+            context.user_data.pop("order_query", None)
+            await _show_orders(update, context)
+            return
+        if data.startswith("orderadmin:filter:"):
+            status = data.split(":", 2)[2]
+            context.user_data["order_status_filter"] = status
+            context.user_data.pop("order_query", None)
+            await _show_orders(update, context)
+            return
+        if data.startswith("orderadmin:page:"):
+            parts = data.split(":")
+            if len(parts) != 4:
+                raise ValueError("invalid order page callback")
+            context.user_data["order_status_filter"] = parts[2]
+            await _show_orders(update, context, _parse_int(parts[3], "page"))
+            return
+        if data == "orderadmin:search":
+            context.user_data["flow"] = {"kind": "order_search"}
+            await _render(
+                update,
+                "🔎 شناسه سفارش، نام، یوزرنیم یا شناسه تلگرام مشتری را بفرستید:",
+                back_keyboard("menu:orders"),
+            )
+            return
+        if data.startswith("orderadmin:view:"):
+            await _show_order(
+                update, context, _parse_int(data.rsplit(":", 1)[1], "order id")
+            )
+            return
+        if data == "payment:history":
+            context.user_data["receipt_status_filter"] = "all"
+            context.user_data.pop("receipt_query", None)
+            await _show_payment_history(update, context)
+            return
+        if data.startswith("payment:history:filter:"):
+            status = data.split(":", 3)[3]
+            context.user_data["receipt_status_filter"] = status
+            context.user_data.pop("receipt_query", None)
+            await _show_payment_history(update, context)
+            return
+        if data.startswith("payment:history:page:"):
+            parts = data.split(":")
+            if len(parts) != 5:
+                raise ValueError("invalid receipt page callback")
+            context.user_data["receipt_status_filter"] = parts[3]
+            await _show_payment_history(update, context, _parse_int(parts[4], "page"))
+            return
+        if data == "payment:history:search":
+            context.user_data["flow"] = {"kind": "receipt_search"}
+            await _render(
+                update,
+                "🔎 شناسه پرداخت، سفارش، نام، یوزرنیم یا کد پیگیری را بفرستید:",
+                back_keyboard("payment:history"),
+            )
+            return
+        if data.startswith("payment:history:view:"):
+            await _show_receipt(
+                update,
+                context,
+                _parse_int(data.rsplit(":", 1)[1], "receipt id"),
+                send_image=True,
+            )
+            return
         if data == "menu:payments":
             await _show_payments(update, context)
+            return
+        if data.startswith("payment:view:"):
+            await _show_payment_method(
+                update, context, _parse_int(data.rsplit(":", 1)[1], "method id")
+            )
+            return
+        if data.startswith("payment:edit:"):
+            method_id = _parse_int(data.rsplit(":", 1)[1], "method id")
+            method = _portal(context).get_payment_method_admin(actor, method_id)
+            context.user_data["flow"] = {
+                "kind": "payment_method_edit",
+                "method_id": method_id,
+                "payment_kind": str(method["kind"]),
+            }
+            instructions = (
+                "عنوان | ارز | شماره کارت | نام صاحب کارت | توضیح اختیاری"
+                if method["kind"] == "card" else
+                "عنوان | ارز | آدرس کیف پول | شبکه | توضیح اختیاری"
+            )
+            await _render(
+                update,
+                f"✏️ ویرایش روش پرداخت #{method_id}\n\n{instructions}",
+                back_keyboard(f"payment:view:{method_id}"),
+            )
             return
         if data.startswith("payment:add:"):
             kind = data.rsplit(":", 1)[1]
@@ -254,51 +457,105 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         if data.startswith("payment:method:"):
             _, _, method_raw, status = data.split(":", 3)
-            _portal(context).set_payment_method_status(actor, _parse_int(method_raw, "method id"), status)
-            await _show_payments(update, context)
+            method_id = _parse_int(method_raw, "method id")
+            _portal(context).set_payment_method_status(actor, method_id, status)
+            await _show_payment_method(update, context, method_id)
             return
         if data.startswith("payment:receipt:"):
             receipt_id = _parse_int(data.rsplit(":", 1)[1], "receipt id")
-            receipt = next(
-                (row for row in _portal(context).list_pending_receipts(actor, limit=100)
-                 if int(row["id"]) == receipt_id),
-                None,
-            )
-            if receipt is None:
-                raise NotFoundError("receipt not found")
-            reference = str(receipt.get("reference") or "تصویر رسید")
-            text = (
-                f"🧾 رسید #{receipt_id}\n\n"
-                f"مشتری: {receipt['display_name']} · {receipt['telegram_user_id']}\n"
-                f"سفارش: {receipt['public_id']} · {receipt['kind']}\n"
-                f"مبلغ: {int(receipt['amount']):,} {receipt['currency']}\n"
-                f"روش: {receipt['method_title']}\n"
-                f"پیگیری: {reference}"
-            )
-            context.user_data["receipt_preview"] = receipt
-            await _render(
-                update, text, InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ تأیید پرداخت", callback_data=f"payment:approve:{receipt_id}")],
-                    [InlineKeyboardButton("❌ رد پرداخت", callback_data=f"payment:reject:{receipt_id}")],
-                    [InlineKeyboardButton("↩️ پرداخت‌ها", callback_data="menu:payments")],
-                ])
-            )
-            if receipt.get("telegram_file_id") and update.effective_chat:
-                await update.effective_chat.send_photo(
-                    photo=str(receipt["telegram_file_id"]), caption=f"تصویر رسید #{receipt_id}"
-                )
+            await _show_receipt(update, context, receipt_id, send_image=True)
             return
         if data.startswith("payment:approve:") or data.startswith("payment:reject:"):
             parts = data.split(":")
             action, receipt_raw = parts[1], parts[2]
             receipt_id = _parse_int(receipt_raw, "receipt id")
+            if action == "reject":
+                context.user_data["flow"] = {
+                    "kind": "payment_reject_note",
+                    "receipt_id": receipt_id,
+                }
+                await _render(
+                    update,
+                    "❌ دلیل رد پرداخت را بنویسید.\n"
+                    "اگر توضیحی ندارید، فقط - بفرستید.",
+                    back_keyboard(f"payment:receipt:{receipt_id}"),
+                )
+                return
             context.user_data["confirm"] = {
-                "kind": "payment_review", "receipt_id": receipt_id, "approve": action == "approve",
+                "kind": "payment_review",
+                "receipt_id": receipt_id,
+                "approve": True,
+                "review_note": "",
             }
             await _render(
                 update,
-                "تأیید نهایی می‌کنید؟ این عملیات فقط یک‌بار انجام می‌شود.",
+                "✅ پرداخت تأیید شود؟ این عملیات فقط یک‌بار انجام می‌شود.",
                 confirm_keyboard("payment_review", f"payment:receipt:{receipt_id}"),
+            )
+            return
+        if data == "menu:customers":
+            context.user_data.pop("platform_customer_query", None)
+            await _show_platform_customers(update, context)
+            return
+        if data.startswith("customeradmin:page:"):
+            await _show_platform_customers(
+                update, context, _parse_int(data.rsplit(":", 1)[1], "page")
+            )
+            return
+        if data == "customeradmin:search":
+            context.user_data["flow"] = {"kind": "platform_customer_search"}
+            await _render(
+                update,
+                "🔎 نام، یوزرنیم، شناسه تلگرام یا شناسه داخلی کاربر را بفرستید:",
+                back_keyboard("customeradmin:page:0"),
+            )
+            return
+        if data.startswith("customeradmin:view:"):
+            await _show_platform_customer(
+                update, context, _parse_int(data.rsplit(":", 1)[1], "customer id")
+            )
+            return
+        if data.startswith("customeradmin:wallet:"):
+            parts = data.split(":")
+            if len(parts) != 4:
+                raise ValueError("invalid wallet adjustment callback")
+            direction = parts[2]
+            customer_id = _parse_int(parts[3], "customer id")
+            if direction not in ("add", "subtract"):
+                raise ValueError("invalid wallet adjustment direction")
+            _portal(context).get_platform_customer_admin(actor, customer_id)
+            context.user_data["flow"] = {
+                "kind": "customer_wallet_adjust",
+                "customer_id": customer_id,
+                "direction": direction,
+            }
+            label = "افزایش" if direction == "add" else "کاهش"
+            await _render(
+                update,
+                f"👛 {label} موجودی کیف پول\n\n"
+                "اطلاعات را بفرستید:\n"
+                "ارز | مبلغ | یادداشت اختیاری\n\n"
+                "مثال: IRR | 500000 | اصلاح پرداخت",
+                back_keyboard(f"customeradmin:view:{customer_id}"),
+            )
+            return
+        if data.startswith("customeradmin:status:"):
+            _, _, customer_raw, status = data.split(":", 3)
+            customer_id = _parse_int(customer_raw, "customer id")
+            if status not in ("active", "blocked"):
+                raise ValueError("invalid customer status")
+            context.user_data["confirm"] = {
+                "kind": "platform_customer_status",
+                "customer_id": customer_id,
+                "status": status,
+            }
+            await _render(
+                update,
+                "تغییر وضعیت این کاربر را تأیید می‌کنید؟",
+                confirm_keyboard(
+                    "platform_customer_status",
+                    f"customeradmin:view:{customer_id}",
+                ),
             )
             return
         if data == "menu:tenants":
@@ -312,7 +569,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             context.user_data["flow"] = {"kind": "tenant_new"}
             await _render(
                 update,
-                "➕ اطلاعات مشتری را بفرستید:\nنام | slug | شناسه عددی مالک",
+                "➕ اطلاعات ربات مشتری را بفرستید:\nنام | شناسه انگلیسی | شناسه عددی مالک",
                 back_keyboard("tenant:page:0"),
             )
             return
@@ -320,13 +577,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             context.user_data["flow"] = {"kind": "provision_details"}
             await _render(
                 update,
-                "🚀 اطلاعات مشتری را بفرستید:\nنام | slug | شناسه عددی مالک",
+                "🚀 اطلاعات ربات مشتری را بفرستید:\nنام | شناسه انگلیسی | شناسه عددی مالک",
                 back_keyboard("tenant:page:0"),
             )
             return
         if data == "tenant:search":
             context.user_data["flow"] = {"kind": "tenant_search"}
-            await _render(update, "🔎 نام، slug یا شناسه مالک را بفرستید:", back_keyboard("tenant:page:0"))
+            await _render(update, "🔎 نام، شناسه انگلیسی یا شناسه مالک را بفرستید:", back_keyboard("tenant:page:0"))
             return
         if data.startswith("tenant:view:"):
             await _show_tenant(update, context, _parse_int(data.rsplit(":", 1)[1], "tenant id"))
@@ -337,7 +594,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             context.user_data["flow"] = {"kind": "tenant_edit", "tenant_id": tenant_id}
             await _render(
                 update,
-                "✏️ اطلاعات جدید را بفرستید:\nنام | slug | شناسه عددی مالک",
+                "✏️ اطلاعات جدید را بفرستید:\nنام | شناسه انگلیسی | شناسه عددی مالک",
                 back_keyboard(f"tenant:view:{tenant_id}"),
             )
             return
@@ -409,9 +666,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await _render(update, "🔎 نام، وضعیت یا شناسه پلن را بفرستید:", back_keyboard("plan:page:0"))
             return
         if data.startswith("plan:view:"):
-            row = service.get_plan(actor, _parse_int(data.rsplit(":", 1)[1], "plan id"))
-            text, keyboard = plan_detail(row)
-            await _render(update, text, keyboard)
+            await _show_plan(
+                update, context, _parse_int(data.rsplit(":", 1)[1], "plan id")
+            )
             return
         if data.startswith("plan:edit:"):
             plan_id = _parse_int(data.rsplit(":", 1)[1], "plan id")
@@ -429,9 +686,34 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             context.user_data["flow"] = {"kind": "plan_commerce", "plan_id": plan_id}
             await _render(
                 update,
-                "🛍 تنظیمات فروش پلن را بفرستید:\nارز | نمایش عمومی (0 یا 1) | روزهای لایسنس تست\n\nمثال: USD | 1 | 7",
+                "💰 تنظیمات فروش پلن\n\n"
+                "ارز و تعداد روز لایسنس تست را بفرستید:\n"
+                "ارز | روزهای تست\n\n"
+                "مثال: IRR | 3\n"
+                "برای غیرفعال بودن تست، تعداد روز را 0 بزنید.",
                 back_keyboard(f"plan:view:{plan_id}"),
             )
+            return
+        if data.startswith("plan:public:"):
+            _, _, plan_raw, public_raw = data.split(":", 3)
+            plan_id = _parse_int(plan_raw, "plan id")
+            public_value = _parse_int(public_raw, "public flag")
+            if public_value not in (0, 1):
+                raise ValueError("invalid public flag")
+            row = service.get_plan(actor, plan_id)
+            _portal(context).configure_plan_commerce(
+                actor,
+                plan_id,
+                currency=str(row.get("currency") or "USD"),
+                is_public=bool(public_value),
+                trial_days=int(row.get("trial_days") or 0),
+            )
+            await _show_plan(update, context, plan_id)
+            return
+        if data.startswith("plan:trial:"):
+            plan_id = _parse_int(data.rsplit(":", 1)[1], "plan id")
+            _portal(context).set_trial_plan(actor, plan_id)
+            await _show_plan(update, context, plan_id)
             return
         if data.startswith("plan:status:"):
             _, _, plan_raw, status = data.split(":", 3)
@@ -503,6 +785,29 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             pending = context.user_data.pop("confirm", None)
             if not isinstance(pending, dict) or pending.get("kind") != expected:
                 raise ValueError("confirmation expired")
+            if expected == "wallet_adjust":
+                result = _portal(context).adjust_customer_wallet(
+                    actor,
+                    int(pending["customer_id"]),
+                    currency=str(pending["currency"]),
+                    amount=int(pending["amount"]),
+                    note=str(pending.get("note") or ""),
+                )
+                await update.effective_chat.send_message(
+                    f"✅ کیف پول اصلاح شد.\n"
+                    f"تغییر: {int(result['amount']):+,} {result['currency']}\n"
+                    f"موجودی جدید: {int(result['balance']):,} {result['currency']}"
+                )
+                await _show_platform_customer(
+                    update, context, int(result["customer_id"])
+                )
+                return
+            if expected == "platform_customer_status":
+                row = _portal(context).set_platform_customer_status(
+                    actor, int(pending["customer_id"]), str(pending["status"])
+                )
+                await _show_platform_customer(update, context, int(row["id"]))
+                return
             if expected == "tenant_status":
                 row = service.set_tenant_status(
                     actor, int(pending["tenant_id"]), str(pending["status"])
@@ -526,8 +831,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 row = service.set_plan_status(
                     actor, int(pending["plan_id"]), str(pending["status"])
                 )
-                text, keyboard = plan_detail(row)
-                await _render(update, text, keyboard)
+                await _show_plan(update, context, int(row["id"]))
                 return
             if expected == "renew":
                 row = service.renew(
@@ -547,44 +851,58 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await _show_license(update, context, int(row["id"]))
                 return
             if expected == "payment_review":
+                approved = bool(pending["approve"])
                 reviewed = _portal(context).review_receipt(
-                    actor, int(pending["receipt_id"]), approve=bool(pending["approve"])
+                    actor,
+                    int(pending["receipt_id"]),
+                    approve=approved,
+                    review_note=str(pending.get("review_note") or ""),
                 )
-                notification = (
-                    "✅ پرداخت شما تأیید شد."
-                    if bool(pending["approve"]) else "❌ پرداخت شما تأیید نشد."
-                )
-                if bool(pending["approve"]) and reviewed["order_status"] == "paid":
-                    notification += " اکنون از بخش «راه‌اندازی ربات» ادامه دهید."
+                if not approved:
+                    note = str(reviewed.get("review_note") or "").strip()
+                    notification = f"❌ پرداخت سفارش {reviewed['public_id']} تأیید نشد."
+                    if note:
+                        notification += f"\n\nعلت: {note}"
+                    notification += "\n\nدر صورت نیاز با پشتیبانی تماس بگیرید."
+                elif reviewed["order_kind"] == "wallet_topup":
+                    notification = (
+                        f"✅ شارژ کیف پول {reviewed['public_id']} تأیید شد.\n"
+                        f"مبلغ: {int(reviewed['amount']):,} {reviewed['currency']}"
+                    )
+                elif reviewed["order_kind"] == "renewal":
+                    notification = (
+                        f"✅ تمدید {reviewed['public_id']} با موفقیت انجام شد.\n"
+                        f"مبلغ: {int(reviewed['amount']):,} {reviewed['currency']}"
+                    )
+                elif reviewed["order_status"] == "paid":
+                    notification = (
+                        f"✅ پرداخت سفارش {reviewed['public_id']} تأیید شد.\n\n"
+                        "🔑 اکنون از بخش «راه‌اندازی ربات» ادامه دهید."
+                    )
+                else:
+                    notification = f"✅ پرداخت سفارش {reviewed['public_id']} تأیید شد."
                 try:
-                    await context.bot.send_message(chat_id=int(reviewed["telegram_user_id"]), text=notification)
+                    await context.bot.send_message(
+                        chat_id=int(reviewed["telegram_user_id"]), text=notification
+                    )
                 except Exception as exc:
-                    logger.warning("Payment notification could not be sent: %s", safe_format_exception(exc))
+                    logger.warning(
+                        "Payment notification could not be sent: %s",
+                        safe_format_exception(exc),
+                    )
                 await _show_payments(update, context)
                 return
             raise ValueError("unknown confirmation")
 
         if data == "menu:stats":
             stats = service.statistics(actor)
-            text = (
-                "📊 آمار سامانه\n\n"
-                f"مشتریان: {stats['tenants_total']} (فعال: {stats['tenants_active']})\n"
-                f"ربات‌های فعال: {stats['bots_active']}\n"
-                f"پلن‌های فعال: {stats['plans_active']}\n"
-                f"لایسنس‌های فعال: {stats['licenses_active']}\n"
-                f"لایسنس‌های معلق: {stats['licenses_suspended']}\n"
-                f"هشدارهای باز: {stats['warnings_open']}"
-            )
-            await _render(update, text, back_keyboard())
+            finance = _portal(context).financial_summary(actor)
+            text, keyboard = financial_dashboard_view(stats, finance)
+            await _render(update, text, keyboard)
             return
         if data == "menu:warnings" or data.startswith("warning:page:"):
             page_no = 0 if data == "menu:warnings" else _parse_int(data.rsplit(":", 1)[1], "page")
             page = service.list_warnings(actor, page=page_no)
-            lines = ["⚠️ هشدارهای باز"]
-            for item in page.items:
-                lines.append(f"#{int(item['id'])} · {item['event_type']} · {item['status']}")
-            if not page.items:
-                lines.append("هشداری وجود ندارد.")
             buttons = []
             if page.has_previous:
                 buttons.append(InlineKeyboardButton("⬅️", callback_data=f"warning:page:{page.page-1}"))
@@ -592,7 +910,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 buttons.append(InlineKeyboardButton("➡️", callback_data=f"warning:page:{page.page+1}"))
             rows = [buttons] if buttons else []
             rows.append([InlineKeyboardButton("↩️ منوی اصلی", callback_data="menu:main")])
-            await _render(update, "\n".join(lines), InlineKeyboardMarkup(rows))
+            await _render(update, warnings_text(page.items), InlineKeyboardMarkup(rows))
             return
         if data == "menu:audit" or data.startswith("audit:page:"):
             page_no = 0 if data == "menu:audit" else _parse_int(data.rsplit(":", 1)[1], "page")
@@ -607,12 +925,50 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await _render(update, audit_text(page.items), InlineKeyboardMarkup(rows))
             return
         if data == "menu:settings":
-            timezone_name = str(context.application.bot_data.get("display_timezone") or "Asia/Tehran")
-            await _render(
-                update,
-                f"⚙️ تنظیمات امن\n\nمنطقه زمانی: {timezone_name}\nمدیر اصلی: {service.master_admin_id}\nموتور داده: SQLite",
-                back_keyboard(),
+            await _show_settings(update, context)
+            return
+        if data == "settings:trialplan":
+            settings = _portal(context).get_platform_settings(actor)
+            plans = _portal(context).list_trial_plan_candidates(actor)
+            text, keyboard = trial_plan_picker(
+                plans, selected_plan_id=settings.get("trial_plan_id")
             )
+            await _render(update, text, keyboard)
+            return
+        if data == "settings:trialplan:auto":
+            _portal(context).set_trial_plan(actor, None)
+            await _show_settings(update, context)
+            return
+        if data.startswith("settings:trialplan:set:"):
+            plan_id = _parse_int(data.rsplit(":", 1)[1], "plan id")
+            _portal(context).set_trial_plan(actor, plan_id)
+            await _show_settings(update, context)
+            return
+        if data.startswith("settings:edit:"):
+            key = data.rsplit(":", 1)[1]
+            prompts = {
+                "store_name": "🏷 نام جدید فروشگاه را بفرستید:",
+                "support_contact": "☎️ آیدی یا راه ارتباطی پشتیبانی را بفرستید. برای حذف، - ارسال کنید.",
+                "maintenance_message": "📝 پیام زمان توقف فروش را بفرستید:",
+            }
+            if key not in prompts:
+                raise ValueError("invalid setting key")
+            context.user_data["flow"] = {"kind": "platform_setting_text", "setting_key": key}
+            await _render(update, prompts[key], back_keyboard("menu:settings"))
+            return
+        if data == "settings:toggle:sales":
+            current = _portal(context).get_platform_settings(actor)
+            _portal(context).set_platform_bool_setting(
+                actor, "sales_enabled", not bool(current["sales_enabled"])
+            )
+            await _show_settings(update, context)
+            return
+        if data == "settings:toggle:trial":
+            current = _portal(context).get_platform_settings(actor)
+            _portal(context).set_platform_bool_setting(
+                actor, "trial_enabled", not bool(current["trial_enabled"])
+            )
+            await _show_settings(update, context)
             return
         raise ValueError("unknown callback")
     except (
@@ -657,7 +1013,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "owner_telegram_id": _parse_int(fields[2], "owner id"),
             }
             await update.effective_message.reply_text(
-                "🔐 توکن AdminBot مشتری را بفرستید؛ پیام بلافاصله حذف می‌شود.",
+                "🔐 توکن ربات مدیریت مشتری را بفرستید؛ پیام بلافاصله حذف می‌شود.",
                 reply_markup=back_keyboard("tenant:page:0"),
             )
             return
@@ -678,7 +1034,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 flow["admin_bot"] = prepared
                 flow["kind"] = "provision_user_token"
                 await update.effective_chat.send_message(
-                    "✅ AdminBot تأیید شد. اکنون توکن UserBot مشتری را بفرستید.",
+                    "✅ ربات مدیریت تأیید شد. اکنون توکن ربات کاربران را بفرستید.",
                     reply_markup=back_keyboard("tenant:page:0"),
                 )
                 return
@@ -695,10 +1051,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             context.user_data.pop("flow", None)
             await update.effective_chat.send_message(
-                "🔐 Secretهای یک‌بارمصرف Webhook\n\n"
-                f"AdminBot: {result.webhook_secrets.admin}\n"
-                f"UserBot: {result.webhook_secrets.user}\n\n"
-                "پس از ثبت Webhook این پیام را حذف کنید؛ فقط Hash در دیتابیس ذخیره شده است.",
+                "🔐 کلیدهای یک‌بارمصرف وب‌هوک\n\n"
+                f"ربات مدیریت: {result.webhook_secrets.admin}\n"
+                f"ربات کاربران: {result.webhook_secrets.user}\n\n"
+                "پس از ثبت وب‌هوک این پیام را حذف کنید؛ فقط نسخه هش‌شده در دیتابیس ذخیره شده است.",
                 protect_content=True,
             )
             row = service.get_tenant(actor, result.tenant_id)
@@ -734,6 +1090,65 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data.pop("flow", None)
             await _show_tenant(update, context, int(row["id"]))
             return
+        if kind == "payment_reject_note":
+            receipt_id = int(flow["receipt_id"])
+            note = "" if text == "-" else text[:300]
+            context.user_data.pop("flow", None)
+            context.user_data["confirm"] = {
+                "kind": "payment_review",
+                "receipt_id": receipt_id,
+                "approve": False,
+                "review_note": note,
+            }
+            await update.effective_message.reply_text(
+                "❌ رد این پرداخت تأیید شود؟"
+                + (f"\n\nعلت: {note}" if note else ""),
+                reply_markup=confirm_keyboard(
+                    "payment_review", f"payment:receipt:{receipt_id}"
+                ),
+            )
+            return
+        if kind == "customer_wallet_adjust":
+            fields = _split_fields(text, 2, 3)
+            currency = fields[0].upper()
+            amount = _parse_int(fields[1].replace(",", ""), "amount")
+            if amount <= 0:
+                raise ValueError("amount must be positive")
+            direction = str(flow.get("direction") or "")
+            delta = amount if direction == "add" else -amount
+            customer_id = int(flow["customer_id"])
+            note = fields[2] if len(fields) == 3 else ""
+            context.user_data.pop("flow", None)
+            context.user_data["confirm"] = {
+                "kind": "wallet_adjust",
+                "customer_id": customer_id,
+                "currency": currency,
+                "amount": delta,
+                "note": note,
+            }
+            label = "افزایش" if delta > 0 else "کاهش"
+            await update.effective_message.reply_text(
+                f"👛 {label} {amount:,} {currency} برای کیف پول این مشتری تأیید شود؟",
+                reply_markup=confirm_keyboard(
+                    "wallet_adjust", f"customeradmin:view:{customer_id}"
+                ),
+            )
+            return
+        if kind == "receipt_search":
+            context.user_data.pop("flow", None)
+            context.user_data["receipt_query"] = text[:100]
+            await _show_payment_history(update, context)
+            return
+        if kind == "order_search":
+            context.user_data.pop("flow", None)
+            context.user_data["order_query"] = text[:100]
+            await _show_orders(update, context)
+            return
+        if kind == "platform_customer_search":
+            context.user_data.pop("flow", None)
+            context.user_data["platform_customer_query"] = text[:100]
+            await _show_platform_customers(update, context)
+            return
         if kind == "tenant_search":
             context.user_data.pop("flow", None)
             context.user_data["tenant_query"] = text[:100]
@@ -763,23 +1178,23 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             else:
                 row = service.update_plan(actor, int(flow["plan_id"]), **kwargs)
             context.user_data.pop("flow", None)
-            detail, keyboard = plan_detail(row)
-            await _render(update, detail, keyboard)
+            await _show_plan(update, context, int(row["id"]))
             return
         if kind == "plan_commerce":
-            fields = _split_fields(text, 3, 3)
-            public_raw = _parse_int(fields[1], "public flag")
-            if public_raw not in (0, 1):
-                raise ValueError("public flag must be 0 or 1")
-            row = _portal(context).configure_plan_commerce(
-                actor, int(flow["plan_id"]), currency=fields[0],
-                is_public=bool(public_raw), trial_days=_parse_int(fields[2], "trial days"),
+            fields = _split_fields(text, 2, 2)
+            plan_id = int(flow["plan_id"])
+            current = service.get_plan(actor, plan_id)
+            _portal(context).configure_plan_commerce(
+                actor,
+                plan_id,
+                currency=fields[0],
+                is_public=bool(int(current.get("is_public", 1))),
+                trial_days=_parse_int(fields[1], "trial days"),
             )
             context.user_data.pop("flow", None)
-            detail, keyboard = plan_detail(row)
-            await _render(update, detail, keyboard)
+            await _show_plan(update, context, plan_id)
             return
-        if kind == "payment_method_new":
+        if kind in ("payment_method_new", "payment_method_edit"):
             fields = _split_fields(text, 4, 5)
             payment_kind = str(flow.get("payment_kind") or "")
             if payment_kind not in ("card", "crypto"):
@@ -791,13 +1206,26 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 title, currency, destination, network = fields[:4]
                 recipient = None
             instructions = fields[4] if len(fields) == 5 else ""
-            _portal(context).add_payment_method(
-                actor, kind=payment_kind, title=title, currency=currency,
-                destination=destination, recipient=recipient, network=network,
-                instructions=instructions,
-            )
+            if kind == "payment_method_new":
+                row = _portal(context).add_payment_method(
+                    actor, kind=payment_kind, title=title, currency=currency,
+                    destination=destination, recipient=recipient, network=network,
+                    instructions=instructions,
+                )
+            else:
+                row = _portal(context).update_payment_method(
+                    actor, int(flow["method_id"]), title=title, currency=currency,
+                    destination=destination, recipient=recipient, network=network,
+                    instructions=instructions,
+                )
             context.user_data.pop("flow", None)
-            await _show_payments(update, context)
+            await _show_payment_method(update, context, int(row["id"]))
+            return
+        if kind == "platform_setting_text":
+            key = str(flow.get("setting_key") or "")
+            _portal(context).set_platform_text_setting(actor, key, text)
+            context.user_data.pop("flow", None)
+            await _show_settings(update, context)
             return
         if kind == "license_new":
             fields = _split_fields(text, 2, 3)
@@ -847,8 +1275,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data.pop("flow", None)
             await update.effective_chat.send_message(
                 f"✅ ربات @{enrollment.bot.telegram_username or 'unknown'} ثبت شد.\n"
-                f"Webhook secret: {enrollment.webhook_secret}\n"
-                "این Secret فقط همین یک‌بار نمایش داده می‌شود؛ پس از استفاده پیام را حذف کنید.",
+                f"کلید وب‌هوک: {enrollment.webhook_secret}\n"
+                "این کلید فقط همین یک‌بار نمایش داده می‌شود؛ پس از استفاده پیام را حذف کنید.",
                 reply_markup=back_keyboard(f"tenant:view:{int(flow['tenant_id'])}"),
                 protect_content=True,
             )
