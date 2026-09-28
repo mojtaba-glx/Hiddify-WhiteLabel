@@ -133,3 +133,8 @@ def test_shard_change_has_env_and_systemd_rollback() -> None:
     assert "env-before-shards-$$" in content
     assert "restoring previous configuration" in content
     assert "rollback_units" in content
+
+
+def test_token_change_uses_pid_scoped_env_backup() -> None:
+    content = (ROOT / "install.sh").read_text(encoding="utf-8")
+    assert "env-before-token-$$" in content
