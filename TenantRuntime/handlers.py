@@ -157,9 +157,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     try:
         if spec.role == "admin":
             if data == "biz:servers":
-                rows = [[InlineKeyboardButton(f"🖥 {item['label']} · {item['panel_kind']} · {item['status']}", callback_data=f"biz:server:{item['id']}")] for item in business.list_servers()]
+                rows = [[InlineKeyboardButton(f"{'⭐ ' if int(item.get('is_default') or 0) else '🖥 '}{item['label']} · {item['panel_kind']} · {item['status']}", callback_data=f"biz:server:{item['id']}")] for item in business.list_servers()]
                 rows += [[InlineKeyboardButton("➕ سرور", callback_data="biz:addserver")], [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")]]
-                await update.callback_query.edit_message_text("🖥 سرورهای این tenant", reply_markup=InlineKeyboardMarkup(rows)); return
+                await update.callback_query.edit_message_text("🖥 سرورهای این tenant\n⭐ = سرور پیش‌فرض فروش", reply_markup=InlineKeyboardMarkup(rows)); return
             if data == "biz:addserver":
                 context.user_data["biz_flow"] = {"kind": "server"}
                 await update.callback_query.edit_message_text(
@@ -177,9 +177,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     f"آدرس: {server.get('endpoint') or 'ثبت نشده'}\n"
                     f"مسیر ادمین: {server.get('admin_path') or '-'}\n"
                     f"مسیر کاربر: {server.get('user_path') or '-'}\n"
-                    f"کلید دسترسی: {'✅ ثبت شده' if panel['configured'] else '❌ ثبت نشده'}"
+                    f"کلید دسترسی: {'✅ ثبت شده' if panel['configured'] else '❌ ثبت نشده'}\n"
+                    f"سرور پیش‌فرض فروش: {'⭐ بله' if int(server.get('is_default') or 0) else 'خیر'}"
                 )
                 rows = [[InlineKeyboardButton("🔐 ثبت یا تعویض کلید پنل", callback_data=f"biz:secret:{server_id}")]]
+                if server["panel_kind"] == "hiddify" and panel["configured"] and not int(server.get("is_default") or 0):
+                    rows.append([InlineKeyboardButton("⭐ انتخاب به عنوان سرور فروش", callback_data=f"biz:defaultserver:{server_id}")])
                 rows.append([InlineKeyboardButton("↩️ سرورها", callback_data="biz:servers")])
                 await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows)); return
             if data.startswith("biz:secret:"):
@@ -188,6 +191,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 context.user_data["biz_flow"] = {"kind": "panel_secret", "server_id": server_id}
                 await update.callback_query.edit_message_text(
                     "کلید API یا رمز پنل را بفرستید. پیام شما پس از ثبت حذف می‌شود.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ سرورها", callback_data="biz:servers")]]),
+                ); return
+            if data.startswith("biz:defaultserver:"):
+                server_id = int(data.rsplit(":", 1)[1])
+                business.set_default_server(actor, server_id=server_id)
+                await update.callback_query.edit_message_text(
+                    "⭐ این سرور به عنوان سرور پیش‌فرض فروش انتخاب شد.",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ سرورها", callback_data="biz:servers")]]),
                 ); return
             if data == "biz:nodes":
@@ -207,10 +217,26 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 context.user_data["biz_flow"] = {"kind": "payment"}; await update.callback_query.edit_message_text("نوع card/crypto | عنوان | ارز | مقصد | شبکه/نام | توضیح", reply_markup=_menu(spec)); return
             if data == "biz:orders":
                 items = business.list_orders_admin(actor); receipts = business.list_receipts_admin(actor)
+                pending = business.list_subscriptions_admin(actor, status="pending_provisioning")
                 text = "🧾 سفارش‌ها\n" + ("\n".join(f"#{x['id']} · {x['display_name']} · {x['plan_name']} · {x['status']}" for x in items) or "موردی نیست.")
                 rows = [[InlineKeyboardButton(f"✅/❌ بررسی رسید #{x['id']} · {x['display_name']}", callback_data=f"biz:receipt:{x['id']}")] for x in receipts]
+                rows += [[InlineKeyboardButton(f"🔁 فعال‌سازی اشتراک #{x['id']} · {x['display_name']}", callback_data=f"biz:provision:{x['id']}")] for x in pending]
                 rows.append([InlineKeyboardButton("↩️ منو", callback_data="runtime:home")])
                 await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows)); return
+            if data.startswith("biz:provision:"):
+                subscription_id = int(data.rsplit(":", 1)[1])
+                try:
+                    active = business.provision_pending_subscription(actor, subscription_id=subscription_id)
+                    await update.callback_query.edit_message_text(
+                        f"✅ اشتراک #{subscription_id} فعال شد.\n🔗 {active['subscription_url']}",
+                        reply_markup=_menu(spec),
+                    )
+                except TenantBusinessError:
+                    await update.callback_query.edit_message_text(
+                        "⚠️ فعال‌سازی انجام نشد. پرداخت محفوظ است و اشتراک در صف فعال‌سازی باقی ماند.",
+                        reply_markup=_menu(spec),
+                    )
+                return
             if data.startswith("biz:receipt:"):
                 receipt_id = int(data.rsplit(":", 1)[1]); receipt = next((x for x in business.list_receipts_admin(actor) if int(x['id']) == receipt_id), None)
                 if receipt is None: raise TenantBusinessError("receipt not found")
@@ -220,8 +246,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 pending = context.user_data.pop("biz_confirm", None)
                 if not isinstance(pending, dict): raise TenantBusinessError("confirmation expired")
                 approve = data.rsplit(":", 1)[1] == "yes"
-                business.review_receipt(actor, int(pending['receipt_id']), approve=approve)
-                await update.callback_query.edit_message_text("✅ رسید بررسی شد." if approve else "❌ رسید رد شد.", reply_markup=_menu(spec)); return
+                reviewed = business.review_receipt(actor, int(pending['receipt_id']), approve=approve)
+                if not approve:
+                    await update.callback_query.edit_message_text("❌ رسید رد شد.", reply_markup=_menu(spec)); return
+                subscription_id = int(reviewed["subscription_id"])
+                try:
+                    active = business.provision_pending_subscription(actor, subscription_id=subscription_id)
+                    await update.callback_query.edit_message_text(
+                        f"✅ پرداخت تأیید و اشتراک #{subscription_id} فعال شد.\n🔗 {active['subscription_url']}",
+                        reply_markup=_menu(spec),
+                    )
+                except TenantBusinessError:
+                    await update.callback_query.edit_message_text(
+                        f"✅ پرداخت تأیید شد.\n⚠️ اشتراک #{subscription_id} ساخته شد اما فعال‌سازی پنل انجام نشد؛ از بخش سفارش‌ها دوباره فعال‌سازی کنید.",
+                        reply_markup=_menu(spec),
+                    )
+                return
             if data == "biz:tickets":
                 items = business.list_tickets_admin(actor); text = "🎫 تیکت‌ها\n" + ("\n".join(f"#{x['id']} · {x['display_name']} · {x['subject']} · {x['status']}" for x in items) or "موردی نیست.")
                 await update.callback_query.edit_message_text(text, reply_markup=_menu(spec)); return
@@ -243,12 +283,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 context.user_data["biz_flow"] = {"kind": "receipt", "order_id": int(order_id), "method_id": int(method_id)}
                 await update.callback_query.edit_message_text(f"پرداخت به: {method['destination']}\n{method.get('instructions') or ''}\nکد پیگیری یا عکس رسید را ارسال کنید.", reply_markup=_menu(spec)); return
             if data == "shop:subs":
-                items = business.list_subscriptions(actor); text = "📦 اشتراک‌های من\n" + ("\n".join(f"• {x['plan_name']} · {x['status']} · {x['expires_at']}" for x in items) or "اشتراکی ندارید.")
-                await update.callback_query.edit_message_text(text, reply_markup=_menu(spec)); return
+                items = business.list_subscriptions(actor)
+                text = "📦 اشتراک‌های من\n" + ("\n".join(f"• #{x['id']} · {x['plan_name']} · {x['status']} · {x['expires_at']}" for x in items) or "اشتراکی ندارید.")
+                rows = []
+                for item in items:
+                    if item["status"] == "active" and item.get("external_ref") and item.get("server_id"):
+                        try:
+                            link = business.subscription_link(actor, subscription_id=int(item["id"]))
+                            rows.append([InlineKeyboardButton(f"🔗 لینک اشتراک #{item['id']}", url=link)])
+                        except TenantBusinessError:
+                            pass
+                rows.extend(_menu(spec).inline_keyboard)
+                await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows)); return
             if data == "shop:tickets":
                 context.user_data["biz_flow"] = {"kind": "ticket"}; await update.callback_query.edit_message_text("موضوع | متن تیکت را ارسال کنید.", reply_markup=_menu(spec)); return
             if data == "shop:guide":
-                await update.callback_query.edit_message_text("📖 راهنما\nپلن را انتخاب کنید، پرداخت را ثبت کنید و پس از تأیید، اشتراک شما در صف فعال‌سازی قرار می‌گیرد.", reply_markup=_menu(spec)); return
+                await update.callback_query.edit_message_text("📖 راهنما\nپلن را انتخاب کنید و پرداخت را ثبت کنید. پس از تأیید مدیر، سیستم اشتراک را روی سرور فعال می‌کند و لینک در «اشتراک‌های من» نمایش داده می‌شود.", reply_markup=_menu(spec)); return
     except (ValueError, TenantBusinessError, PermissionError, sqlite3.IntegrityError):
         await update.callback_query.answer("درخواست قابل انجام نیست.", show_alert=True); return
     await update.callback_query.answer("این دکمه معتبر نیست.", show_alert=True)
