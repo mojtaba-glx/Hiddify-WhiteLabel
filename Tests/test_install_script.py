@@ -94,6 +94,9 @@ def test_installer_contains_manager_and_safe_update_controls() -> None:
     assert "pytest -q" in content
     assert "tracked project files have local changes" in content
     assert "Type DELETE ALL" in content
+    assert "update_snapshot.py" in content
+    assert "ROLLBACK OK" in content
+    assert "automatic database/environment rollback failed" in content
 
 
 def test_bootstrap_uses_dedicated_service_account_and_opt_path() -> None:
@@ -138,3 +141,29 @@ def test_shard_change_has_env_and_systemd_rollback() -> None:
 def test_token_change_uses_pid_scoped_env_backup() -> None:
     content = (ROOT / "install.sh").read_text(encoding="utf-8")
     assert "env-before-token-$$" in content
+
+
+def test_settings_include_timezone_and_nonsecret_summary() -> None:
+    content = (ROOT / "install.sh").read_text(encoding="utf-8")
+    assert "Show current non-secret settings" in content
+    assert "Change display timezone" in content
+    assert "change_timezone()" in content
+    assert "MasterBot token: $token_state" in content
+    assert "MASTER_BOT_TOKEN=" not in content.split("show_nonsecret_settings() {", 1)[1].split("}", 1)[0]
+
+
+def test_admin_change_has_env_rollback() -> None:
+    content = (ROOT / "install.sh").read_text(encoding="utf-8")
+    assert "env-before-admin-$$" in content
+    assert "failed after admin ID change; restoring previous .env" in content
+
+
+def test_update_restores_snapshot_before_old_source_reset() -> None:
+    content = (ROOT / "install.sh").read_text(encoding="utf-8")
+    update = content.split("update_action() {", 1)[1].split("backup_action() {", 1)[0]
+    restore = 'update_snapshot.py" restore "$snapshot_dir"'
+    reset = 'reset --hard "$old_sha"'
+    # The first reset is the pre-downtime test failure path. In the post-snapshot
+    # rollback block, snapshot restore must appear before the later source reset.
+    error_block = update.split("update failed after snapshot", 1)[1]
+    assert error_block.index(restore) < error_block.index(reset)
