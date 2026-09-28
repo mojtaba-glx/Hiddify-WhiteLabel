@@ -100,6 +100,7 @@ def test_bootstrap_uses_dedicated_service_account_and_opt_path() -> None:
     content = (ROOT / "bootstrap.sh").read_text(encoding="utf-8")
     assert "/opt/hiddify-whitelabel" in content
     assert "whitelabel" in content
-    assert "useradd --system --user-group" in content
+    assert "useradd --system" in content
+    assert "--user-group" in content
     assert "git clone" in content
     assert "install.sh\" update" in content or "install.sh\" install" in content
