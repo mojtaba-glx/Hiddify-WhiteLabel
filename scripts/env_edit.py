@@ -17,6 +17,9 @@ ALLOWED_KEYS = {
     "DISPLAY_TIMEZONE",
     "SMART_SUB_PUBLIC_BASE_URL",
     "SMART_SUB_PORT",
+    "RUNTIME_ENFORCER_SECONDS",
+    "RUNTIME_REMINDER_DAYS",
+    "RUNTIME_REMINDER_REMAINING_GB",
 }
 
 
@@ -46,6 +49,15 @@ def validate(key: str, value: str) -> str:
     elif key == "SMART_SUB_PORT":
         if not clean.isdigit() or not 1 <= int(clean) <= 65535:
             raise ValueError("smart subscription port must be between 1 and 65535")
+    elif key == "RUNTIME_ENFORCER_SECONDS":
+        if not clean.isdigit() or not 10 <= int(clean) <= 3600:
+            raise ValueError("enforcer interval must be between 10 and 3600 seconds")
+    elif key == "RUNTIME_REMINDER_DAYS":
+        if not clean.isdigit() or not 1 <= int(clean) <= 30:
+            raise ValueError("reminder days must be between 1 and 30")
+    elif key == "RUNTIME_REMINDER_REMAINING_GB":
+        if not clean.isdigit() or not 1 <= int(clean) <= 1000:
+            raise ValueError("reminder remaining GB must be between 1 and 1000")
     else:
         raise ValueError("environment key is not editable")
     return clean

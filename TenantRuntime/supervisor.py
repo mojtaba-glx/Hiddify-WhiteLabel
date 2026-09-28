@@ -183,14 +183,21 @@ class RuntimeSupervisor:
                 if self.lifecycle is not None and loop.time() >= next_lifecycle_at:
                     try:
                         lifecycle_report = await self.lifecycle.run_once()
-                        if getattr(lifecycle_report, "errors", 0) or getattr(
-                            lifecycle_report, "expired", 0
+                        if (
+                            getattr(lifecycle_report, "errors", 0)
+                            or getattr(lifecycle_report, "expired", 0)
+                            or getattr(lifecycle_report, "enforcement_pending", 0)
+                            or getattr(lifecycle_report, "reminders_sent", 0)
                         ):
                             logger.info(
-                                "Runtime lifecycle tenants=%s synced=%s expired=%s errors=%s",
+                                "Runtime enforcer tenants=%s scanned=%s synced=%s "
+                                "expired=%s pending=%s reminders=%s errors=%s",
                                 getattr(lifecycle_report, "tenants", 0),
+                                getattr(lifecycle_report, "scanned", 0),
                                 getattr(lifecycle_report, "synced", 0),
                                 getattr(lifecycle_report, "expired", 0),
+                                getattr(lifecycle_report, "enforcement_pending", 0),
+                                getattr(lifecycle_report, "reminders_sent", 0),
                                 getattr(lifecycle_report, "errors", 0),
                             )
                     except Exception as exc:

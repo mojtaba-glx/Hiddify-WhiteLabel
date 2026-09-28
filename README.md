@@ -25,7 +25,7 @@ Hiddify-WhiteLabel/
 ├── Ops/                  # Phase 6 - health, encrypted backup, locks, systemd
 ├── Shared/               # settings, redacted logging, crypto, time, access
 ├── Database/             # connection, repositories, migration runner
-├── Migrations/           # versioned SQL (currently 0001 through 0014)
+├── Migrations/           # versioned SQL (currently 0001 through 0015)
 ├── Tests/                # offline pytest suite, fake tokens only
 ├── scripts/              # migrate helper
 ├── install.sh            # English operations menu and systemd installer
@@ -159,6 +159,20 @@ reverse-proxy/domain exposed to customers. The endpoint fetches native
 subscriptions from all active provider mappings, accepts plain or base64 input,
 filters config lines, deduplicates them and serves `all.txt` or `all.b64`
 with standard subscription metadata headers.
+
+The runtime also includes a bounded Global Enforcer. By default it runs every
+20 seconds, prioritizes subscriptions near expiry or quota, then round-robins
+the rest. Multi-node usage is summed globally. If a provider is temporarily
+unreachable its last known usage remains frozen in the total instead of being
+dropped. Expiry is committed only after every current node has been verified
+disabled; partial failures persist as `enforcement_pending` and are retried.
+
+Tenant UserBots send durable renewal reminders when the remaining time or
+traffic crosses configured thresholds (defaults: 3 days / 3 GiB), plus one
+verified-expiry notice. Reminder keys are scoped to the subscription period, so
+restarts and repeated scans cannot duplicate a notice and renewal automatically
+starts a fresh reminder sequence. Failed Telegram sends use bounded exponential
+retry and never require the MasterBot token.
 
 The MasterBot JobQueue runs the Phase-3 evaluator at the configured interval.
 It advances expiry/grace states, suspends expired licenses, persists 7/3/1-day

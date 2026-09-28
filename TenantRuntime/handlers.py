@@ -318,7 +318,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if data == "biz:subs":
                 items = business.list_subscriptions_admin(actor)
                 text = "📡 سرویس‌ها\n" + ("\n".join(
-                    f"#{x['id']} · {x['display_name']} · {x['plan_name']} · {x['status']} · "
+                    f"#{x['id']} · {x['display_name']} · {x['plan_name']} · {x['status']}"
+                    f"{' ⚠️ enforcement-pending' if int(x.get('enforcement_pending') or 0) else ''} · "
                     f"{int(x['usage_bytes']) / (1024**3):.2f}/{int(x['traffic_bytes']) / (1024**3):.0f}GB · "
                     f"آخرین اتصال: {x.get('last_online') or '-'}"
                     for x in items
@@ -465,7 +466,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if data == "shop:subs":
                 items = business.list_subscriptions(actor)
                 text = "📦 اشتراک‌های من\n" + ("\n".join(
-                    f"• #{x['id']} · {x['plan_name']} · {x['status']}\n"
+                    f"• #{x['id']} · {x['plan_name']} · "
+                    f"{'در حال قطع خودکار' if int(x.get('enforcement_pending') or 0) else x['status']}\n"
                     f"  مصرف: {int(x['usage_bytes']) / (1024**3):.2f}/{int(x['traffic_bytes']) / (1024**3):.0f}GB · "
                     f"انقضا: {x['expires_at']}\n"
                     f"  آخرین اتصال: {x.get('last_online') or '-'}"
