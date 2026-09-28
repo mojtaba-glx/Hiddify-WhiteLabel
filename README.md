@@ -23,7 +23,7 @@ Hiddify-WhiteLabel/
 ├── Ops/                  # Phase 6 - health, encrypted backup, locks, systemd
 ├── Shared/               # settings, redacted logging, crypto, time, access
 ├── Database/             # connection, repositories, migration runner
-├── Migrations/           # versioned SQL (currently 0001 through 0006)
+├── Migrations/           # versioned SQL (currently 0001 through 0008)
 ├── Tests/                # offline pytest suite, fake tokens only
 ├── scripts/              # migrate helper
 ├── install.sh            # English operations menu and systemd installer
@@ -106,15 +106,16 @@ payment-provider API credential is stored in this project.
 Wallet deposits are credited only after a reviewed receipt. Wallet spending,
 payment approval, renewal and order completion are explicit SQLite
 transactions. The price, currency and duration are always read from the plan
-in the database, never from a Telegram callback. A plan can be configured as
-public/private, assigned a currency and given a one-time trial duration from
-its `🛍 فروش و لایسنس تست` action.
+in the database, never from a Telegram callback. A plan can be shown or hidden from the storefront, assigned a currency and
+given a one-time trial duration. The owner can also select the exact active
+public plan used for one-time trials, or leave trial-plan selection automatic.
 
-After a purchase is paid, the customer submits a shop name/slug and two
-BotFather tokens. Each token is verified, its message is deleted immediately,
-and the tenant, two encrypted bot credentials, runtime namespace and active
-license are provisioned together. The customer receives each webhook secret
-only once in protected Telegram content.
+After a purchase is paid, the customer submits only the shop name and two
+BotFather tokens. The internal tenant slug is generated automatically. Each
+token is verified and its Telegram message is deleted immediately; tenant,
+two encrypted bot credentials, runtime namespace and active license are then
+provisioned together. Internal webhook secrets are not exposed in the
+customer flow.
 
 ## Tenant AdminBot and UserBot
 
@@ -177,10 +178,11 @@ by `(tenant_id, bot_role, telegram_user_id)`. Database or credential errors
 fail closed for the affected update, while failure to start one bot does not
 stop the other tenant bots in that shard.
 
-The wired AdminBot/UserBot currently provide the isolated licensed runtime
-shell, menu and status flow. VPN panel, sales, payment and ticket business
-modules remain separate product integration work; they have not been copied
-from `Hiddify-SellBot`.
+The tenant runtime already includes tenant-scoped inventory, sale plans,
+payment instructions, receipts, subscriptions, tickets and smart-link flows.
+The remaining integration work is the live Hiddify/X-UI adapter layer:
+encrypted panel credentials exist, but live subscription provisioning, usage
+sync and staged production drills are intentionally still pending.
 
 ## Install and operate
 
