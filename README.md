@@ -1,6 +1,6 @@
 # Hiddify-WhiteLabel
 
-**Current version: `v0.9.1`**
+**Current version: `v0.9.2`**
 
 White-Label SaaS for selling VPN subscriptions: each customer (tenant) gets
 two dedicated bots (`TenantAdminBot` + `TenantUserBot`). The platform owner
@@ -32,7 +32,7 @@ Hiddify-WhiteLabel/
 ├── docs/                 # ARCHITECTURE, THREAT_MODEL, ROADMAP, decisions/
 ├── .env.example          # empty template, no secrets
 ├── requirements.txt      # pinned deps
-└── VERSION               # 0.9.1
+└── VERSION               # 0.9.2
 ```
 
 Reference project `Hiddify-SellBot` was used **read-only** to understand
@@ -186,30 +186,31 @@ The remaining integration work is the live Hiddify/X-UI adapter layer:
 encrypted panel credentials exist, but live subscription provisioning, usage
 sync and staged production drills are intentionally still pending.
 
-## Install and operate
+## Easy install and operations
 
-The terminal interface is English-only. Review `docs/OPERATIONS.md`, then run:
-
-```bash
-sudo ./install.sh
-```
-
-The menu installs/updates dependencies, creates a private `.env`, applies
-migrations, installs one MasterBot service plus the configured runtime shard
-instances, and verifies database/service health. It also provides start, stop,
-restart, status, encrypted backup, validated restore and unit removal actions.
-
-For an offline preview which changes neither systemd nor project data:
+Fresh Ubuntu/Debian server:
 
 ```bash
-./install.sh --dry-run install
+curl -fsSL https://raw.githubusercontent.com/mojtaba-glx/Hiddify-WhiteLabel/main/bootstrap.sh | sudo bash
 ```
 
-Backups contain a consistent SQLite snapshot and `.env`, authenticated and
-encrypted under an operator passphrase. Restore requires stopped services,
-checks archive authentication, file hashes, SQLite integrity, foreign keys,
-environment validity and migration checksums, and saves the current files in a
-private rollback directory before atomic replacement.
+The bootstrap installs OS prerequisites, creates a dedicated `whitelabel`
+system account, clones the application to `/opt/hiddify-whitelabel`, asks for
+the MasterBot token and owner Telegram ID, creates the encrypted runtime
+environment, applies migrations, installs systemd services and runs health
+checks.
 
-No commit/tag/push, live systemd installation or live Telegram polling was
-performed while building this phase.
+After installation, all routine operations are available from one command:
+
+```bash
+sudo whitelabel
+```
+
+The terminal manager includes GitHub update, install/repair, restart/start/stop,
+service status, MasterBot and TenantRuntime logs, health checks, MasterBot
+token/Admin-ID/shard settings, database migrations, encrypted backup/restore,
+service-only removal and guarded full uninstall.
+
+Updates fetch `origin/main`, refuse tracked local source changes, install
+dependencies and run the complete offline test suite before stopping live
+services. See `docs/OPERATIONS.md` for direct commands and recovery details.
