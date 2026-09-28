@@ -279,9 +279,9 @@ async def handle_customer_callback(
             await render(
                 update,
                 "🔑 راه‌اندازی ربات\n\n"
-                "نام فروشگاه و یک شناسه انگلیسی کوتاه را بفرستید:\n\n"
-                "نام فروشگاه | slug\n\n"
-                "مثال:\nSpeed VPN | speed-vpn",
+                "نام فروشگاه یا برند خود را بفرستید.\n\n"
+                "مثال: Speed VPN\n\n"
+                "شناسه داخلی به‌صورت خودکار ساخته می‌شود.",
                 InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data="customer:setup")]]),
             )
             return True
@@ -382,15 +382,20 @@ async def handle_customer_text(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return True
         if kind == "setup_details":
-            fields = [part.strip() for part in text.split("|")]
-            if len(fields) != 2 or not all(fields):
-                raise ValueError("invalid setup details")
+            name = text.strip()
+            if not name or len(name) > 120:
+                raise ValueError("invalid store name")
+            order_id = int(flow["order_id"])
+            generated_slug = f"store-{actor}-{order_id}"
             context.user_data["customer_flow"] = {
-                "kind": "setup_admin_token", "order_id": int(flow["order_id"]),
-                "name": fields[0], "slug": fields[1],
+                "kind": "setup_admin_token",
+                "order_id": order_id,
+                "name": name,
+                "slug": generated_slug,
             }
             await update.effective_message.reply_text(
-                "🤖 توکن AdminBot را بفرستید. پیام توکن بلافاصله حذف می‌شود."
+                "🤖 توکن ربات مدیریت را از BotFather بفرستید.\n"
+                "🔐 پیام حاوی توکن بلافاصله حذف می‌شود."
             )
             return True
         if kind in ("setup_admin_token", "setup_user_token"):
@@ -406,8 +411,13 @@ async def handle_customer_text(update: Update, context: ContextTypes.DEFAULT_TYP
             if role == "admin":
                 flow["admin_bot"] = prepared
                 flow["kind"] = "setup_user_token"
+                admin_username = prepared.telegram_username
                 await update.effective_chat.send_message(
-                    "✅ AdminBot تأیید شد. اکنون توکن UserBot را بفرستید."
+                    (
+                        f"✅ ربات مدیریت @{admin_username} تأیید شد.\n"
+                        if admin_username else "✅ ربات مدیریت تأیید شد.\n"
+                    )
+                    + "🛍 اکنون توکن ربات کاربران را از BotFather بفرستید."
                 )
                 return True
             admin_bot = flow.get("admin_bot")
