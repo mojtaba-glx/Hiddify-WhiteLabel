@@ -17,6 +17,19 @@ Conversation state is stored in `tenant_user_state` under the composite scope
 `tenant_id + bot_role + telegram_user_id`. Each application receives a state
 store permanently bound to its own tenant and role.
 
+Hiddify sales are live through the provider adapter. Approved purchase orders
+are fulfilled only after remote provisioning succeeds. Renewal orders reuse the
+same receipt-review flow and remain `paid` if the panel call fails, so an admin
+can retry safely. Hiddify renewal requests carry a remote retry marker so a
+retry cannot reset post-renewal usage a second time.
+
+A shard-safe lifecycle coordinator runs every
+`RUNTIME_LIFECYCLE_SECONDS` (default 180). Tenant ownership for maintenance
+uses `tenant_id % RUNTIME_SHARD_COUNT`, so only one shard synchronizes each
+tenant. It refreshes usage and last-online state, disables time/quota-expired
+accounts before marking them expired locally, and never reactivates an expired
+subscription without renewal.
+
 Run one process for each shard index:
 
 ```bash
@@ -26,6 +39,6 @@ RUNTIME_SHARD_COUNT=4 RUNTIME_SHARD_INDEX=2 python3 -m TenantRuntime
 RUNTIME_SHARD_COUNT=4 RUNTIME_SHARD_INDEX=3 python3 -m TenantRuntime
 ```
 
-The current handlers provide the licensed tenant-specific Admin/User runtime
-shell and durable isolated state. VPN panel, sales, payment, and ticket feature
-modules are separate product work and are not copied from the reference bot.
+The current handlers provide tenant-scoped sales, payment review, Hiddify
+provisioning, paid renewal, subscription lifecycle controls and support tools.
+The implementation is independent and does not import the reference SellBot.
