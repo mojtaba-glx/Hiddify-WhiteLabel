@@ -17,6 +17,7 @@ from Ops.process_lock import ProcessLock
 from Shared.crypto import FernetTokenCipher
 from Shared.redaction import configure_safe_logging, get_logger, safe_format_exception
 from Shared.settings import RuntimeSettings, load_runtime_from_env
+from TenantRuntime.lifecycle import TenantLifecycleCoordinator
 from TenantRuntime.supervisor import RuntimeSupervisor
 from TenantRuntime.worker import TenantApplicationFactory
 
@@ -51,11 +52,19 @@ def build_supervisor(settings: RuntimeSettings, *, connection=None):
         policy=policy,
         poll_timeout_seconds=settings.poll_timeout_seconds,
     )
+    lifecycle = TenantLifecycleCoordinator(
+        db_path=db_path,
+        cipher=cipher,
+        shard_count=settings.shard_count,
+        shard_index=settings.shard_index,
+    )
     supervisor = RuntimeSupervisor(
         catalog=catalog,
         worker_factory=factory,
         reconcile_seconds=settings.reconcile_seconds,
         start_concurrency=settings.start_concurrency,
+        lifecycle=lifecycle,
+        lifecycle_seconds=settings.lifecycle_seconds,
     )
     return supervisor, connection
 
