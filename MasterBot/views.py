@@ -203,6 +203,69 @@ def license_detail(row: dict[str, Any], *, timezone_name: str) -> tuple[str, Inl
     return text, InlineKeyboardMarkup(rows)
 
 
+
+def platform_settings_view(settings: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+    sales = "🟢 فعال" if settings.get("sales_enabled") else "🔴 غیرفعال"
+    trial = "🟢 فعال" if settings.get("trial_enabled") else "🔴 غیرفعال"
+    support = str(settings.get("support_contact") or "تنظیم نشده")
+    text = (
+        "⚙️ تنظیمات فروشگاه\n\n"
+        f"🏷 نام فروشگاه: {settings.get('store_name') or '-'}\n"
+        f"☎️ پشتیبانی: {support}\n"
+        f"🛒 فروش: {sales}\n"
+        f"🎁 لایسنس تست: {trial}\n\n"
+        f"🔧 پیام توقف فروش:\n{settings.get('maintenance_message') or '-'}"
+    )
+    rows = [
+        [
+            InlineKeyboardButton("🏷 نام فروشگاه", callback_data="settings:edit:store_name"),
+            InlineKeyboardButton("☎️ پشتیبانی", callback_data="settings:edit:support_contact"),
+        ],
+        [
+            InlineKeyboardButton(
+                "⛔ توقف فروش" if settings.get("sales_enabled") else "✅ فعال‌کردن فروش",
+                callback_data="settings:toggle:sales",
+            ),
+            InlineKeyboardButton(
+                "⛔ توقف تست" if settings.get("trial_enabled") else "✅ فعال‌کردن تست",
+                callback_data="settings:toggle:trial",
+            ),
+        ],
+        [InlineKeyboardButton("📝 پیام توقف فروش", callback_data="settings:edit:maintenance_message")],
+        [InlineKeyboardButton("↩️ منوی اصلی", callback_data="menu:main")],
+    ]
+    return text, InlineKeyboardMarkup(rows)
+
+
+def payment_method_detail(method: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+    icon = "💳" if method["kind"] == "card" else "💎"
+    lines = [
+        f"{icon} روش پرداخت #{int(method['id'])}",
+        "",
+        f"عنوان: {method['title']}",
+        f"نوع: {method['kind']}",
+        f"ارز: {method['currency']}",
+        f"مقصد: {method['destination']}",
+    ]
+    if method.get("recipient"):
+        lines.append(f"به نام: {method['recipient']}")
+    if method.get("network"):
+        lines.append(f"شبکه: {method['network']}")
+    if method.get("instructions"):
+        lines.extend(["", f"توضیحات: {method['instructions']}"])
+    lines.extend(["", f"وضعیت: {'فعال' if method['status'] == 'active' else 'غیرفعال'}"])
+    next_state = "disabled" if method["status"] == "active" else "active"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ ویرایش", callback_data=f"payment:edit:{int(method['id'])}")],
+        [InlineKeyboardButton(
+            "⛔ غیرفعال‌سازی" if next_state == "disabled" else "✅ فعال‌سازی",
+            callback_data=f"payment:method:{int(method['id'])}:{next_state}",
+        )],
+        [InlineKeyboardButton("↩️ پرداخت‌ها", callback_data="menu:payments")],
+    ])
+    return "\n".join(lines), keyboard
+
+
 def confirm_keyboard(action: str, cancel_callback: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ تأیید نهایی", callback_data=f"confirm:{action}")],
