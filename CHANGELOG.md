@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.9.3 — Installer Rollback Hardening
+
+- Added private pre-update SQLite + `.env` snapshots using SQLite's backup API.
+- Failed migrations, service startup or health validation now restore database, environment and previous source version together.
+- SQLite WAL/SHM sidecars from a failed candidate are removed before rollback restore.
+- Master admin ID changes now use automatic `.env` rollback on service failure.
+- Added display-timezone management and a non-secret settings summary to the terminal manager.
+- Added dedicated regression tests for real update snapshot create/restore behavior.
+
 ## v0.9.2 — Easy Installer and Operations Manager
 
 - Added one-line Ubuntu/Debian bootstrap installation from GitHub.
