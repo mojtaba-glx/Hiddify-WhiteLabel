@@ -102,7 +102,13 @@ def _prepared_service(conn, factories, cipher):
 def test_panel_secret_is_encrypted_and_never_returned(conn, factories, cipher) -> None:
     tenant = factories.tenant(owner_telegram_id=7001)
     service = TenantBusinessService(conn, tenant_id=int(tenant["id"]), owner_telegram_id=7001, secret_cipher=cipher)
-    server = service.add_server(7001, label="DE", panel_kind="xui", endpoint="https://panel.example")
+    server = service.add_server(
+        7001,
+        label="DE",
+        panel_kind="xui",
+        endpoint="https://panel.example",
+        xui_flavor="sanaei",
+    )
     raw = "very-secret-panel-password"
     assert service.set_panel_credential(7001, server_id=int(server["id"]), secret=raw) == {"server_id": int(server["id"]), "configured": True}
     stored = conn.execute("SELECT encrypted_secret, secret_fingerprint FROM tenant_panel_credentials").fetchone()
