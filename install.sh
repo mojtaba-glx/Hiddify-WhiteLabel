@@ -15,7 +15,7 @@ ACTION=""
 for argument in "$@"; do
     case "$argument" in
         --dry-run) DRY_RUN=1 ;;
-        install|update|start|stop|restart|status|health|logs|backup|restore|migrate|settings|token|admin-id|shards|uninstall|uninstall-full|version)
+        install|update|start|stop|restart|status|health|logs|backup|restore|migrate|settings|token|admin-id|shards|timezone|uninstall|uninstall-full|version)
             ACTION="$argument"
             ;;
         *) echo "Unknown argument: $argument" >&2; exit 2 ;;
@@ -438,7 +438,7 @@ run_project_tests() {
 update_action() {
     require_root
     if [[ "$DRY_RUN" -eq 1 ]]; then
-        echo "DRY-RUN: fetch $UPDATE_REMOTE/$UPDATE_BRANCH, install dependencies, run tests, migrate, refresh units and restart."
+        echo "DRY-RUN: fetch $UPDATE_REMOTE/$UPDATE_BRANCH, validate new code, snapshot .env/database, migrate, refresh units, restart and rollback everything on failure."
         return
     fi
     require_command git
@@ -447,7 +447,7 @@ update_action() {
         return 1
     }
 
-    local dirty old_sha new_sha old_version new_version
+    local dirty old_sha new_sha old_version new_version snapshot_dir update_failed=0
     dirty="$(as_service_user git -C "$ROOT_DIR" status --porcelain --untracked-files=no)"
     if [[ -n "$dirty" ]]; then
         echo "ERROR: tracked project files have local changes; update aborted." >&2
@@ -466,33 +466,69 @@ update_action() {
         return
     fi
 
-    echo "Updating v$old_version -> v$new_version"
+    echo "Preparing update v$old_version -> v$new_version"
     as_service_user git -C "$ROOT_DIR" checkout -q "$UPDATE_BRANCH"
     as_service_user git -C "$ROOT_DIR" reset --hard "$new_sha"
-
-    # Update dependencies and validate the new code before stopping running services.
     ensure_venv
     if ! run_project_tests; then
-        echo "ERROR: new version failed tests; restoring previous code." >&2
+        echo "ERROR: new version failed tests; restoring previous source." >&2
         as_service_user git -C "$ROOT_DIR" reset --hard "$old_sha"
         ensure_venv
         return 1
     fi
 
+    snapshot_dir="$(
+        as_service_user "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/update_snapshot.py" create \
+            --env-file "$ENV_FILE" \
+            --output-root "$ROOT_DIR/runtime/update-rollback" \
+            --source-sha "$old_sha"
+    )"
+    [[ -n "$snapshot_dir" && -d "$snapshot_dir" ]] || {
+        echo "ERROR: update snapshot could not be created." >&2
+        as_service_user git -C "$ROOT_DIR" reset --hard "$old_sha"
+        ensure_venv
+        return 1
+    }
+    echo "Rollback snapshot created."
+
     stop_services
-    migrate_action
-    trap rollback_units ERR
-    install_units
-    systemctl daemon-reload
-    disable_obsolete_shards
-    enable_services
-    start_services
-    health_services
+    if ! migrate_action; then update_failed=1; fi
+    if [[ "$update_failed" -eq 0 ]] && ! install_units; then update_failed=1; fi
+    if [[ "$update_failed" -eq 0 ]] && ! systemctl daemon-reload; then update_failed=1; fi
+    if [[ "$update_failed" -eq 0 ]] && ! disable_obsolete_shards; then update_failed=1; fi
+    if [[ "$update_failed" -eq 0 ]] && ! enable_services; then update_failed=1; fi
+    if [[ "$update_failed" -eq 0 ]] && ! start_services; then update_failed=1; fi
+    if [[ "$update_failed" -eq 0 ]] && ! health_services; then update_failed=1; fi
+
+    if [[ "$update_failed" -ne 0 ]]; then
+        echo "ERROR: update failed after snapshot; restoring v$old_version." >&2
+        stop_services || true
+        # Restore data before resetting source: update_snapshot.py belongs to
+        # the candidate version and may not exist in the previous release.
+        as_service_user "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/update_snapshot.py" restore "$snapshot_dir" || {
+            echo "CRITICAL: automatic database/environment rollback failed." >&2
+            return 1
+        }
+        as_service_user git -C "$ROOT_DIR" reset --hard "$old_sha" || true
+        ensure_venv || true
+        install_units || true
+        systemctl daemon-reload || true
+        disable_obsolete_shards || true
+        enable_services || true
+        start_services || true
+        if health_services; then
+            echo "ROLLBACK OK: v$old_version restored." >&2
+        else
+            echo "CRITICAL: rollback completed but health check still fails." >&2
+        fi
+        return 1
+    fi
+
     printf '%s\n' "$(shard_count)" > "$ROOT_DIR/runtime/installed-shard-count"
     chmod 600 "$ROOT_DIR/runtime/installed-shard-count"
     install_manager_command
-    trap - ERR
     echo "OK: update completed. Current version: v$(version)"
+    echo "Rollback snapshot retained at: $snapshot_dir"
 }
 
 backup_action() {
@@ -548,11 +584,25 @@ change_master_token() {
 
 change_admin_id() {
     require_root
-    local admin_id
+    local admin_id env_backup
     read_tty admin_id -p "New Master admin numeric Telegram ID: "
-    edit_env_value MASTER_ADMIN_ID "$admin_id"
-    run_systemctl restart "$MASTER_UNIT"
-    echo "OK: Master admin ID updated."
+    env_backup="$(mktemp "$ROOT_DIR/runtime/env-before-admin.XXXXXX")"
+    cp -a "$ENV_FILE" "$env_backup"
+    chmod 600 "$env_backup"
+    if ! edit_env_value MASTER_ADMIN_ID "$admin_id"; then
+        rm -f "$env_backup"
+        return 1
+    fi
+    if run_systemctl restart "$MASTER_UNIT" && sleep 2 && systemctl is-active --quiet "$MASTER_UNIT"; then
+        rm -f "$env_backup"
+        echo "OK: Master admin ID updated."
+        return 0
+    fi
+    echo "ERROR: MasterBot failed after admin ID change; restoring previous .env." >&2
+    cp -a "$env_backup" "$ENV_FILE"
+    rm -f "$env_backup"
+    run_systemctl restart "$MASTER_UNIT" || true
+    return 1
 }
 
 change_shards() {
@@ -589,6 +639,50 @@ change_shards() {
     return 1
 }
 
+change_timezone() {
+    require_root
+    local timezone env_backup
+    read_tty timezone -p "Display timezone (example: Asia/Tehran): "
+    [[ -e "/usr/share/zoneinfo/$timezone" ]] || {
+        echo "ERROR: timezone does not exist on this server." >&2
+        return 1
+    }
+    env_backup="$ROOT_DIR/runtime/env-before-timezone-$$"
+    cp -a "$ENV_FILE" "$env_backup"
+    chmod 600 "$env_backup"
+    if ! edit_env_value DISPLAY_TIMEZONE "$timezone"; then
+        rm -f "$env_backup"
+        return 1
+    fi
+    if run_systemctl restart "$MASTER_UNIT" && sleep 2 && systemctl is-active --quiet "$MASTER_UNIT"; then
+        rm -f "$env_backup"
+        echo "OK: display timezone updated."
+        return 0
+    fi
+    echo "ERROR: MasterBot failed after timezone change; restoring previous .env." >&2
+    cp -a "$env_backup" "$ENV_FILE"
+    rm -f "$env_backup"
+    run_systemctl restart "$MASTER_UNIT" || true
+    return 1
+}
+
+show_nonsecret_settings() {
+    local admin_id shards timezone token_state
+    admin_id="$(sed -n 's/^MASTER_ADMIN_ID=//p' "$ENV_FILE" | tail -n 1)"
+    shards="$(shard_count)"
+    timezone="$(sed -n 's/^DISPLAY_TIMEZONE=//p' "$ENV_FILE" | tail -n 1)"
+    [[ -n "$timezone" ]] || timezone="Asia/Tehran"
+    if grep -q '^MASTER_BOT_TOKEN=..*' "$ENV_FILE" 2>/dev/null; then token_state="configured"; else token_state="missing"; fi
+    echo
+    echo "------ Current settings ------"
+    echo "Version: v$(version)"
+    echo "MasterBot token: $token_state"
+    echo "Master admin ID: ${admin_id:-missing}"
+    echo "Runtime shards: $shards"
+    echo "Display timezone: $timezone"
+    echo "Database: configured in private .env"
+    echo "------------------------------"
+}
 logs_menu() {
     require_root
     local choice
@@ -617,22 +711,28 @@ EOF
 settings_menu() {
     require_root
     local choice
-    cat <<'EOF'
+    while true; do
+        cat <<'EOF'
 
 ======== Settings ========
-1) Change MasterBot token
-2) Change Master admin Telegram ID
-3) Change Runtime shard count
+1) Show current non-secret settings
+2) Change MasterBot token
+3) Change Master admin Telegram ID
+4) Change Runtime shard count
+5) Change display timezone
 0) Back
 EOF
-    read_tty choice -p "Select: "
-    case "$choice" in
-        1) change_master_token ;;
-        2) change_admin_id ;;
-        3) change_shards ;;
-        0) return 0 ;;
-        *) echo "Invalid option." >&2; return 2 ;;
-    esac
+        read_tty choice -p "Select: "
+        case "$choice" in
+            1) show_nonsecret_settings ;;
+            2) change_master_token ;;
+            3) change_admin_id ;;
+            4) change_shards ;;
+            5) change_timezone ;;
+            0) return 0 ;;
+            *) echo "Invalid option." >&2 ;;
+        esac
+    done
 }
 
 uninstall_units() {
@@ -742,6 +842,7 @@ dispatch() {
         token) change_master_token ;;
         admin-id) change_admin_id ;;
         shards) change_shards ;;
+        timezone) change_timezone ;;
         uninstall) uninstall_units ;;
         uninstall-full) full_uninstall ;;
         version) version; echo ;;
