@@ -200,6 +200,15 @@ RUNTIME_RECONCILE_SECONDS=15
 RUNTIME_START_CONCURRENCY=8
 RUNTIME_POLL_TIMEOUT_SECONDS=20
 RUNTIME_LIFECYCLE_SECONDS=180
+RUNTIME_ENFORCER_SECONDS=20
+RUNTIME_ENFORCER_BATCH_SIZE=30
+RUNTIME_ENFORCER_HOT_USAGE_RATIO=0.85
+RUNTIME_NODE_FREEZE_FAILURES=3
+RUNTIME_REMINDER_DAYS=3
+RUNTIME_REMINDER_REMAINING_GB=3
+RUNTIME_REMINDER_LEASE_SECONDS=120
+RUNTIME_REMINDER_MAX_RETRIES=5
+RUNTIME_REMINDER_RETRY_BASE_SECONDS=30
 SMART_SUB_HOST=127.0.0.1
 SMART_SUB_PORT=8091
 SMART_SUB_PUBLIC_BASE_URL=
@@ -715,15 +724,53 @@ change_smart_sub_port() {
     restart_services || true
     return 1
 }
+change_enforcer_interval() {
+    require_root
+    local value env_backup
+    read_tty value -p "Global enforcer interval in seconds (10-3600): "
+    env_backup="$ROOT_DIR/runtime/env-before-enforcer-$$"
+    cp -a "$ENV_FILE" "$env_backup"; chmod 600 "$env_backup"
+    if ! edit_env_value RUNTIME_ENFORCER_SECONDS "$value"; then rm -f "$env_backup"; return 1; fi
+    if restart_services && health_services; then rm -f "$env_backup"; echo "OK: enforcer interval updated."; return 0; fi
+    cp -a "$env_backup" "$ENV_FILE"; rm -f "$env_backup"; restart_services || true; return 1
+}
+
+change_reminder_days() {
+    require_root
+    local value env_backup
+    read_tty value -p "Renewal reminder days threshold (1-30): "
+    env_backup="$ROOT_DIR/runtime/env-before-reminder-days-$$"
+    cp -a "$ENV_FILE" "$env_backup"; chmod 600 "$env_backup"
+    if ! edit_env_value RUNTIME_REMINDER_DAYS "$value"; then rm -f "$env_backup"; return 1; fi
+    if restart_services && health_services; then rm -f "$env_backup"; echo "OK: reminder days updated."; return 0; fi
+    cp -a "$env_backup" "$ENV_FILE"; rm -f "$env_backup"; restart_services || true; return 1
+}
+
+change_reminder_gb() {
+    require_root
+    local value env_backup
+    read_tty value -p "Renewal reminder remaining GB threshold (1-1000): "
+    env_backup="$ROOT_DIR/runtime/env-before-reminder-gb-$$"
+    cp -a "$ENV_FILE" "$env_backup"; chmod 600 "$env_backup"
+    if ! edit_env_value RUNTIME_REMINDER_REMAINING_GB "$value"; then rm -f "$env_backup"; return 1; fi
+    if restart_services && health_services; then rm -f "$env_backup"; echo "OK: reminder GB threshold updated."; return 0; fi
+    cp -a "$env_backup" "$ENV_FILE"; rm -f "$env_backup"; restart_services || true; return 1
+}
 show_nonsecret_settings() {
-    local admin_id shards timezone token_state smart_url smart_port
+    local admin_id shards timezone token_state smart_url smart_port enforcer_seconds reminder_days reminder_gb
     admin_id="$(sed -n 's/^MASTER_ADMIN_ID=//p' "$ENV_FILE" | tail -n 1)"
     shards="$(shard_count)"
     timezone="$(sed -n 's/^DISPLAY_TIMEZONE=//p' "$ENV_FILE" | tail -n 1)"
     smart_url="$(sed -n 's/^SMART_SUB_PUBLIC_BASE_URL=//p' "$ENV_FILE" | tail -n 1)"
     smart_port="$(sed -n 's/^SMART_SUB_PORT=//p' "$ENV_FILE" | tail -n 1)"
+    enforcer_seconds="$(sed -n 's/^RUNTIME_ENFORCER_SECONDS=//p' "$ENV_FILE" | tail -n 1)"
+    reminder_days="$(sed -n 's/^RUNTIME_REMINDER_DAYS=//p' "$ENV_FILE" | tail -n 1)"
+    reminder_gb="$(sed -n 's/^RUNTIME_REMINDER_REMAINING_GB=//p' "$ENV_FILE" | tail -n 1)"
     [[ -n "$timezone" ]] || timezone="Asia/Tehran"
     [[ -n "$smart_port" ]] || smart_port="8091"
+    [[ -n "$enforcer_seconds" ]] || enforcer_seconds="20"
+    [[ -n "$reminder_days" ]] || reminder_days="3"
+    [[ -n "$reminder_gb" ]] || reminder_gb="3"
     if grep -q '^MASTER_BOT_TOKEN=..*' "$ENV_FILE" 2>/dev/null; then token_state="configured"; else token_state="missing"; fi
     echo
     echo "------ Current settings ------"
@@ -734,6 +781,9 @@ show_nonsecret_settings() {
     echo "Display timezone: $timezone"
     echo "Smart subscription URL: ${smart_url:-not configured}"
     echo "Smart subscription port: $smart_port"
+    echo "Global enforcer interval: ${enforcer_seconds}s"
+    echo "Reminder days threshold: $reminder_days"
+    echo "Reminder remaining GB: $reminder_gb"
     echo "Database: configured in private .env"
     echo "------------------------------"
 }
@@ -776,6 +826,9 @@ settings_menu() {
 5) Change display timezone
 6) Change Smart Subscription public URL
 7) Change Smart Subscription listener port
+8) Change Global Enforcer interval
+9) Change Reminder days threshold
+10) Change Reminder remaining GB threshold
 0) Back
 EOF
         read_tty choice -p "Select: "
@@ -787,6 +840,9 @@ EOF
             5) change_timezone ;;
             6) change_smart_sub_url ;;
             7) change_smart_sub_port ;;
+            8) change_enforcer_interval ;;
+            9) change_reminder_days ;;
+            10) change_reminder_gb ;;
             0) return 0 ;;
             *) echo "Invalid option." >&2 ;;
         esac
@@ -903,6 +959,9 @@ dispatch() {
         timezone) change_timezone ;;
         smart-sub-url) change_smart_sub_url ;;
         smart-sub-port) change_smart_sub_port ;;
+        enforcer-interval) change_enforcer_interval ;;
+        reminder-days) change_reminder_days ;;
+        reminder-gb) change_reminder_gb ;;
         uninstall) uninstall_units ;;
         uninstall-full) full_uninstall ;;
         version) version; echo ;;
