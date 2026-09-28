@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from TenantRuntime.business import TenantBusinessError, TenantBusinessService
-from TenantRuntime.panels import PanelError, ProvisionRequest, ProvisionResult, UsageResult
+from TenantRuntime.panels import PanelError, PanelTarget, ProvisionRequest, ProvisionResult, UsageResult
 
 
 class FakePanel:
@@ -14,14 +14,14 @@ class FakePanel:
         self.secrets: list[str] = []
         self.usage_calls: list[str] = []
 
-    def provision(self, *, endpoint: str, secret: str, request: ProvisionRequest) -> ProvisionResult:
-        assert endpoint == "https://panel.example"
+    def provision(self, *, target: PanelTarget, secret: str, request: ProvisionRequest) -> ProvisionResult:
+        assert target.endpoint == "https://panel.example"
         self.secrets.append(secret)
         self.requests.append(request)
         return ProvisionResult(external_ref=f"remote-{request.subscription_id}")
 
-    def usage(self, *, endpoint: str, secret: str, external_ref: str) -> UsageResult:
-        assert endpoint == "https://panel.example"
+    def usage(self, *, target: PanelTarget, secret: str, external_ref: str) -> UsageResult:
+        assert target.endpoint == "https://panel.example"
         self.secrets.append(secret)
         self.usage_calls.append(external_ref)
         return UsageResult(usage_bytes=12345, active=True)
