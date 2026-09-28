@@ -6,6 +6,19 @@ INSTALL_DIR="${WL_INSTALL_DIR:-/opt/hiddify-whitelabel}"
 SERVICE_USER="${WL_SERVICE_USER:-whitelabel}"
 SERVICE_HOME="${WL_SERVICE_HOME:-/var/lib/hiddify-whitelabel}"
 BRANCH="${WL_INSTALL_BRANCH:-main}"
+DRY_RUN=0
+[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    cat <<EOF
+DRY-RUN: install apt prerequisites (ca-certificates curl git python3 python3-venv python3-pip)
+DRY-RUN: create dedicated service account: $SERVICE_USER
+DRY-RUN: clone $REPO_URL branch $BRANCH into $INSTALL_DIR
+DRY-RUN: run $INSTALL_DIR/install.sh install
+DRY-RUN: install manager command /usr/local/bin/whitelabel
+EOF
+    exit 0
+fi
 
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     echo "ERROR: run with sudo/root." >&2
