@@ -37,16 +37,30 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends     ca-certificates curl git python3 python3-venv python3-pip
+apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    python3 \
+    python3-venv \
+    python3-pip
 
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
-    useradd --system --create-home --home-dir "$SERVICE_HOME"         --shell /usr/sbin/nologin "$SERVICE_USER"
+    useradd \
+        --system \
+        --user-group \
+        --create-home \
+        --home-dir "$SERVICE_HOME" \
+        --shell /usr/sbin/nologin \
+        "$SERVICE_USER"
 fi
+SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
 
-install -d -m 0755 -o "$SERVICE_USER" -g "$SERVICE_USER" "$(dirname "$INSTALL_DIR")"
+# Never change ownership of /opt (or another parent directory).
+mkdir -p "$(dirname "$INSTALL_DIR")"
 
 if [[ -d "$INSTALL_DIR/.git" ]]; then
-    chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
+    chown -R "$SERVICE_USER:$SERVICE_GROUP" "$INSTALL_DIR"
     echo "Existing installation detected; invoking updater."
     chmod +x "$INSTALL_DIR/install.sh"
     "$INSTALL_DIR/install.sh" update </dev/tty
@@ -62,7 +76,9 @@ fi
 
 rm -rf "$INSTALL_DIR"
 install -d -m 0755 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$INSTALL_DIR"
-runuser -u "$SERVICE_USER" -- git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
+runuser -u "$SERVICE_USER" -- \
+    git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
+
 chmod +x "$INSTALL_DIR/install.sh" "$INSTALL_DIR/bootstrap.sh" 2>/dev/null || true
 
 echo
