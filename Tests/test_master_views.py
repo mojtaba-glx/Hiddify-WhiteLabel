@@ -31,8 +31,9 @@ def _callbacks(markup) -> list[str]:
 def test_main_menu_has_all_phase2_sections_and_short_callbacks() -> None:
     labels = [label for label, _ in MAIN_MENU]
     assert labels == [
-        "👥 مشتریان", "🔐 لایسنس‌ها", "📦 پلن‌ها", "📊 آمار",
-        "💳 پرداخت‌ها", "⚠️ هشدارها", "🧾 تاریخچه", "⚙️ تنظیمات",
+        "👤 کاربران فروشگاه", "🤖 ربات‌های مشتریان", "🔐 لایسنس‌ها",
+        "📦 پلن‌ها", "📊 آمار", "💳 پرداخت‌ها", "⚠️ هشدارها",
+        "🧾 تاریخچه", "⚙️ تنظیمات",
     ]
     assert all(len(value.encode("utf-8")) <= 64 for value in _callbacks(main_menu_keyboard()))
 
