@@ -199,6 +199,10 @@ RUNTIME_SHARD_INDEX=0
 RUNTIME_RECONCILE_SECONDS=15
 RUNTIME_START_CONCURRENCY=8
 RUNTIME_POLL_TIMEOUT_SECONDS=20
+RUNTIME_LIFECYCLE_SECONDS=180
+SMART_SUB_HOST=127.0.0.1
+SMART_SUB_PORT=8091
+SMART_SUB_PUBLIC_BASE_URL=
 EOF
     } > "$temporary"
     chmod 600 "$temporary"
@@ -666,12 +670,60 @@ change_timezone() {
     return 1
 }
 
+change_smart_sub_url() {
+    require_root
+    local public_url env_backup
+    read_tty public_url -p "Smart subscription public base URL (example: https://sub.example.com): "
+    env_backup="$ROOT_DIR/runtime/env-before-smart-sub-url-$$"
+    cp -a "$ENV_FILE" "$env_backup"
+    chmod 600 "$env_backup"
+    if ! edit_env_value SMART_SUB_PUBLIC_BASE_URL "$public_url"; then
+        rm -f "$env_backup"
+        return 1
+    fi
+    if restart_services && health_services; then
+        rm -f "$env_backup"
+        echo "OK: smart subscription public URL updated."
+        return 0
+    fi
+    echo "ERROR: services failed after smart subscription URL change; restoring previous .env." >&2
+    cp -a "$env_backup" "$ENV_FILE"
+    rm -f "$env_backup"
+    restart_services || true
+    return 1
+}
+
+change_smart_sub_port() {
+    require_root
+    local port env_backup
+    read_tty port -p "Smart subscription listener port (1-65535): "
+    env_backup="$ROOT_DIR/runtime/env-before-smart-sub-port-$$"
+    cp -a "$ENV_FILE" "$env_backup"
+    chmod 600 "$env_backup"
+    if ! edit_env_value SMART_SUB_PORT "$port"; then
+        rm -f "$env_backup"
+        return 1
+    fi
+    if restart_services && health_services; then
+        rm -f "$env_backup"
+        echo "OK: smart subscription listener port updated."
+        return 0
+    fi
+    echo "ERROR: services failed after smart subscription port change; restoring previous .env." >&2
+    cp -a "$env_backup" "$ENV_FILE"
+    rm -f "$env_backup"
+    restart_services || true
+    return 1
+}
 show_nonsecret_settings() {
-    local admin_id shards timezone token_state
+    local admin_id shards timezone token_state smart_url smart_port
     admin_id="$(sed -n 's/^MASTER_ADMIN_ID=//p' "$ENV_FILE" | tail -n 1)"
     shards="$(shard_count)"
     timezone="$(sed -n 's/^DISPLAY_TIMEZONE=//p' "$ENV_FILE" | tail -n 1)"
+    smart_url="$(sed -n 's/^SMART_SUB_PUBLIC_BASE_URL=//p' "$ENV_FILE" | tail -n 1)"
+    smart_port="$(sed -n 's/^SMART_SUB_PORT=//p' "$ENV_FILE" | tail -n 1)"
     [[ -n "$timezone" ]] || timezone="Asia/Tehran"
+    [[ -n "$smart_port" ]] || smart_port="8091"
     if grep -q '^MASTER_BOT_TOKEN=..*' "$ENV_FILE" 2>/dev/null; then token_state="configured"; else token_state="missing"; fi
     echo
     echo "------ Current settings ------"
@@ -680,6 +732,8 @@ show_nonsecret_settings() {
     echo "Master admin ID: ${admin_id:-missing}"
     echo "Runtime shards: $shards"
     echo "Display timezone: $timezone"
+    echo "Smart subscription URL: ${smart_url:-not configured}"
+    echo "Smart subscription port: $smart_port"
     echo "Database: configured in private .env"
     echo "------------------------------"
 }
@@ -720,6 +774,8 @@ settings_menu() {
 3) Change Master admin Telegram ID
 4) Change Runtime shard count
 5) Change display timezone
+6) Change Smart Subscription public URL
+7) Change Smart Subscription listener port
 0) Back
 EOF
         read_tty choice -p "Select: "
@@ -729,6 +785,8 @@ EOF
             3) change_admin_id ;;
             4) change_shards ;;
             5) change_timezone ;;
+            6) change_smart_sub_url ;;
+            7) change_smart_sub_port ;;
             0) return 0 ;;
             *) echo "Invalid option." >&2 ;;
         esac
@@ -843,6 +901,8 @@ dispatch() {
         admin-id) change_admin_id ;;
         shards) change_shards ;;
         timezone) change_timezone ;;
+        smart-sub-url) change_smart_sub_url ;;
+        smart-sub-port) change_smart_sub_port ;;
         uninstall) uninstall_units ;;
         uninstall-full) full_uninstall ;;
         version) version; echo ;;
