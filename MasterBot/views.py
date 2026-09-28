@@ -121,6 +121,16 @@ def platform_customer_detail(customer: dict[str, Any]) -> tuple[str, InlineKeybo
             )
     next_status = "blocked" if customer["status"] == "active" else "active"
     keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "➕ افزایش کیف پول",
+                callback_data=f"customeradmin:wallet:add:{int(customer['id'])}",
+            ),
+            InlineKeyboardButton(
+                "➖ کاهش کیف پول",
+                callback_data=f"customeradmin:wallet:subtract:{int(customer['id'])}",
+            ),
+        ],
         [InlineKeyboardButton(
             "⛔ مسدودکردن" if next_status == "blocked" else "✅ فعال‌کردن",
             callback_data=f"customeradmin:status:{int(customer['id'])}:{next_status}",
