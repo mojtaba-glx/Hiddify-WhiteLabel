@@ -61,6 +61,14 @@ def build_supervisor(settings: RuntimeSettings, *, connection=None):
         cipher=cipher,
         shard_count=settings.shard_count,
         shard_index=settings.shard_index,
+        enforcer_batch_size=settings.enforcer_batch_size,
+        hot_usage_ratio=settings.enforcer_hot_usage_ratio,
+        node_freeze_failures=settings.node_freeze_failures,
+        reminder_days=settings.reminder_days,
+        reminder_remaining_gb=settings.reminder_remaining_gb,
+        reminder_lease_seconds=settings.reminder_lease_seconds,
+        reminder_max_retries=settings.reminder_max_retries,
+        reminder_retry_base_seconds=settings.reminder_retry_base_seconds,
     )
     supervisor = RuntimeSupervisor(
         catalog=catalog,
@@ -68,7 +76,7 @@ def build_supervisor(settings: RuntimeSettings, *, connection=None):
         reconcile_seconds=settings.reconcile_seconds,
         start_concurrency=settings.start_concurrency,
         lifecycle=lifecycle,
-        lifecycle_seconds=settings.lifecycle_seconds,
+        lifecycle_seconds=settings.enforcer_seconds,
     )
     return supervisor, connection
 
