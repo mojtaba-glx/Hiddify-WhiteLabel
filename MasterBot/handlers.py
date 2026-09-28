@@ -46,6 +46,7 @@ from MasterBot.views import (
     plans_view,
     tenant_detail,
     tenants_view,
+    trial_plan_picker,
 )
 from Shared.access import is_master_admin
 from Shared.redaction import get_logger, safe_format_exception
@@ -212,6 +213,18 @@ async def _show_plans(
         int(_actor_id(update) or 0), page=page_number, query=query
     )
     text, keyboard = plans_view(page, query=query)
+    await _render(update, text, keyboard)
+
+
+async def _show_plan(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, plan_id: int
+) -> None:
+    actor = int(_actor_id(update) or 0)
+    row = _service(context).get_plan(actor, int(plan_id))
+    settings = _portal(context).get_platform_settings(actor)
+    text, keyboard = plan_detail(
+        row, trial_plan_id=settings.get("trial_plan_id")
+    )
     await _render(update, text, keyboard)
 
 
@@ -637,9 +650,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await _render(update, "🔎 نام، وضعیت یا شناسه پلن را بفرستید:", back_keyboard("plan:page:0"))
             return
         if data.startswith("plan:view:"):
-            row = service.get_plan(actor, _parse_int(data.rsplit(":", 1)[1], "plan id"))
-            text, keyboard = plan_detail(row)
-            await _render(update, text, keyboard)
+            await _show_plan(
+                update, context, _parse_int(data.rsplit(":", 1)[1], "plan id")
+            )
             return
         if data.startswith("plan:edit:"):
             plan_id = _parse_int(data.rsplit(":", 1)[1], "plan id")
@@ -657,9 +670,34 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             context.user_data["flow"] = {"kind": "plan_commerce", "plan_id": plan_id}
             await _render(
                 update,
-                "🛍 تنظیمات فروش پلن را بفرستید:\nارز | نمایش عمومی (0 یا 1) | روزهای لایسنس تست\n\nمثال: USD | 1 | 7",
+                "💰 تنظیمات فروش پلن\n\n"
+                "ارز و تعداد روز لایسنس تست را بفرستید:\n"
+                "ارز | روزهای تست\n\n"
+                "مثال: IRR | 3\n"
+                "برای غیرفعال بودن تست، تعداد روز را 0 بزنید.",
                 back_keyboard(f"plan:view:{plan_id}"),
             )
+            return
+        if data.startswith("plan:public:"):
+            _, _, plan_raw, public_raw = data.split(":", 3)
+            plan_id = _parse_int(plan_raw, "plan id")
+            public_value = _parse_int(public_raw, "public flag")
+            if public_value not in (0, 1):
+                raise ValueError("invalid public flag")
+            row = service.get_plan(actor, plan_id)
+            _portal(context).configure_plan_commerce(
+                actor,
+                plan_id,
+                currency=str(row.get("currency") or "USD"),
+                is_public=bool(public_value),
+                trial_days=int(row.get("trial_days") or 0),
+            )
+            await _show_plan(update, context, plan_id)
+            return
+        if data.startswith("plan:trial:"):
+            plan_id = _parse_int(data.rsplit(":", 1)[1], "plan id")
+            _portal(context).set_trial_plan(actor, plan_id)
+            await _show_plan(update, context, plan_id)
             return
         if data.startswith("plan:status:"):
             _, _, plan_raw, status = data.split(":", 3)
@@ -851,6 +889,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await _render(update, audit_text(page.items), InlineKeyboardMarkup(rows))
             return
         if data == "menu:settings":
+            await _show_settings(update, context)
+            return
+        if data == "settings:trialplan":
+            settings = _portal(context).get_platform_settings(actor)
+            plans = _portal(context).list_trial_plan_candidates(actor)
+            text, keyboard = trial_plan_picker(
+                plans, selected_plan_id=settings.get("trial_plan_id")
+            )
+            await _render(update, text, keyboard)
+            return
+        if data == "settings:trialplan:auto":
+            _portal(context).set_trial_plan(actor, None)
+            await _show_settings(update, context)
+            return
+        if data.startswith("settings:trialplan:set:"):
+            plan_id = _parse_int(data.rsplit(":", 1)[1], "plan id")
+            _portal(context).set_trial_plan(actor, plan_id)
             await _show_settings(update, context)
             return
         if data.startswith("settings:edit:"):
@@ -1069,21 +1124,21 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             else:
                 row = service.update_plan(actor, int(flow["plan_id"]), **kwargs)
             context.user_data.pop("flow", None)
-            detail, keyboard = plan_detail(row)
-            await _render(update, detail, keyboard)
+            await _show_plan(update, context, int(row["id"]))
             return
         if kind == "plan_commerce":
-            fields = _split_fields(text, 3, 3)
-            public_raw = _parse_int(fields[1], "public flag")
-            if public_raw not in (0, 1):
-                raise ValueError("public flag must be 0 or 1")
-            row = _portal(context).configure_plan_commerce(
-                actor, int(flow["plan_id"]), currency=fields[0],
-                is_public=bool(public_raw), trial_days=_parse_int(fields[2], "trial days"),
+            fields = _split_fields(text, 2, 2)
+            plan_id = int(flow["plan_id"])
+            current = service.get_plan(actor, plan_id)
+            _portal(context).configure_plan_commerce(
+                actor,
+                plan_id,
+                currency=fields[0],
+                is_public=bool(int(current.get("is_public", 1))),
+                trial_days=_parse_int(fields[1], "trial days"),
             )
             context.user_data.pop("flow", None)
-            detail, keyboard = plan_detail(row)
-            await _render(update, detail, keyboard)
+            await _show_plan(update, context, plan_id)
             return
         if kind in ("payment_method_new", "payment_method_edit"):
             fields = _split_fields(text, 4, 5)
