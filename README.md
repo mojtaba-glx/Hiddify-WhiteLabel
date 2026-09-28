@@ -25,7 +25,7 @@ Hiddify-WhiteLabel/
 ├── Ops/                  # Phase 6 - health, encrypted backup, locks, systemd
 ├── Shared/               # settings, redacted logging, crypto, time, access
 ├── Database/             # connection, repositories, migration runner
-├── Migrations/           # versioned SQL (currently 0001 through 0011)
+├── Migrations/           # versioned SQL (currently 0001 through 0012)
 ├── Tests/                # offline pytest suite, fake tokens only
 ├── scripts/              # migrate helper
 ├── install.sh            # English operations menu and systemd installer
@@ -126,14 +126,21 @@ database, always scoped by `tenant_id`: servers, nodes, sale plans, end users,
 payment methods, orders, receipts, subscriptions, tickets and smart links.
 The TenantAdminBot manages these records. The TenantUserBot lets its users
 choose a plan, submit a text or photo receipt, view subscriptions, renew an
-existing service and create a support ticket. Hiddify provisioning is live:
-payment approval leaves an order `paid` until the remote operation succeeds,
-then the order becomes `fulfilled`. Failed purchase or renewal fulfillment is
-retryable. Panel credentials remain encrypted at rest and tenant scoped.
+existing service and create a support ticket. Live provisioning supports
+Hiddify Manager plus X-UI Sanaei and X-UI Alireza. Payment approval leaves an
+order `paid` until the remote operation succeeds, then the order becomes
+`fulfilled`. Failed purchase or renewal fulfillment is retryable. Panel
+credentials remain encrypted at rest and tenant scoped.
+
+X-UI servers store only non-secret routing metadata in `tenant_servers`:
+panel flavor, target inbound ids, public subscription origin and subscription
+path. Sanaei Bearer tokens and Alireza username/password plus optional Xray
+secret headers are encrypted in `tenant_panel_credentials`.
 
 Subscription usage and last-online state are synchronized periodically. Time-
-or quota-expired Hiddify users are verified disabled before the local service
-is marked `expired`; an expired service cannot be re-enabled without renewal.
+or quota-expired users are verified disabled on their provider before the local
+service is marked `expired`; an expired service cannot be re-enabled without
+renewal.
 
 The MasterBot JobQueue runs the Phase-3 evaluator at the configured interval.
 It advances expiry/grace states, suspends expired licenses, persists 7/3/1-day
@@ -185,11 +192,12 @@ by `(tenant_id, bot_role, telegram_user_id)`. Database or credential errors
 fail closed for the affected update, while failure to start one bot does not
 stop the other tenant bots in that shard.
 
-The tenant runtime already includes tenant-scoped inventory, sale plans,
-payment instructions, receipts, subscriptions, tickets and smart-link flows.
-The remaining integration work is the live Hiddify/X-UI adapter layer:
-encrypted panel credentials exist, but live subscription provisioning, usage
-sync and staged production drills are intentionally still pending.
+The tenant runtime includes tenant-scoped inventory, sale plans, payment
+instructions, receipts, subscriptions, tickets and smart-link flows. Hiddify,
+X-UI Sanaei and X-UI Alireza now implement the live provider boundary for
+provisioning, renewal, enable/disable, deletion, usage/last-online sync and
+native subscription links. Staged production drills with real test panels are
+kept separate from the offline CI suite.
 
 ## Easy install and operations
 
