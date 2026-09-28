@@ -153,3 +153,38 @@ def test_wallet_paid_renewal_extends_license_atomically(portal, factories) -> No
     ).fetchone()
     assert refreshed is not None
     assert parse_utc(str(refreshed["expires_at"])) > before_expiry
+
+
+def test_owner_can_list_search_and_block_storefront_customers(portal) -> None:
+    portal.register_customer(101, display_name="Ali Customer", username="ali_shop")
+    portal.register_customer(202, display_name="Sara Customer", username="sara_shop")
+
+    page = portal.list_platform_customers(9001, page_size=10)
+    assert {int(row["telegram_user_id"]) for row in page.items} == {101, 202}
+
+    searched = portal.list_platform_customers(9001, query="ali_shop")
+    assert len(searched.items) == 1
+    customer_id = int(searched.items[0]["id"])
+
+    blocked = portal.set_platform_customer_status(9001, customer_id, "blocked")
+    assert blocked["status"] == "blocked"
+    with pytest.raises(CustomerPortalError):
+        portal.create_wallet_topup(101, currency="USD", amount=10)
+
+    active = portal.set_platform_customer_status(9001, customer_id, "active")
+    assert active["status"] == "active"
+
+
+def test_storefront_customer_detail_includes_wallet_orders_and_tenants(portal, factories) -> None:
+    plan = factories.plan(price=100)
+    portal.configure_plan_commerce(
+        9001, int(plan["id"]), currency="USD", is_public=True, trial_days=0
+    )
+    customer = portal.register_customer(101, display_name="Customer", username="buyer")
+    factories.tenant(owner_telegram_id=101)
+    portal.create_purchase_order(101, int(plan["id"]))
+
+    detail = portal.get_platform_customer_admin(9001, int(customer["id"]))
+    assert int(detail["order_count"]) == 1
+    assert int(detail["tenant_count"]) == 1
+    assert detail["recent_orders"][0]["kind"] == "purchase"
