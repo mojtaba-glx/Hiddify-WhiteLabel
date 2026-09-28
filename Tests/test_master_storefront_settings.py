@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from MasterBot.customer_service import CustomerPortalError, CustomerPortalService
+from MasterBot.customer_service import CustomerPortalError, CustomerPortalService, PaymentStateError
 from MasterBot.service import MasterService
 from Shared.access import AccessDenied
 from Shared.crypto import FernetTokenCipher, generate_key
@@ -336,3 +336,56 @@ def test_rejected_order_does_not_receive_paid_at(portal, factories) -> None:
     rejected = portal.get_order(101, int(order["id"]))
     assert rejected["status"] == "rejected"
     assert rejected["paid_at"] is None
+
+
+def test_owner_can_adjust_customer_wallet_with_audit(portal) -> None:
+    customer = portal.register_customer(101, display_name="Wallet User")
+    customer_id = int(customer["id"])
+
+    added = portal.adjust_customer_wallet(
+        9001, customer_id, currency="IRR", amount=500000, note="manual credit"
+    )
+    assert added["balance"] == 500000
+    assert portal.wallet_balance(101, "IRR") == 500000
+
+    removed = portal.adjust_customer_wallet(
+        9001, customer_id, currency="IRR", amount=-200000, note="manual correction"
+    )
+    assert removed["balance"] == 300000
+    assert portal.wallet_balance(101, "IRR") == 300000
+
+    tx = portal.conn.execute(
+        "SELECT * FROM wallet_transactions WHERE customer_id = ? ORDER BY id DESC LIMIT 1",
+        (customer_id,),
+    ).fetchone()
+    assert tx is not None
+    assert tx["kind"] == "admin"
+    assert int(tx["amount"]) == -200000
+    assert int(tx["resulting_balance"]) == 300000
+
+    audit = portal.conn.execute(
+        "SELECT * FROM audit_events WHERE action = 'wallet.admin_adjust'"
+        " ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert audit is not None
+
+
+def test_wallet_adjustment_cannot_overdraw_customer(portal) -> None:
+    customer = portal.register_customer(101, display_name="Wallet User")
+    customer_id = int(customer["id"])
+    portal.adjust_customer_wallet(
+        9001, customer_id, currency="USD", amount=10
+    )
+    with pytest.raises(PaymentStateError):
+        portal.adjust_customer_wallet(
+            9001, customer_id, currency="USD", amount=-11
+        )
+    assert portal.wallet_balance(101, "USD") == 10
+
+
+def test_customer_cannot_adjust_any_wallet(portal) -> None:
+    customer = portal.register_customer(101, display_name="Wallet User")
+    with pytest.raises(AccessDenied):
+        portal.adjust_customer_wallet(
+            101, int(customer["id"]), currency="USD", amount=10
+        )
