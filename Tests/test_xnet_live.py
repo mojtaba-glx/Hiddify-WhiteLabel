@@ -217,7 +217,9 @@ def test_xnet_live_create_renew_toggle_usage_delete_and_link() -> None:
     )
     assert state["delete_calls"] == 1
     assert all(inbound["clients"] == [] for inbound in inbounds)
-    assert all("api-token" not in str(value) for value in state["token_headers"])
+    assert state["token_headers"] and all(
+        value == "Bearer api-token" for value in state["token_headers"]
+    )
 
 
 def test_xnet_rejected_api_token_falls_back_to_login_jwt() -> None:
