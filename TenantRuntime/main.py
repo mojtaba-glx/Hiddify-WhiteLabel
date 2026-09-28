@@ -18,6 +18,10 @@ from Shared.crypto import FernetTokenCipher
 from Shared.redaction import configure_safe_logging, get_logger, safe_format_exception
 from Shared.settings import RuntimeSettings, load_runtime_from_env
 from TenantRuntime.lifecycle import TenantLifecycleCoordinator
+from TenantRuntime.smart_subscription import (
+    SmartSubscriptionHTTPServer,
+    SmartSubscriptionService,
+)
 from TenantRuntime.supervisor import RuntimeSupervisor
 from TenantRuntime.worker import TenantApplicationFactory
 
@@ -73,6 +77,17 @@ async def run_runtime(settings: RuntimeSettings) -> None:
     lock_name = f"runtime-{settings.shard_count}-{settings.shard_index}"
     with ProcessLock(ROOT / "runtime" / "locks", lock_name):
         supervisor, connection = build_supervisor(settings)
+        smart_server = None
+        if int(settings.shard_index) == 0:
+            smart_server = SmartSubscriptionHTTPServer(
+                host=settings.smart_sub_host,
+                port=settings.smart_sub_port,
+                service=SmartSubscriptionService(
+                    db_path=_database_path(settings),
+                    cipher=FernetTokenCipher(settings.token_encryption_key),
+                ),
+            )
+            smart_server.start()
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
         for signum in (signal.SIGINT, signal.SIGTERM):
@@ -88,6 +103,8 @@ async def run_runtime(settings: RuntimeSettings) -> None:
         try:
             await supervisor.run_forever(stop_event)
         finally:
+            if smart_server is not None:
+                smart_server.stop()
             connection.close()
 
 
