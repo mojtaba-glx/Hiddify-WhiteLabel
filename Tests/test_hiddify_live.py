@@ -1,0 +1,181 @@
+"""Hiddify live adapter: v11/v12/v13 compatibility and safe runtime routing."""
+
+from __future__ import annotations
+
+import json
+from datetime import timedelta
+
+import httpx
+import pytest
+
+from Shared.timeutils import iso_utc, utcnow
+from TenantRuntime.hiddify import HiddifyPanelAdapter
+from TenantRuntime.panels import (
+    PanelError,
+    PanelTarget,
+    ProvisionRequest,
+    RenewRequest,
+)
+
+
+def _target() -> PanelTarget:
+    return PanelTarget(
+        kind="hiddify",
+        endpoint="https://panel.example",
+        admin_path="admin-secret",
+        user_path="user-secret",
+    )
+
+
+def _request() -> ProvisionRequest:
+    return ProvisionRequest(
+        tenant_id=7,
+        server_id=11,
+        subscription_id=23,
+        customer_id=31,
+        traffic_bytes=20 * 1024**3,
+        duration_days=30,
+        expires_at=iso_utc(utcnow() + timedelta(days=30)),
+        idempotency_key="tenant:7:subscription:23",
+    )
+
+
+def _json_response(status: int, payload, request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        status,
+        request=request,
+        headers={"content-type": "application/json"},
+        content=json.dumps(payload).encode(),
+    )
+
+
+def test_v13_create_translates_is_active_and_returns_native_subscription_link() -> None:
+    seen: list[tuple[str, str, dict | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode()) if request.content else None
+        seen.append((request.method, request.url.path, body))
+        if request.url.path.endswith("/api/v2/panel/info/"):
+            return _json_response(200, {"version": "13.0.0"}, request)
+        if request.method == "POST":
+            assert body["enable"] is True
+            assert "is_active" not in body
+            return _json_response(200, {"uuid": body["uuid"], "enable": True}, request)
+        if request.method == "PATCH":
+            return _json_response(200, {"uuid": request.url.path.split("/")[-2], "enable": True}, request)
+        return _json_response(
+            200,
+            {
+                "uuid": request.url.path.split("/")[-2],
+                "enable": True,
+                "current_usage_GB": 0,
+                "usage_limit_GB": 20,
+            },
+            request,
+        )
+
+    adapter = HiddifyPanelAdapter(transport=httpx.MockTransport(handler))
+    result = adapter.provision(target=_target(), secret="api-key", request=_request())
+    assert result.external_ref
+    assert result.subscription_url == (
+        f"https://panel.example/user-secret/{result.external_ref}/all.txt"
+    )
+    assert any(path.endswith("/admin-secret/api/v2/admin/user/") for _, path, _ in seen)
+
+
+def test_v12_renew_keeps_legacy_fields_and_resets_usage() -> None:
+    patches: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode()) if request.content else None
+        if request.url.path.endswith("/api/v2/panel/info/"):
+            return _json_response(200, {"version": "12.3.3"}, request)
+        if request.method == "PATCH":
+            patches.append(body)
+            return _json_response(200, {"uuid": "u-1", "is_active": True}, request)
+        return _json_response(
+            200,
+            {
+                "uuid": "u-1",
+                "is_active": True,
+                "current_usage_GB": 0,
+                "usage_limit_GB": 50,
+                "last_online": "2026-09-28 21:00:00",
+            },
+            request,
+        )
+
+    adapter = HiddifyPanelAdapter(transport=httpx.MockTransport(handler))
+    result = adapter.renew(
+        target=_target(),
+        secret="api-key",
+        external_ref="u-1",
+        request=RenewRequest(
+            traffic_bytes=50 * 1024**3,
+            duration_days=30,
+            expires_at=iso_utc(utcnow() + timedelta(days=30)),
+        ),
+    )
+    assert patches[0]["usage_limit_GB"] == 50.0
+    assert patches[0]["package_days"] == 30
+    assert patches[0]["current_usage_GB"] == 0
+    assert "start_date" in patches[0]
+    assert result.active is True
+
+
+def test_usage_refreshes_official_counter_and_preserves_last_online() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path.endswith("/update_user_usage/"):
+            return _json_response(200, {"status": "success"}, request)
+        return _json_response(
+            200,
+            {
+                "uuid": "u-2",
+                "is_active": True,
+                "current_usage_GB": 1.5,
+                "usage_limit_GB": 10,
+                "last_online": "2026-09-29 00:15:00",
+            },
+            request,
+        )
+
+    adapter = HiddifyPanelAdapter(transport=httpx.MockTransport(handler))
+    usage = adapter.usage(target=_target(), secret="api-key", external_ref="u-2")
+    assert usage.usage_bytes == int(1.5 * 1024**3)
+    assert usage.active is True
+    assert usage.last_online == "2026-09-29 00:15:00"
+    assert any(path.endswith("/api/v2/admin/update_user_usage/") for path in calls)
+
+
+def test_delete_falls_back_to_verified_disable() -> None:
+    state = {"enabled": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode()) if request.content else None
+        if request.url.path.endswith("/api/v2/panel/info/"):
+            return _json_response(200, {"version": "12.3.3"}, request)
+        if request.method == "DELETE":
+            return _json_response(405, {"detail": "method not allowed"}, request)
+        if request.method == "PATCH":
+            if body.get("is_active") is False:
+                state["enabled"] = False
+            return _json_response(200, {"uuid": "u-3", "is_active": state["enabled"]}, request)
+        return _json_response(200, {"uuid": "u-3", "is_active": state["enabled"]}, request)
+
+    adapter = HiddifyPanelAdapter(transport=httpx.MockTransport(handler))
+    adapter.delete_user(target=_target(), secret="api-key", external_ref="u-3")
+    assert state["enabled"] is False
+
+
+def test_invalid_hiddify_target_fails_without_echoing_secret() -> None:
+    adapter = HiddifyPanelAdapter(transport=httpx.MockTransport(lambda request: _json_response(500, {}, request)))
+    with pytest.raises(PanelError) as exc:
+        adapter.get_user(
+            target=PanelTarget(kind="hiddify", endpoint="file:///etc/passwd", admin_path="x", user_path="y"),
+            secret="super-secret",
+            external_ref="u",
+        )
+    assert "super-secret" not in str(exc.value)
