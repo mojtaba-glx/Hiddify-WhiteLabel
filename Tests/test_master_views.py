@@ -10,7 +10,12 @@ import pytest
 from telegram.ext import ApplicationHandlerStop, TypeHandler
 
 from MasterBot.handlers import access_gate, on_callback, on_text
-from MasterBot.customer_views import CUSTOMER_BUTTONS, customer_main_keyboard
+from MasterBot.customer_views import (
+    CUSTOMER_BUTTONS,
+    customer_main_keyboard,
+    orders_text,
+    services_text,
+)
 from MasterBot.main import build_application
 from MasterBot.service import BotIdentity, MasterService, Page
 from MasterBot.views import (
@@ -232,3 +237,29 @@ def test_access_gate_blocks_customer_forging_settings_callback(conn) -> None:
     with pytest.raises(ApplicationHandlerStop):
         asyncio.run(access_gate(update, context))
     query.answer.assert_awaited_once_with("Access denied", show_alert=True)
+
+
+def test_customer_order_and_service_statuses_are_localized() -> None:
+    order_text = orders_text([{
+        "public_id": "ord-1",
+        "plan_name": "Pro",
+        "kind": "purchase",
+        "amount": 100,
+        "currency": "USD",
+        "status": "pending_payment",
+    }])
+    assert "در انتظار پرداخت" in order_text
+    assert "pending_payment" not in order_text
+
+    service_text = services_text([{
+        "id": 1,
+        "name": "My Shop",
+        "slug": "internal-slug",
+        "status": "active",
+        "license_status": "grace",
+        "plan_name": "Pro",
+        "expires_at": "2030-01-01T00:00:00+00:00",
+    }], timezone_name="Asia/Tehran")
+    assert "My Shop" in service_text
+    assert "مهلت تمدید" in service_text
+    assert "internal-slug" not in service_text
