@@ -1,6 +1,6 @@
 # Hiddify-WhiteLabel
 
-**Current version: `v0.9.2`**
+**Current version: `v0.9.3`**
 
 White-Label SaaS for selling VPN subscriptions: each customer (tenant) gets
 two dedicated bots (`TenantAdminBot` + `TenantUserBot`). The platform owner
@@ -32,7 +32,7 @@ Hiddify-WhiteLabel/
 ├── docs/                 # ARCHITECTURE, THREAT_MODEL, ROADMAP, decisions/
 ├── .env.example          # empty template, no secrets
 ├── requirements.txt      # pinned deps
-└── VERSION               # 0.9.2
+└── VERSION               # 0.9.3
 ```
 
 Reference project `Hiddify-SellBot` was used **read-only** to understand
@@ -213,4 +213,7 @@ service-only removal and guarded full uninstall.
 
 Updates fetch `origin/main`, refuse tracked local source changes, install
 dependencies and run the complete offline test suite before stopping live
-services. See `docs/OPERATIONS.md` for direct commands and recovery details.
+services. Before migrations, the updater creates a private consistent SQLite +
+`.env` rollback snapshot; any migration/startup/health failure restores the
+previous database, environment and source version automatically. See
+`docs/OPERATIONS.md` for direct commands and recovery details.
