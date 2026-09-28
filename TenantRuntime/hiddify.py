@@ -489,3 +489,15 @@ class HiddifyPanelAdapter:
 
     def subscription_link(self, *, target: PanelTarget, external_ref: str) -> str:
         return f"{_user_base(target, external_ref)}/all.txt"
+
+    def subscription_content(
+        self, *, target: PanelTarget, secret: str, external_ref: str
+    ) -> str:
+        data = self._request(
+            "GET",
+            self.subscription_link(target=target, external_ref=external_ref),
+            secret,
+        )
+        if isinstance(data, str) and data.strip():
+            return data.strip()
+        raise PanelError("Hiddify subscription is empty")
