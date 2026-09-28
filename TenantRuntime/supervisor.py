@@ -24,6 +24,10 @@ class RuntimeWorkerFactory(Protocol):
     def create(self, spec: RuntimeBotSpec) -> RuntimeWorker: ...
 
 
+class LifecycleCoordinator(Protocol):
+    async def run_once(self): ...
+
+
 @dataclass
 class ReconcileReport:
     desired: int = 0
@@ -43,11 +47,15 @@ class RuntimeSupervisor:
         worker_factory: RuntimeWorkerFactory,
         reconcile_seconds: int = 15,
         start_concurrency: int = 8,
+        lifecycle: LifecycleCoordinator | None = None,
+        lifecycle_seconds: int = 180,
     ) -> None:
         self.catalog = catalog
         self.worker_factory = worker_factory
         self.reconcile_seconds = max(5, int(reconcile_seconds))
         self.start_concurrency = max(1, min(int(start_concurrency), 32))
+        self.lifecycle = lifecycle
+        self.lifecycle_seconds = max(60, int(lifecycle_seconds))
         self._workers: dict[int, RuntimeWorker] = {}
         self._lock = asyncio.Lock()
 
@@ -157,6 +165,8 @@ class RuntimeSupervisor:
                 await self._stop_worker(bot_id, report)
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:
+        loop = asyncio.get_running_loop()
+        next_lifecycle_at = 0.0
         try:
             while not stop_event.is_set():
                 report = await self.reconcile()
@@ -169,6 +179,29 @@ class RuntimeSupervisor:
                         report.stopped,
                         report.errors,
                     )
+
+                if self.lifecycle is not None and loop.time() >= next_lifecycle_at:
+                    try:
+                        lifecycle_report = await self.lifecycle.run_once()
+                        if getattr(lifecycle_report, "errors", 0) or getattr(
+                            lifecycle_report, "expired", 0
+                        ):
+                            logger.info(
+                                "Runtime lifecycle tenants=%s synced=%s expired=%s errors=%s",
+                                getattr(lifecycle_report, "tenants", 0),
+                                getattr(lifecycle_report, "synced", 0),
+                                getattr(lifecycle_report, "expired", 0),
+                                getattr(lifecycle_report, "errors", 0),
+                            )
+                    except Exception as exc:
+                        logger.error(
+                            "Runtime lifecycle failed (%s)", type(exc).__name__
+                        )
+                    finally:
+                        next_lifecycle_at = loop.time() + float(
+                            self.lifecycle_seconds
+                        )
+
                 try:
                     await asyncio.wait_for(
                         stop_event.wait(), timeout=float(self.reconcile_seconds)
