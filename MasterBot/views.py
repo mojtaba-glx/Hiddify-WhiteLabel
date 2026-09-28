@@ -421,10 +421,10 @@ def order_detail_view(order: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]
         lines.append(f"پلن: {order['plan_name']}")
     if order.get("tenant_name"):
         lines.append(f"ربات: {order['tenant_name']}")
-    lines.extend([
-        f"ثبت: {str(order['created_at']).replace('T', ' ')[:19]}",
-        f"آخرین تغییر: {str(order['updated_at']).replace('T', ' ')[:19]}",
-    ])
+    lines.append(f"ثبت: {str(order['created_at']).replace('T', ' ')[:19]}")
+    if order.get("paid_at"):
+        lines.append(f"پرداخت: {str(order['paid_at']).replace('T', ' ')[:19]}")
+    lines.append(f"آخرین تغییر: {str(order['updated_at']).replace('T', ' ')[:19]}")
 
     receipts = order.get("receipts") or []
     wallet_txs = order.get("wallet_transactions") or []
