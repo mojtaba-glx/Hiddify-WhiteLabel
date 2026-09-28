@@ -258,7 +258,11 @@ def test_pending_bad_plan_is_fk_even_with_existing_active_license(conn, factorie
             tenant_id=int(tenant["id"]), plan_id=99999999, status="pending",
             starts_at="2030-01-01T00:00:00Z", expires_at="2030-02-01T00:00:00Z",
         )
-    assert getattr(exc.value, "sqlite_errorname", "") == "SQLITE_CONSTRAINT_FOREIGNKEY"
+    error_name = str(getattr(exc.value, "sqlite_errorname", "") or "")
+    assert (
+        error_name == "SQLITE_CONSTRAINT_FOREIGNKEY"
+        or "FOREIGN KEY constraint failed" in str(exc.value)
+    )
 
 
 # ---- 6. suspended_at set/clear + atomic audit ----
