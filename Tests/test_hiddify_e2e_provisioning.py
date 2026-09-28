@@ -205,6 +205,11 @@ def test_default_server_and_pending_subscription_never_cross_tenants(conn, facto
     with pytest.raises(TenantBusinessError, match="server not found"):
         b.set_default_server(7002, server_id=int(server_a["id"]))
 
+    server_b = b.add_server(
+        7002, label="B", panel_kind="hiddify", endpoint="https://b.example"
+    )
+    b.set_panel_credential(7002, server_id=int(server_b["id"]), secret="b-key")
+
     _, receipt = _purchase(a, owner=7001, customer=31)
     reviewed = a.review_receipt(7001, int(receipt["id"]), approve=True)
     with pytest.raises(TenantBusinessError, match="subscription is not awaiting provisioning"):
