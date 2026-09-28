@@ -205,6 +205,31 @@ class CustomerPortalService:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def cancel_order(self, actor_id: int, order_id: int) -> dict[str, Any]:
+        order = self.get_order(actor_id, int(order_id))
+        if order["status"] != "pending_payment":
+            raise PaymentStateError("فقط سفارش در انتظار پرداخت قابل لغو است.")
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE customer_orders SET status = 'cancelled', updated_at = ?"
+                " WHERE id = ? AND customer_id = ? AND status = 'pending_payment'",
+                (now, int(order_id), int(order["customer_id"])),
+            )
+            if changed.rowcount != 1:
+                raise PaymentStateError("وضعیت سفارش تغییر کرده است؛ دوباره بررسی کنید.")
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id),
+                tenant_id=(
+                    int(order["tenant_id"]) if order.get("tenant_id") is not None else None
+                ),
+                action="customer.order_cancel",
+                entity_type="customer_order",
+                entity_id=str(int(order_id)),
+                metadata={"kind": str(order["kind"]), "public_id": str(order["public_id"])},
+            )
+        return self.get_order(actor_id, int(order_id))
+
     def list_services(self, actor_id: int) -> list[dict[str, Any]]:
         self._customer(actor_id)
         rows = self.conn.execute(
