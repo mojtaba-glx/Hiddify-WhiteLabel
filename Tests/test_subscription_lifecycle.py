@@ -380,6 +380,11 @@ def test_lifecycle_coordinator_syncs_only_its_shard(
     conn, db_path, factories, cipher
 ) -> None:
     state = _prepared(conn, factories, cipher)
+    # The next auto-increment tenant id has opposite parity, so a two-shard
+    # coordinator must ignore it when it owns the prepared tenant.
+    other = factories.tenant(owner_telegram_id=8001)
+    assert int(other["id"]) % 2 != int(state["tenant"]["id"]) % 2
+
     sub = state["service"].list_subscriptions(state["customer"])[0]
     ref = str(sub["external_ref"])
     state["panel"].users[ref]["usage_bytes"] = 2 * 1024**3
@@ -388,12 +393,12 @@ def test_lifecycle_coordinator_syncs_only_its_shard(
     coordinator = TenantLifecycleCoordinator(
         db_path=db_path,
         cipher=cipher,
-        shard_count=1,
-        shard_index=0,
+        shard_count=2,
+        shard_index=int(state["tenant"]["id"]) % 2,
         panel_adapter_factory=lambda: state["panel"],
     )
     report = asyncio.run(coordinator.run_once())
-    assert report.tenants >= 1
+    assert report.tenants == 1
     assert report.synced == 1
     assert report.errors == 0
 
