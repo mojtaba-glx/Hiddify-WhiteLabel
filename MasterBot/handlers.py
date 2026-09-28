@@ -835,19 +835,41 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await _show_license(update, context, int(row["id"]))
                 return
             if expected == "payment_review":
+                approved = bool(pending["approve"])
                 reviewed = _portal(context).review_receipt(
-                    actor, int(pending["receipt_id"]), approve=bool(pending["approve"])
+                    actor, int(pending["receipt_id"]), approve=approved
                 )
-                notification = (
-                    "✅ پرداخت شما تأیید شد."
-                    if bool(pending["approve"]) else "❌ پرداخت شما تأیید نشد."
-                )
-                if bool(pending["approve"]) and reviewed["order_status"] == "paid":
-                    notification += " اکنون از بخش «راه‌اندازی ربات» ادامه دهید."
+                if not approved:
+                    notification = (
+                        f"❌ پرداخت سفارش {reviewed['public_id']} تأیید نشد.\n"
+                        "در صورت نیاز با پشتیبانی تماس بگیرید."
+                    )
+                elif reviewed["order_kind"] == "wallet_topup":
+                    notification = (
+                        f"✅ شارژ کیف پول {reviewed['public_id']} تأیید شد.\n"
+                        f"مبلغ: {int(reviewed['amount']):,} {reviewed['currency']}"
+                    )
+                elif reviewed["order_kind"] == "renewal":
+                    notification = (
+                        f"✅ تمدید {reviewed['public_id']} با موفقیت انجام شد.\n"
+                        f"مبلغ: {int(reviewed['amount']):,} {reviewed['currency']}"
+                    )
+                elif reviewed["order_status"] == "paid":
+                    notification = (
+                        f"✅ پرداخت سفارش {reviewed['public_id']} تأیید شد.\n\n"
+                        "🔑 اکنون از بخش «راه‌اندازی ربات» ادامه دهید."
+                    )
+                else:
+                    notification = f"✅ پرداخت سفارش {reviewed['public_id']} تأیید شد."
                 try:
-                    await context.bot.send_message(chat_id=int(reviewed["telegram_user_id"]), text=notification)
+                    await context.bot.send_message(
+                        chat_id=int(reviewed["telegram_user_id"]), text=notification
+                    )
                 except Exception as exc:
-                    logger.warning("Payment notification could not be sent: %s", safe_format_exception(exc))
+                    logger.warning(
+                        "Payment notification could not be sent: %s",
+                        safe_format_exception(exc),
+                    )
                 await _show_payments(update, context)
                 return
             raise ValueError("unknown confirmation")
