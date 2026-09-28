@@ -586,7 +586,7 @@ change_admin_id() {
     require_root
     local admin_id env_backup
     read_tty admin_id -p "New Master admin numeric Telegram ID: "
-    env_backup="$ROOT_DIR/runtime/env-before-admin-$"
+    env_backup="$(mktemp "$ROOT_DIR/runtime/env-before-admin.XXXXXX")"
     cp -a "$ENV_FILE" "$env_backup"
     chmod 600 "$env_backup"
     if ! edit_env_value MASTER_ADMIN_ID "$admin_id"; then
