@@ -288,6 +288,7 @@ class CustomerPortalService:
         currency = str(order["currency"])
         customer_id = int(order["customer_id"])
         now = iso_utc(utcnow())
+        final_status = "paid"
         with transaction(self.conn):
             self.conn.execute(
                 "INSERT INTO wallet_accounts (customer_id, currency, balance, updated_at)"
@@ -308,10 +309,24 @@ class CustomerPortalService:
                 " VALUES (?, ?, ?, 'purchase', ?, ?, ?, ?)",
                 (customer_id, currency, -amount, int(order_id), f"wallet-order:{order_id}", balance, now),
             )
+            if order["kind"] == "renewal":
+                plan = PlanRepository(self.conn).get_by_id(int(order["plan_id"]))
+                tenant_id = int(order["tenant_id"] or 0)
+                license_row = LicenseRepository(self.conn).latest_by_tenant(tenant_id)
+                if plan is None or tenant_id <= 0 or license_row is None:
+                    raise PaymentStateError("renewal target is unavailable")
+                renew_license(
+                    self.conn,
+                    license_id=int(license_row["id"]),
+                    tenant_id=tenant_id,
+                    extra_days=int(plan["duration_days"]),
+                    actor_id=int(actor_id),
+                )
+                final_status = "fulfilled"
             changed = self.conn.execute(
-                "UPDATE customer_orders SET status = 'paid', updated_at = ?"
+                "UPDATE customer_orders SET status = ?, updated_at = ?"
                 " WHERE id = ? AND customer_id = ? AND status = 'pending_payment'",
-                (now, int(order_id), customer_id),
+                (final_status, now, int(order_id), customer_id),
             )
             if changed.rowcount != 1:
                 raise PaymentStateError("order state changed")
