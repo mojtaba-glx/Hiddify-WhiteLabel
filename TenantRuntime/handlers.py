@@ -46,8 +46,8 @@ def _menu(spec: RuntimeBotSpec) -> InlineKeyboardMarkup:
         rows = [
             [InlineKeyboardButton("🖥 سرورها", callback_data="biz:servers"), InlineKeyboardButton("🔗 نودها", callback_data="biz:nodes")],
             [InlineKeyboardButton("📦 پلن‌های فروش", callback_data="biz:plans"), InlineKeyboardButton("💳 پرداخت", callback_data="biz:payments")],
-            [InlineKeyboardButton("🧾 سفارش‌ها", callback_data="biz:orders"), InlineKeyboardButton("🎫 تیکت‌ها", callback_data="biz:tickets")],
-            [InlineKeyboardButton("🔗 لینک هوشمند", callback_data="biz:links")],
+            [InlineKeyboardButton("🧾 سفارش‌ها", callback_data="biz:orders"), InlineKeyboardButton("📡 سرویس‌ها", callback_data="biz:subs")],
+            [InlineKeyboardButton("🎫 تیکت‌ها", callback_data="biz:tickets"), InlineKeyboardButton("🔗 لینک هوشمند", callback_data="biz:links")],
         ]
     else:
         rows = [
@@ -217,26 +217,71 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 context.user_data["biz_flow"] = {"kind": "payment"}; await update.callback_query.edit_message_text("نوع card/crypto | عنوان | ارز | مقصد | شبکه/نام | توضیح", reply_markup=_menu(spec)); return
             if data == "biz:orders":
                 items = business.list_orders_admin(actor); receipts = business.list_receipts_admin(actor)
-                pending = business.list_subscriptions_admin(actor, status="pending_provisioning")
-                text = "🧾 سفارش‌ها\n" + ("\n".join(f"#{x['id']} · {x['display_name']} · {x['plan_name']} · {x['status']}" for x in items) or "موردی نیست.")
+                pending = business.list_fulfillment_pending_admin(actor)
+                text = "🧾 سفارش‌ها\n" + ("\n".join(
+                    f"#{x['id']} · {x['display_name']} · {x['plan_name']} · {x['operation']} · {x['status']}"
+                    for x in items
+                ) or "موردی نیست.")
                 rows = [[InlineKeyboardButton(f"✅/❌ بررسی رسید #{x['id']} · {x['display_name']}", callback_data=f"biz:receipt:{x['id']}")] for x in receipts]
-                rows += [[InlineKeyboardButton(f"🔁 فعال‌سازی اشتراک #{x['id']} · {x['display_name']}", callback_data=f"biz:provision:{x['id']}")] for x in pending]
+                rows += [[InlineKeyboardButton(
+                    f"🔁 {'تمدید' if x['operation'] == 'renewal' else 'فعال‌سازی'} سفارش #{x['id']} · {x['display_name']}",
+                    callback_data=f"biz:fulfill:{x['id']}"
+                )] for x in pending]
                 rows.append([InlineKeyboardButton("↩️ منو", callback_data="runtime:home")])
                 await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows)); return
-            if data.startswith("biz:provision:"):
-                subscription_id = int(data.rsplit(":", 1)[1])
+            if data.startswith("biz:fulfill:"):
+                order_id = int(data.rsplit(":", 1)[1])
                 try:
-                    active = business.provision_pending_subscription(actor, subscription_id=subscription_id)
+                    result = business.fulfill_paid_order(actor, order_id=order_id)
+                    action = "تمدید" if result["operation"] == "renewal" else "فعال"
                     await update.callback_query.edit_message_text(
-                        f"✅ اشتراک #{subscription_id} فعال شد.\n🔗 {active['subscription_url']}",
+                        f"✅ سفارش #{order_id} انجام شد و سرویس {action} شد.\n🔗 {result.get('subscription_url') or '-'}",
                         reply_markup=_menu(spec),
                     )
                 except TenantBusinessError:
                     await update.callback_query.edit_message_text(
-                        "⚠️ فعال‌سازی انجام نشد. پرداخت محفوظ است و اشتراک در صف فعال‌سازی باقی ماند.",
+                        "⚠️ عملیات پنل انجام نشد. پرداخت محفوظ است و سفارش برای تلاش مجدد باقی ماند.",
                         reply_markup=_menu(spec),
                     )
                 return
+            if data == "biz:subs":
+                items = business.list_subscriptions_admin(actor)
+                text = "📡 سرویس‌ها\n" + ("\n".join(
+                    f"#{x['id']} · {x['display_name']} · {x['plan_name']} · {x['status']} · "
+                    f"{int(x['usage_bytes']) / (1024**3):.2f}/{int(x['traffic_bytes']) / (1024**3):.0f}GB · "
+                    f"آخرین اتصال: {x.get('last_online') or '-'}"
+                    for x in items
+                ) or "موردی نیست.")
+                rows = [[InlineKeyboardButton(
+                    f"🔄 سینک #{x['id']}", callback_data=f"biz:syncsub:{x['id']}"
+                )] for x in items[:12] if x["status"] in ("active", "disabled")]
+                rows += [
+                    [InlineKeyboardButton("🔄 همگام‌سازی همه", callback_data="biz:syncall")],
+                    [InlineKeyboardButton("⏱ اعمال انقضا", callback_data="biz:expireall")],
+                    [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                ]
+                await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows)); return
+            if data.startswith("biz:syncsub:"):
+                subscription_id = int(data.rsplit(":", 1)[1])
+                result = business.sync_subscription_usage(actor, subscription_id=subscription_id)
+                await update.callback_query.edit_message_text(
+                    f"✅ سرویس #{subscription_id} همگام شد.\nوضعیت: {result['status']}\n"
+                    f"مصرف: {result['usage_bytes'] / (1024**3):.2f}GB\n"
+                    f"آخرین اتصال: {result.get('last_online') or '-'}",
+                    reply_markup=_menu(spec),
+                ); return
+            if data == "biz:syncall":
+                result = business.sync_all_subscriptions(actor)
+                await update.callback_query.edit_message_text(
+                    f"✅ همگام‌سازی انجام شد.\nموفق: {result['synced']} · منقضی: {result['expired']} · خطا: {result['errors']}",
+                    reply_markup=_menu(spec),
+                ); return
+            if data == "biz:expireall":
+                result = business.expire_due_subscriptions(actor)
+                await update.callback_query.edit_message_text(
+                    f"✅ بررسی انقضا انجام شد.\nمنقضی: {result['expired']} · خطا: {result['errors']}",
+                    reply_markup=_menu(spec),
+                ); return
             if data.startswith("biz:receipt:"):
                 receipt_id = int(data.rsplit(":", 1)[1]); receipt = next((x for x in business.list_receipts_admin(actor) if int(x['id']) == receipt_id), None)
                 if receipt is None: raise TenantBusinessError("receipt not found")
@@ -249,16 +294,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 reviewed = business.review_receipt(actor, int(pending['receipt_id']), approve=approve)
                 if not approve:
                     await update.callback_query.edit_message_text("❌ رسید رد شد.", reply_markup=_menu(spec)); return
-                subscription_id = int(reviewed["subscription_id"])
                 try:
-                    active = business.provision_pending_subscription(actor, subscription_id=subscription_id)
+                    result = business.fulfill_paid_order(actor, order_id=int(reviewed["order_id"]))
+                    action = "تمدید" if result["operation"] == "renewal" else "فعال"
                     await update.callback_query.edit_message_text(
-                        f"✅ پرداخت تأیید و اشتراک #{subscription_id} فعال شد.\n🔗 {active['subscription_url']}",
+                        f"✅ پرداخت تأیید شد و سرویس #{result['id']} {action} شد.\n🔗 {result.get('subscription_url') or '-'}",
                         reply_markup=_menu(spec),
                     )
                 except TenantBusinessError:
                     await update.callback_query.edit_message_text(
-                        f"✅ پرداخت تأیید شد.\n⚠️ اشتراک #{subscription_id} ساخته شد اما فعال‌سازی پنل انجام نشد؛ از بخش سفارش‌ها دوباره فعال‌سازی کنید.",
+                        f"✅ پرداخت تأیید شد.\n⚠️ اجرای پنل انجام نشد؛ سفارش #{reviewed['order_id']} در بخش سفارش‌ها برای تلاش مجدد باقی ماند.",
                         reply_markup=_menu(spec),
                     )
                 return
@@ -284,9 +329,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await update.callback_query.edit_message_text(f"پرداخت به: {method['destination']}\n{method.get('instructions') or ''}\nکد پیگیری یا عکس رسید را ارسال کنید.", reply_markup=_menu(spec)); return
             if data == "shop:subs":
                 items = business.list_subscriptions(actor)
-                text = "📦 اشتراک‌های من\n" + ("\n".join(f"• #{x['id']} · {x['plan_name']} · {x['status']} · {x['expires_at']}" for x in items) or "اشتراکی ندارید.")
+                text = "📦 اشتراک‌های من\n" + ("\n".join(
+                    f"• #{x['id']} · {x['plan_name']} · {x['status']}\n"
+                    f"  مصرف: {int(x['usage_bytes']) / (1024**3):.2f}/{int(x['traffic_bytes']) / (1024**3):.0f}GB · "
+                    f"انقضا: {x['expires_at']}\n"
+                    f"  آخرین اتصال: {x.get('last_online') or '-'}"
+                    for x in items
+                ) or "اشتراکی ندارید.")
                 rows = []
                 for item in items:
+                    if item.get("external_ref") and item.get("server_id") and item["status"] in ("active", "disabled", "expired"):
+                        rows.append([InlineKeyboardButton(
+                            f"♻️ تمدید اشتراک #{item['id']}",
+                            callback_data=f"shop:renew:{item['id']}"
+                        )])
                     if item["status"] == "active" and item.get("external_ref") and item.get("server_id"):
                         try:
                             link = business.subscription_link(actor, subscription_id=int(item["id"]))
@@ -295,10 +351,46 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                             pass
                 rows.extend(_menu(spec).inline_keyboard)
                 await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows)); return
+            if data.startswith("shop:renew:"):
+                subscription_id = int(data.rsplit(":", 1)[1])
+                owned = next((x for x in business.list_subscriptions(actor) if int(x["id"]) == subscription_id), None)
+                if owned is None or owned["status"] not in ("active", "disabled", "expired"):
+                    raise TenantBusinessError("subscription cannot be renewed")
+                plans = business.list_plans()
+                rows = [[InlineKeyboardButton(
+                    f"{p['name']} · {p['traffic_gb']}GB · {p['duration_days']} روز · {p['price']:,} {p['currency']}",
+                    callback_data=f"shop:renewplan:{subscription_id}:{p['id']}"
+                )] for p in plans] or [[InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")]]
+                rows.append([InlineKeyboardButton("↩️ اشتراک‌های من", callback_data="shop:subs")])
+                await update.callback_query.edit_message_text(
+                    f"♻️ پلن تمدید اشتراک #{subscription_id} را انتخاب کنید.",
+                    reply_markup=InlineKeyboardMarkup(rows),
+                ); return
+            if data.startswith("shop:renewplan:"):
+                _, _, subscription_id, plan_id = data.split(":", 3)
+                order = business.create_renewal_order(
+                    actor,
+                    subscription_id=int(subscription_id),
+                    plan_id=int(plan_id),
+                )
+                methods = business.list_methods(currency=str(order["currency"]))
+                rows = [[InlineKeyboardButton(
+                    f"{m['title']} ({m['kind']})",
+                    callback_data=f"shop:pay:{order['id']}:{m['id']}"
+                )] for m in methods] or [[InlineKeyboardButton("روش پرداخت موجود نیست", callback_data="noop")]]
+                await update.callback_query.edit_message_text(
+                    f"تمدید سفارش #{order['id']} · {order['plan_name']} · {order['amount']:,} {order['currency']}\n"
+                    "روش پرداخت را انتخاب کنید.",
+                    reply_markup=InlineKeyboardMarkup(rows),
+                ); return
             if data == "shop:tickets":
                 context.user_data["biz_flow"] = {"kind": "ticket"}; await update.callback_query.edit_message_text("موضوع | متن تیکت را ارسال کنید.", reply_markup=_menu(spec)); return
             if data == "shop:guide":
-                await update.callback_query.edit_message_text("📖 راهنما\nپلن را انتخاب کنید و پرداخت را ثبت کنید. پس از تأیید مدیر، سیستم اشتراک را روی سرور فعال می‌کند و لینک در «اشتراک‌های من» نمایش داده می‌شود.", reply_markup=_menu(spec)); return
+                await update.callback_query.edit_message_text(
+                    "📖 راهنما\nبرای خرید، پلن و روش پرداخت را انتخاب کنید. برای تمدید از «اشتراک‌های من» روی ♻️ تمدید بزنید. "
+                    "سرویس منقضی بدون تمدید دوباره فعال نمی‌شود. مصرف و آخرین اتصال به‌صورت دوره‌ای از پنل همگام می‌شود.",
+                    reply_markup=_menu(spec),
+                ); return
     except (ValueError, TenantBusinessError, PermissionError, sqlite3.IntegrityError):
         await update.callback_query.answer("درخواست قابل انجام نیست.", show_alert=True); return
     await update.callback_query.answer("این دکمه معتبر نیست.", show_alert=True)

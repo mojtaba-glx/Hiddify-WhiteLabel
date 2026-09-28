@@ -7,6 +7,7 @@ state fields for v13+.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import re
@@ -418,6 +419,19 @@ class HiddifyPanelAdapter:
     def renew(
         self, *, target: PanelTarget, secret: str, external_ref: str, request: RenewRequest
     ) -> PanelUserResult:
+        current = self._get(target, secret, external_ref)
+        marker = ""
+        if str(request.idempotency_key or "").strip():
+            digest = hashlib.sha256(
+                str(request.idempotency_key).encode("utf-8")
+            ).hexdigest()[:20]
+            marker = f"wl-renew:{digest}"
+            if marker in str(current.get("comment") or ""):
+                # The remote reset already happened in an earlier attempt. Only
+                # verify/re-enable; never zero usage twice on a retry.
+                enabled = self._set_enabled_raw(target, secret, external_ref, True)
+                return self._snapshot(target, external_ref, enabled)
+
         payload: dict[str, Any] = {
             "usage_limit_GB": _bytes_to_gb(request.traffic_bytes),
             "package_days": max(1, int(request.duration_days)),
@@ -425,6 +439,9 @@ class HiddifyPanelAdapter:
         if request.reset_usage:
             payload["current_usage_GB"] = 0
             payload["start_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if marker:
+            comment = str(current.get("comment") or "").strip()
+            payload["comment"] = f"{comment} {marker}".strip()[:500]
         self._patch(target, secret, external_ref, payload)
         current = self._set_enabled_raw(target, secret, external_ref, True)
         return self._snapshot(target, external_ref, current)

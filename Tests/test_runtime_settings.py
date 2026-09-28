@@ -19,6 +19,7 @@ def test_runtime_defaults_and_secret_repr() -> None:
     assert (settings.shard_count, settings.shard_index) == (4, 0)
     assert (settings.reconcile_seconds, settings.poll_timeout_seconds) == (15, 20)
     assert settings.start_concurrency == 8
+    assert settings.lifecycle_seconds == 180
     assert settings.token_encryption_key not in repr(settings)
     assert not hasattr(settings, "master_bot_token")
 
@@ -32,6 +33,7 @@ def test_runtime_overrides() -> None:
             RUNTIME_START_CONCURRENCY="12",
             RUNTIME_POLL_TIMEOUT_SECONDS="25",
             RUNTIME_CACHE_TTL_SECONDS="3",
+            RUNTIME_LIFECYCLE_SECONDS="240",
         )
     )
     assert (settings.shard_count, settings.shard_index) == (8, 7)
@@ -39,6 +41,7 @@ def test_runtime_overrides() -> None:
     assert settings.start_concurrency == 12
     assert settings.poll_timeout_seconds == 25
     assert settings.license_cache_ttl_seconds == 3
+    assert settings.lifecycle_seconds == 240
 
 
 @pytest.mark.parametrize(
@@ -54,6 +57,7 @@ def test_runtime_overrides() -> None:
         {"RUNTIME_START_CONCURRENCY": "33"},
         {"RUNTIME_POLL_TIMEOUT_SECONDS": "4"},
         {"RUNTIME_POLL_TIMEOUT_SECONDS": "51"},
+        {"RUNTIME_LIFECYCLE_SECONDS": "59"},
     ],
 )
 def test_invalid_runtime_settings_fail_closed(change) -> None:

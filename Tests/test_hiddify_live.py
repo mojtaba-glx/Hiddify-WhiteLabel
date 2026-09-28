@@ -179,3 +179,71 @@ def test_invalid_hiddify_target_fails_without_echoing_secret() -> None:
             external_ref="u",
         )
     assert "super-secret" not in str(exc.value)
+
+def test_renew_retry_marker_prevents_second_usage_reset() -> None:
+    state = {
+        "comment": "WhiteLabel tenant=7 subscription=23",
+        "usage": 3.0,
+        "enabled": False,
+    }
+    reset_patches: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode()) if request.content else None
+        if request.url.path.endswith("/api/v2/panel/info/"):
+            return _json_response(200, {"version": "12.3.3"}, request)
+        if request.method == "PATCH":
+            if body.get("current_usage_GB") == 0:
+                reset_patches.append(body)
+                state["usage"] = 0
+                state["comment"] = body.get("comment", state["comment"])
+            if body.get("is_active") is True:
+                state["enabled"] = True
+            return _json_response(
+                200,
+                {
+                    "uuid": "u-retry",
+                    "is_active": state["enabled"],
+                    "current_usage_GB": state["usage"],
+                    "usage_limit_GB": 50,
+                    "comment": state["comment"],
+                },
+                request,
+            )
+        return _json_response(
+            200,
+            {
+                "uuid": "u-retry",
+                "is_active": state["enabled"],
+                "current_usage_GB": state["usage"],
+                "usage_limit_GB": 50,
+                "comment": state["comment"],
+            },
+            request,
+        )
+
+    adapter = HiddifyPanelAdapter(transport=httpx.MockTransport(handler))
+    request = RenewRequest(
+        traffic_bytes=50 * 1024**3,
+        duration_days=30,
+        expires_at=iso_utc(utcnow() + timedelta(days=30)),
+        idempotency_key="tenant:7:renewal-order:99",
+    )
+    first = adapter.renew(
+        target=_target(), secret="api-key", external_ref="u-retry", request=request
+    )
+    assert first.active is True
+    assert len(reset_patches) == 1
+    assert "wl-renew:" in state["comment"]
+
+    # Simulate real traffic after the first successful remote renewal but before
+    # the local transaction completed. Retrying must not zero this traffic.
+    state["usage"] = 4.25
+    state["enabled"] = False
+    second = adapter.renew(
+        target=_target(), secret="api-key", external_ref="u-retry", request=request
+    )
+    assert len(reset_patches) == 1
+    assert second.usage_bytes == int(4.25 * 1024**3)
+    assert second.active is True
+

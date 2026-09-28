@@ -187,3 +187,34 @@ def test_worker_start_concurrency_is_bounded() -> None:
     report = _run(supervisor.reconcile())
     assert report.running == 6
     assert factory.peak == 2
+
+def test_run_forever_executes_lifecycle_without_blocking_reconcile() -> None:
+    stop_event = asyncio.Event()
+
+    class FakeLifecycle:
+        def __init__(self):
+            self.calls = 0
+
+        async def run_once(self):
+            self.calls += 1
+            stop_event.set()
+
+            class Report:
+                tenants = 1
+                synced = 2
+                expired = 0
+                errors = 0
+
+            return Report()
+
+    lifecycle = FakeLifecycle()
+    catalog = FakeCatalog(CatalogSnapshot(()))
+    supervisor = RuntimeSupervisor(
+        catalog=catalog,
+        worker_factory=FakeFactory(),
+        lifecycle=lifecycle,
+        lifecycle_seconds=60,
+    )
+    _run(supervisor.run_forever(stop_event))
+    assert lifecycle.calls == 1
+

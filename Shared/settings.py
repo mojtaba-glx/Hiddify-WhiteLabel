@@ -113,6 +113,7 @@ class RuntimeSettings:
     start_concurrency: int = 8
     poll_timeout_seconds: int = 20
     license_cache_ttl_seconds: int = 15
+    lifecycle_seconds: int = 180
 
     def __post_init__(self) -> None:
         if not str(self.token_encryption_key or "").strip():
@@ -131,6 +132,8 @@ class RuntimeSettings:
             raise SettingsError("RUNTIME_POLL_TIMEOUT_SECONDS must be between 5 and 50")
         if int(self.license_cache_ttl_seconds) < 1:
             raise SettingsError("RUNTIME_CACHE_TTL_SECONDS must be at least 1")
+        if int(self.lifecycle_seconds) < 60:
+            raise SettingsError("RUNTIME_LIFECYCLE_SECONDS must be at least 60")
 
     def __repr__(self) -> str:
         return (
@@ -140,7 +143,8 @@ class RuntimeSettings:
             f"reconcile_seconds={self.reconcile_seconds}, "
             f"start_concurrency={self.start_concurrency}, "
             f"poll_timeout_seconds={self.poll_timeout_seconds}, "
-            f"license_cache_ttl_seconds={self.license_cache_ttl_seconds})"
+            f"license_cache_ttl_seconds={self.license_cache_ttl_seconds}, "
+            f"lifecycle_seconds={self.lifecycle_seconds})"
         )
 
 
@@ -231,5 +235,11 @@ def load_runtime_from_env(
             source.get("RUNTIME_CACHE_TTL_SECONDS"),
             name="RUNTIME_CACHE_TTL_SECONDS",
             default=15,
+        ),
+        lifecycle_seconds=_parse_positive_int(
+            source.get("RUNTIME_LIFECYCLE_SECONDS"),
+            name="RUNTIME_LIFECYCLE_SECONDS",
+            default=180,
+            minimum=60,
         ),
     )

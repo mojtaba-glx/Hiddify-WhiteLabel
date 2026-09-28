@@ -119,7 +119,11 @@ def test_provision_and_usage_are_tenant_scoped(conn, factories, cipher) -> None:
     assert panel.requests[0].idempotency_key.endswith(f"subscription:{subscription['id']}")
     assert panel.secrets == ["panel-secret"]
     synced = service.sync_subscription_usage(7001, subscription_id=int(subscription["id"]))
-    assert synced == {"id": int(subscription["id"]), "usage_bytes": 12345, "status": "active"}
+    assert synced["id"] == int(subscription["id"])
+    assert synced["usage_bytes"] == 12345
+    assert synced["status"] == "active"
+    assert synced["last_online"] is None
+    assert synced["last_synced_at"]
     assert panel.usage_calls == [active["external_ref"]]
 
 
