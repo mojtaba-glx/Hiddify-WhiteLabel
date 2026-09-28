@@ -815,8 +815,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 row = service.set_plan_status(
                     actor, int(pending["plan_id"]), str(pending["status"])
                 )
-                text, keyboard = plan_detail(row)
-                await _render(update, text, keyboard)
+                await _show_plan(update, context, int(row["id"]))
                 return
             if expected == "renew":
                 row = service.renew(
