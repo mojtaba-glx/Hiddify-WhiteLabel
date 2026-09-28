@@ -255,10 +255,12 @@ def _build_delivery(
     now: datetime,
 ) -> ReminderDelivery | None:
     current_row = conn.execute(
-        "SELECT s.*, c.telegram_user_id, p.name AS plan_name "
+        "SELECT s.*, c.telegram_user_id, c.status AS customer_status, "
+        "p.name AS plan_name, t.status AS tenant_status "
         "FROM tenant_subscriptions s "
         "JOIN tenant_customers c ON c.id=s.customer_id AND c.tenant_id=s.tenant_id "
         "JOIN tenant_sale_plans p ON p.id=s.plan_id AND p.tenant_id=s.tenant_id "
+        "JOIN tenants t ON t.id=s.tenant_id "
         "WHERE s.id=? AND s.tenant_id=? AND s.customer_id=?",
         (
             int(row["subscription_id"]),
@@ -269,6 +271,11 @@ def _build_delivery(
     if current_row is None:
         return None
     current = dict(current_row)
+    if (
+        str(current.get("tenant_status") or "") != "active"
+        or str(current.get("customer_status") or "") != "active"
+    ):
+        return None
     if reminder_period_key(current) != str(row["period_key"]):
         return None
 
