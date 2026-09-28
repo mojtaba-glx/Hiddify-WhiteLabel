@@ -153,7 +153,7 @@ class CustomerPortalService:
             raise NotFoundError("owned service not found")
         current = LicenseRepository(self.conn).latest_by_tenant(int(tenant_id))
         if current is None:
-            raise CustomerPortalError("service has no renewable license")
+            raise CustomerPortalError("این سرویس در حال حاضر قابل تمدید نیست.")
         plan = self.get_public_plan(plan_id)
         now = iso_utc(utcnow())
         with transaction(self.conn):
@@ -245,7 +245,7 @@ class CustomerPortalService:
     ) -> dict[str, Any]:
         order = self.get_order(actor_id, order_id)
         if order["status"] != "pending_payment":
-            raise PaymentStateError("order is not awaiting payment")
+            raise PaymentStateError("این سفارش در انتظار پرداخت نیست.")
         method = self.get_payment_method(payment_method_id, currency=str(order["currency"]))
         clean_reference = _clean_text(reference, maximum=160, required=False) or None
         clean_file = _clean_text(telegram_file_id, maximum=256, required=False) or None
@@ -283,7 +283,7 @@ class CustomerPortalService:
     def pay_order_from_wallet(self, actor_id: int, order_id: int) -> dict[str, Any]:
         order = self.get_order(actor_id, order_id)
         if order["status"] != "pending_payment" or order["kind"] == "wallet_topup":
-            raise PaymentStateError("order cannot be paid from wallet")
+            raise PaymentStateError("این سفارش از کیف پول قابل پرداخت نیست.")
         amount = int(order["amount"])
         currency = str(order["currency"])
         customer_id = int(order["customer_id"])
@@ -301,7 +301,7 @@ class CustomerPortalService:
                 (amount, now, customer_id, currency, amount),
             )
             if changed.rowcount != 1:
-                raise PaymentStateError("wallet balance is insufficient")
+                raise PaymentStateError("موجودی کیف پول کافی نیست.")
             balance = self.wallet_balance(actor_id, currency)
             self.conn.execute(
                 "INSERT INTO wallet_transactions"
@@ -314,7 +314,7 @@ class CustomerPortalService:
                 tenant_id = int(order["tenant_id"] or 0)
                 license_row = LicenseRepository(self.conn).latest_by_tenant(tenant_id)
                 if plan is None or tenant_id <= 0 or license_row is None:
-                    raise PaymentStateError("renewal target is unavailable")
+                    raise PaymentStateError("سرویس موردنظر برای تمدید در دسترس نیست.")
                 renew_license(
                     self.conn,
                     license_id=int(license_row["id"]),
@@ -335,13 +335,13 @@ class CustomerPortalService:
     def claim_trial(self, actor_id: int) -> dict[str, Any]:
         customer = self._customer(actor_id)
         if not self.settings.get_bool("trial_enabled"):
-            raise CustomerPortalError("trial is disabled")
+            raise CustomerPortalError("🎁 لایسنس تست در حال حاضر غیرفعال است.")
         plan_row = self.conn.execute(
             "SELECT * FROM license_plans WHERE status = 'active' AND is_public = 1"
             " AND trial_days > 0 ORDER BY id LIMIT 1"
         ).fetchone()
         if plan_row is None:
-            raise CustomerPortalError("trial is not configured")
+            raise CustomerPortalError("🎁 در حال حاضر پلن تست فعالی وجود ندارد.")
         plan = dict(plan_row)
         now = iso_utc(utcnow())
         try:
@@ -360,7 +360,7 @@ class CustomerPortalService:
                     (int(customer["id"]), int(plan["id"]), order_id, now, now),
                 )
         except sqlite3.IntegrityError as exc:
-            raise CustomerPortalError("trial was already claimed") from exc
+            raise CustomerPortalError("❌ شما قبلاً از لایسنس تست استفاده کرده‌اید.") from exc
         return self.get_order(actor_id, order_id)
 
     def setup_candidates(self, actor_id: int) -> list[dict[str, Any]]:
@@ -379,7 +379,7 @@ class CustomerPortalService:
     ) -> PreparedBot:
         order = self.get_order(actor_id, order_id)
         if order["status"] != "paid" or order["tenant_id"] is not None:
-            raise PaymentStateError("order is not ready for setup")
+            raise PaymentStateError("این سفارش هنوز آماده راه‌اندازی نیست.")
         # The privileged provisioner remains private behind this ownership and
         # paid-order gate; raw tokens are never persisted by the portal flow.
         return await self.master.prepare_tenant_bot(
@@ -398,7 +398,7 @@ class CustomerPortalService:
     ) -> ProvisionedPurchase:
         order = self.get_order(actor_id, order_id)
         if order["status"] != "paid" or order["tenant_id"] is not None:
-            raise PaymentStateError("order is not ready for setup")
+            raise PaymentStateError("این سفارش هنوز آماده راه‌اندازی نیست.")
         plan = PlanRepository(self.conn).get_by_id(int(order["plan_id"]))
         if plan is None:
             raise NotFoundError("plan not found")
@@ -406,7 +406,7 @@ class CustomerPortalService:
         if order["kind"] == "trial":
             duration = int(plan.get("trial_days") or 0)
             if duration <= 0:
-                raise CustomerPortalError("trial is no longer configured")
+                raise CustomerPortalError("پلن تست دیگر فعال نیست.")
         now_dt = utcnow()
         with transaction(self.conn):
             fresh = self.get_order(actor_id, order_id)
@@ -798,7 +798,7 @@ class CustomerPortalService:
                 plan = PlanRepository(self.conn).get_by_id(int(receipt["plan_id"]))
                 license_row = LicenseRepository(self.conn).latest_by_tenant(int(receipt["tenant_id"]))
                 if plan is None or license_row is None:
-                    raise PaymentStateError("renewal target is unavailable")
+                    raise PaymentStateError("سرویس موردنظر برای تمدید در دسترس نیست.")
                 renew_license(
                     self.conn, license_id=int(license_row["id"]),
                     tenant_id=int(receipt["tenant_id"]), extra_days=int(plan["duration_days"]),
