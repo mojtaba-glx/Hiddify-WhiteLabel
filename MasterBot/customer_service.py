@@ -324,9 +324,9 @@ class CustomerPortalService:
                 )
                 final_status = "fulfilled"
             changed = self.conn.execute(
-                "UPDATE customer_orders SET status = ?, updated_at = ?"
+                "UPDATE customer_orders SET status = ?, paid_at = ?, updated_at = ?"
                 " WHERE id = ? AND customer_id = ? AND status = 'pending_payment'",
-                (final_status, now, int(order_id), customer_id),
+                (final_status, now, now, int(order_id), customer_id),
             )
             if changed.rowcount != 1:
                 raise PaymentStateError("وضعیت سفارش تغییر کرده است؛ دوباره بررسی کنید.")
@@ -348,9 +348,9 @@ class CustomerPortalService:
             with transaction(self.conn):
                 cursor = self.conn.execute(
                     "INSERT INTO customer_orders"
-                    " (public_id, customer_id, plan_id, tenant_id, kind, amount, currency, status, created_at, updated_at)"
-                    " VALUES (?, ?, ?, NULL, 'trial', 0, ?, 'paid', ?, ?)",
-                    (_public_id("try"), int(customer["id"]), int(plan["id"]), str(plan["currency"]), now, now),
+                    " (public_id, customer_id, plan_id, tenant_id, kind, amount, currency, status, paid_at, created_at, updated_at)"
+                    " VALUES (?, ?, ?, NULL, 'trial', 0, ?, 'paid', ?, ?, ?)",
+                    (_public_id("try"), int(customer["id"]), int(plan["id"]), str(plan["currency"]), now, now, now),
                 )
                 order_id = int(cursor.lastrowid or 0)
                 self.conn.execute(
@@ -574,7 +574,7 @@ class CustomerPortalService:
             "SELECT currency, COALESCE(SUM(amount), 0) AS amount"
             " FROM customer_orders"
             " WHERE kind IN ('purchase', 'renewal')"
-            " AND status IN ('paid', 'fulfilled') AND updated_at >= ?"
+            " AND status IN ('paid', 'fulfilled') AND paid_at >= ?"
             " GROUP BY currency",
             (since_24h,),
         )
@@ -1058,9 +1058,14 @@ class CustomerPortalService:
                 )
                 order_status = "fulfilled"
             changed = self.conn.execute(
-                "UPDATE customer_orders SET status = ?, updated_at = ?"
+                "UPDATE customer_orders SET status = ?, paid_at = ?, updated_at = ?"
                 " WHERE id = ? AND status = 'payment_review'",
-                (order_status, now, int(receipt["order_id"])),
+                (
+                    order_status,
+                    now if approve else None,
+                    now,
+                    int(receipt["order_id"]),
+                ),
             )
             if changed.rowcount != 1:
                 raise PaymentStateError("وضعیت سفارش تغییر کرده است؛ دوباره بررسی کنید.")
