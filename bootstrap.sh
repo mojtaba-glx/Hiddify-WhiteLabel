@@ -48,7 +48,7 @@ if [[ -e "$INSTALL_DIR" && ! -d "$INSTALL_DIR/.git" ]]; then
 fi
 
 rm -rf "$INSTALL_DIR"
-install -d -m 0755 -o "$SERVICE_USER" -g "$SERVICE_USER" "$INSTALL_DIR"
+install -d -m 0755 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$INSTALL_DIR"
 runuser -u "$SERVICE_USER" -- git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
 chmod +x "$INSTALL_DIR/install.sh" "$INSTALL_DIR/bootstrap.sh" 2>/dev/null || true
 
