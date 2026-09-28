@@ -507,8 +507,18 @@ class TenantBusinessService:
         return dict(row)
 
     def list_nodes(self) -> list[dict[str, Any]]:
-        return [dict(row) for row in self.conn.execute("SELECT * FROM tenant_nodes WHERE tenant_id = ? ORDER BY id DESC", (self.tenant_id,)).fetchall()]
-
+        return [
+            dict(row)
+            for row in self.conn.execute(
+                "SELECT n.*, s.label AS server_label, "
+                "COALESCE(s.provider_kind,s.panel_kind) AS provider_kind "
+                "FROM tenant_nodes n "
+                "LEFT JOIN tenant_servers s "
+                "ON s.id=n.server_id AND s.tenant_id=n.tenant_id "
+                "WHERE n.tenant_id=? ORDER BY n.id DESC",
+                (self.tenant_id,),
+            ).fetchall()
+        ]
     def _desired_subscription_servers(
         self, primary_server_id: int
     ) -> list[dict[str, Any]]:
@@ -1909,4 +1919,22 @@ class TenantBusinessService:
 
     def list_smart_links(self, actor_id: int) -> list[dict[str, Any]]:
         self._admin(actor_id)
-        return [dict(row) for row in self.conn.execute("SELECT * FROM tenant_smart_links WHERE tenant_id=? ORDER BY id DESC", (self.tenant_id,)).fetchall()]
+        public_base = str(
+            os.getenv("SMART_SUB_PUBLIC_BASE_URL", "") or ""
+        ).strip()
+        from TenantRuntime.smart_subscription import smart_subscription_url
+
+        items: list[dict[str, Any]] = []
+        for row in self.conn.execute(
+            "SELECT * FROM tenant_smart_links "
+            "WHERE tenant_id=? ORDER BY id DESC",
+            (self.tenant_id,),
+        ).fetchall():
+            item = dict(row)
+            item["public_url"] = (
+                smart_subscription_url(public_base, str(item["code"]))
+                if str(item["target"]).startswith("subscription:")
+                else ""
+            )
+            items.append(item)
+        return items
