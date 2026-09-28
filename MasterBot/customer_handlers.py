@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.ext import ContextTypes
 
 from MasterBot.customer_service import CustomerPortalError, CustomerPortalService
@@ -77,12 +77,19 @@ def _display_name(update: Update) -> str:
 async def show_customer_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     service = portal(context)
-    service.register_customer(
+    customer = service.register_customer(
         actor_id(update),
         display_name=_display_name(update),
         username=(getattr(user, "username", None) if user else None),
     )
     context.user_data.clear()
+    if customer["status"] != "active":
+        await render(
+            update,
+            "⛔ حساب شما در حال حاضر غیرفعال است.\n\nبرای بررسی وضعیت با پشتیبانی تماس بگیرید.",
+            ReplyKeyboardRemove(),
+        )
+        return
     settings = service.storefront_settings()
     await render(
         update,
