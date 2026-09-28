@@ -14,6 +14,7 @@ DEFAULTS: dict[str, str] = {
     "support_contact": "",
     "sales_enabled": "1",
     "trial_enabled": "1",
+    "trial_plan_id": "",
     "maintenance_message": "فروش موقتاً غیرفعال است. لطفاً کمی بعد دوباره تلاش کنید.",
 }
 
@@ -44,6 +45,9 @@ class PlatformSettingsService:
             "support_contact": self.get("support_contact"),
             "sales_enabled": self.get_bool("sales_enabled"),
             "trial_enabled": self.get_bool("trial_enabled"),
+            "trial_plan_id": (
+                int(self.get("trial_plan_id")) if self.get("trial_plan_id").isdigit() else None
+            ),
             "maintenance_message": self.get("maintenance_message"),
         }
 
@@ -52,7 +56,7 @@ class PlatformSettingsService:
         if name not in EDITABLE_KEYS or name.endswith("_enabled"):
             raise ValueError("setting is not a text field")
         clean = str(value or "").strip()
-        if name != "support_contact" and not clean:
+        if name not in {"support_contact", "trial_plan_id"} and not clean:
             raise ValueError("setting value is required")
         if len(clean) > int(maximum):
             raise ValueError("setting value is too long")
