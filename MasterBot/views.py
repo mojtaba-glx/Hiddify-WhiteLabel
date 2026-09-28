@@ -227,31 +227,71 @@ def plans_view(page: Page, *, query: str = "") -> tuple[str, InlineKeyboardMarku
     return text, InlineKeyboardMarkup(rows)
 
 
-def plan_detail(row: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+def plan_detail(
+    row: dict[str, Any], *, trial_plan_id: int | None = None
+) -> tuple[str, InlineKeyboardMarkup]:
+    plan_id = int(row["id"])
+    is_public = bool(int(row.get("is_public", 1)))
+    is_trial = trial_plan_id is not None and int(trial_plan_id) == plan_id
     text = (
-        f"📦 پلن #{int(row['id'])}\n\n"
+        f"📦 پلن #{plan_id}\n\n"
         f"نام: {row['name']}\n"
-        f"مدت: {int(row['duration_days'])} روز\n"
-        f"قیمت: {int(row['price']):,}\n"
+        f"مدت اشتراک: {int(row['duration_days'])} روز\n"
+        f"قیمت: {int(row['price']):,} {row.get('currency', 'USD')}\n"
         f"حداکثر سرور: {int(row['max_servers'])}\n"
         f"حداکثر کاربر: {int(row['max_users'])}\n"
-        f"ارز: {row.get('currency', 'USD')}\n"
-        f"فروش عمومی: {'بله' if int(row.get('is_public', 1)) else 'خیر'}\n"
-        f"تست: {int(row.get('trial_days', 0))} روز\n"
+        f"نمایش در فروشگاه: {'✅' if is_public else '❌'}\n"
+        f"مدت تست: {int(row.get('trial_days', 0))} روز\n"
+        f"پلن تست اصلی: {'✅' if is_trial else '—'}\n"
         f"وضعیت: {row['status']}"
     )
-    plan_id = int(row["id"])
     target = "archived" if row["status"] == "active" else "active"
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✏️ ویرایش", callback_data=f"plan:edit:{plan_id}")],
-        [InlineKeyboardButton("🛍 فروش و لایسنس تست", callback_data=f"plan:commerce:{plan_id}")],
+    public_target = 0 if is_public else 1
+    rows = [
+        [
+            InlineKeyboardButton("✏️ مشخصات پلن", callback_data=f"plan:edit:{plan_id}"),
+            InlineKeyboardButton("💰 ارز و تست", callback_data=f"plan:commerce:{plan_id}"),
+        ],
+        [InlineKeyboardButton(
+            "🙈 مخفی از فروشگاه" if is_public else "👁 نمایش در فروشگاه",
+            callback_data=f"plan:public:{plan_id}:{public_target}",
+        )],
+    ]
+    if (
+        row["status"] == "active"
+        and is_public
+        and int(row.get("trial_days", 0)) > 0
+    ):
+        rows.append([InlineKeyboardButton(
+            "✅ پلن تست اصلی" if is_trial else "🎁 انتخاب به‌عنوان پلن تست",
+            callback_data=f"plan:trial:{plan_id}",
+        )])
+    rows.extend([
         [InlineKeyboardButton(
             "🗄 آرشیو" if target == "archived" else "✅ فعال‌سازی",
             callback_data=f"plan:status:{plan_id}:{target}",
         )],
         [InlineKeyboardButton("↩️ پلن‌ها", callback_data="plan:page:0")],
     ])
-    return text, keyboard
+    return text, InlineKeyboardMarkup(rows)
+
+
+def trial_plan_picker(
+    plans: Iterable[dict[str, Any]], *, selected_plan_id: int | None
+) -> tuple[str, InlineKeyboardMarkup]:
+    rows: list[list[InlineKeyboardButton]] = []
+    for plan in plans:
+        selected = selected_plan_id is not None and int(selected_plan_id) == int(plan["id"])
+        rows.append([InlineKeyboardButton(
+            f"{'✅' if selected else '🎁'} {plan['name']} · {int(plan['trial_days'])} روز",
+            callback_data=f"settings:trialplan:set:{int(plan['id'])}",
+        )])
+    text = "🎁 پلن لایسنس تست\n\nپلنی که برای تست رایگان مشتریان استفاده می‌شود را انتخاب کنید."
+    if not rows:
+        text += "\n\nپلن واجد شرایطی وجود ندارد؛ ابتدا برای یک پلن فعال و عمومی، مدت تست بیشتر از صفر تنظیم کنید."
+    rows.append([InlineKeyboardButton("♻️ انتخاب خودکار", callback_data="settings:trialplan:auto")])
+    rows.append([InlineKeyboardButton("↩️ تنظیمات", callback_data="menu:settings")])
+    return text, InlineKeyboardMarkup(rows)
 
 
 def licenses_view(page: Page, *, query: str = "") -> tuple[str, InlineKeyboardMarkup]:
@@ -470,12 +510,14 @@ def platform_settings_view(settings: dict[str, Any]) -> tuple[str, InlineKeyboar
     sales = "🟢 فعال" if settings.get("sales_enabled") else "🔴 غیرفعال"
     trial = "🟢 فعال" if settings.get("trial_enabled") else "🔴 غیرفعال"
     support = str(settings.get("support_contact") or "تنظیم نشده")
+    trial_plan = str(settings.get("trial_plan_name") or "انتخاب خودکار")
     text = (
         "⚙️ تنظیمات فروشگاه\n\n"
         f"🏷 نام فروشگاه: {settings.get('store_name') or '-'}\n"
         f"☎️ پشتیبانی: {support}\n"
         f"🛒 فروش: {sales}\n"
-        f"🎁 لایسنس تست: {trial}\n\n"
+        f"🎁 لایسنس تست: {trial}\n"
+        f"📦 پلن تست: {trial_plan}\n\n"
         f"🔧 پیام توقف فروش:\n{settings.get('maintenance_message') or '-'}"
     )
     rows = [
@@ -493,6 +535,7 @@ def platform_settings_view(settings: dict[str, Any]) -> tuple[str, InlineKeyboar
                 callback_data="settings:toggle:trial",
             ),
         ],
+        [InlineKeyboardButton("🎁 انتخاب پلن تست", callback_data="settings:trialplan")],
         [InlineKeyboardButton("📝 پیام توقف فروش", callback_data="settings:edit:maintenance_message")],
         [InlineKeyboardButton("↩️ منوی اصلی", callback_data="menu:main")],
     ]
