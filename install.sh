@@ -170,6 +170,11 @@ ensure_environment() {
         echo "ERROR: invalid token or admin ID." >&2
         return 1
     fi
+    if ! verify_master_token_value "$master_token"; then
+        unset master_token admin_id
+        echo "ERROR: MasterBot token verification failed." >&2
+        return 1
+    fi
     encryption_key="$("$ROOT_DIR/.venv/bin/python" - <<'PY'
 from cryptography.fernet import Fernet
 print(Fernet.generate_key().decode())
@@ -204,10 +209,29 @@ EOF
 }
 
 edit_env_value() {
-    local key="$1" value="$2"
-    WL_ENV_VALUE="$value" as_service_user env WL_ENV_VALUE="$value"         "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/env_edit.py"         --env-file "$ENV_FILE" --key "$key"
+    local key="$1" value="$2" result
+    export WL_ENV_VALUE="$value"
+    if as_service_user "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/env_edit.py" --env-file "$ENV_FILE" --key "$key"; then
+        result=0
+    else
+        result=$?
+    fi
+    unset WL_ENV_VALUE
     chmod 600 "$ENV_FILE"
     chown "$(service_user)":"$(service_group)" "$ENV_FILE"
+    return "$result"
+}
+
+verify_master_token_value() {
+    local token="$1" result
+    export WL_BOT_TOKEN="$token"
+    if as_service_user "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/verify_bot_token.py"; then
+        result=0
+    else
+        result=$?
+    fi
+    unset WL_BOT_TOKEN
+    return "$result"
 }
 
 install_units() {
@@ -498,7 +522,12 @@ change_master_token() {
     require_root
     local token backup
     read_tty_secret token "New MasterBot token (hidden): "
-    backup="$ROOT_DIR/runtime/env-before-token-$$"
+    if ! verify_master_token_value "$token"; then
+        unset token
+        echo "ERROR: token was not changed." >&2
+        return 1
+    fi
+    backup="$ROOT_DIR/runtime/env-before-token-$"
     cp -a "$ENV_FILE" "$backup"
     chmod 600 "$backup"
     if ! edit_env_value MASTER_BOT_TOKEN "$token"; then
