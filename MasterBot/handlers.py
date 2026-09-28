@@ -486,6 +486,30 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 update, context, _parse_int(data.rsplit(":", 1)[1], "customer id")
             )
             return
+        if data.startswith("customeradmin:wallet:"):
+            parts = data.split(":")
+            if len(parts) != 4:
+                raise ValueError("invalid wallet adjustment callback")
+            direction = parts[2]
+            customer_id = _parse_int(parts[3], "customer id")
+            if direction not in ("add", "subtract"):
+                raise ValueError("invalid wallet adjustment direction")
+            _portal(context).get_platform_customer_admin(actor, customer_id)
+            context.user_data["flow"] = {
+                "kind": "customer_wallet_adjust",
+                "customer_id": customer_id,
+                "direction": direction,
+            }
+            label = "افزایش" if direction == "add" else "کاهش"
+            await _render(
+                update,
+                f"👛 {label} موجودی کیف پول\n\n"
+                "اطلاعات را بفرستید:\n"
+                "ارز | مبلغ | یادداشت اختیاری\n\n"
+                "مثال: IRR | 500000 | اصلاح پرداخت",
+                back_keyboard(f"customeradmin:view:{customer_id}"),
+            )
+            return
         if data.startswith("customeradmin:status:"):
             _, _, customer_raw, status = data.split(":", 3)
             customer_id = _parse_int(customer_raw, "customer id")
@@ -707,6 +731,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             pending = context.user_data.pop("confirm", None)
             if not isinstance(pending, dict) or pending.get("kind") != expected:
                 raise ValueError("confirmation expired")
+            if expected == "wallet_adjust":
+                result = _portal(context).adjust_customer_wallet(
+                    actor,
+                    int(pending["customer_id"]),
+                    currency=str(pending["currency"]),
+                    amount=int(pending["amount"]),
+                    note=str(pending.get("note") or ""),
+                )
+                await update.effective_chat.send_message(
+                    f"✅ کیف پول اصلاح شد.\n"
+                    f"تغییر: {int(result['amount']):+,} {result['currency']}\n"
+                    f"موجودی جدید: {int(result['balance']):,} {result['currency']}"
+                )
+                await _show_platform_customer(
+                    update, context, int(result["customer_id"])
+                )
+                return
             if expected == "platform_customer_status":
                 row = _portal(context).set_platform_customer_status(
                     actor, int(pending["customer_id"]), str(pending["status"])
@@ -957,6 +998,32 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             context.user_data.pop("flow", None)
             await _show_tenant(update, context, int(row["id"]))
+            return
+        if kind == "customer_wallet_adjust":
+            fields = _split_fields(text, 2, 3)
+            currency = fields[0].upper()
+            amount = _parse_int(fields[1].replace(",", ""), "amount")
+            if amount <= 0:
+                raise ValueError("amount must be positive")
+            direction = str(flow.get("direction") or "")
+            delta = amount if direction == "add" else -amount
+            customer_id = int(flow["customer_id"])
+            note = fields[2] if len(fields) == 3 else ""
+            context.user_data.pop("flow", None)
+            context.user_data["confirm"] = {
+                "kind": "wallet_adjust",
+                "customer_id": customer_id,
+                "currency": currency,
+                "amount": delta,
+                "note": note,
+            }
+            label = "افزایش" if delta > 0 else "کاهش"
+            await update.effective_message.reply_text(
+                f"👛 {label} {amount:,} {currency} برای کیف پول این مشتری تأیید شود؟",
+                reply_markup=confirm_keyboard(
+                    "wallet_adjust", f"customeradmin:view:{customer_id}"
+                ),
+            )
             return
         if kind == "receipt_search":
             context.user_data.pop("flow", None)
