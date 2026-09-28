@@ -774,7 +774,7 @@ def warnings_text(items: Iterable[dict[str, Any]]) -> str:
         status = WARNING_STATUS_FA.get(str(item["status"]), str(item["status"]))
         lines.append(f"\n#{int(item['id'])} · {event}\n{status}")
     if not rows:
-        lines.append("\n✅ هشدار بازی وجود ندارد.")
+        lines.append("\n✅ هشدار فعالی وجود ندارد.")
     return "\n".join(lines)
 
 
