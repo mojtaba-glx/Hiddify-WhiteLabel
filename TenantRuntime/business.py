@@ -16,7 +16,14 @@ from typing import Any
 from Database.connection import transaction
 from Shared.crypto import TokenCipher, TokenCipherError, fingerprint_token
 from Shared.timeutils import iso_utc, utcnow
-from TenantRuntime.panels import PanelAdapter, PanelError, ProvisionRequest, UnconfiguredPanelAdapter
+from TenantRuntime.panels import (
+    PanelAdapter,
+    PanelError,
+    PanelTarget,
+    ProvisionRequest,
+    RenewRequest,
+    UnconfiguredPanelAdapter,
+)
 
 
 class TenantBusinessError(RuntimeError):
@@ -78,16 +85,36 @@ class TenantBusinessService:
             )
         return self._customer(actor_id, active=False)
 
-    def add_server(self, actor_id: int, *, label: str, panel_kind: str = "manual", endpoint: str = "") -> dict[str, Any]:
+    def add_server(
+        self,
+        actor_id: int,
+        *,
+        label: str,
+        panel_kind: str = "manual",
+        endpoint: str = "",
+        admin_path: str = "",
+        user_path: str = "",
+    ) -> dict[str, Any]:
         self._admin(actor_id)
+        panel_kind = str(panel_kind or "").strip().lower()
         if panel_kind not in ("manual", "hiddify", "xui"):
             raise ValueError("invalid panel kind")
         now = iso_utc(utcnow())
         with transaction(self.conn):
             cursor = self.conn.execute(
-                "INSERT INTO tenant_servers (tenant_id, label, panel_kind, endpoint, status, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, 'active', ?, ?)",
-                (self.tenant_id, _text(label, 80), panel_kind, _text(endpoint, 250, required=False) or None, now, now),
+                "INSERT INTO tenant_servers "
+                "(tenant_id, label, panel_kind, endpoint, admin_path, user_path, status, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+                (
+                    self.tenant_id,
+                    _text(label, 80),
+                    panel_kind,
+                    _text(endpoint, 250, required=False) or None,
+                    _text(admin_path, 160, required=False) or None,
+                    _text(user_path, 160, required=False) or None,
+                    now,
+                    now,
+                ),
             )
         return self.server(int(cursor.lastrowid or 0))
 
@@ -136,7 +163,17 @@ class TenantBusinessService:
         ).fetchone()
         return {"server_id": int(server_id), "configured": row is not None}
 
-    def _panel_material(self, server_id: int) -> tuple[dict[str, Any], str]:
+    def _panel_target(self, server: dict[str, Any]) -> PanelTarget:
+        return PanelTarget(
+            kind=str(server.get("panel_kind") or "").strip().lower(),
+            endpoint=str(server.get("endpoint") or "").strip(),
+            admin_path=str(server.get("admin_path") or "").strip(),
+            user_path=str(server.get("user_path") or "").strip(),
+        )
+
+    def _panel_material(
+        self, server_id: int
+    ) -> tuple[dict[str, Any], PanelTarget, str]:
         server = self.server(server_id)
         endpoint = str(server.get("endpoint") or "").strip()
         if str(server["status"]) != "active" or not endpoint or str(server["panel_kind"]) == "manual":
@@ -150,7 +187,8 @@ class TenantBusinessService:
         if row is None:
             raise TenantBusinessError("panel credential is not configured")
         try:
-            return server, self.secret_cipher.decrypt_secret(str(row["encrypted_secret"]))
+            secret = self.secret_cipher.decrypt_secret(str(row["encrypted_secret"]))
+            return server, self._panel_target(server), secret
         except TokenCipherError as exc:
             raise TenantBusinessError("panel credential cannot be decrypted") from exc
 
@@ -328,10 +366,11 @@ class TenantBusinessService:
         if row is None:
             raise TenantBusinessError("subscription is not awaiting provisioning")
         subscription = dict(row)
-        server, secret = self._panel_material(int(server_id))
+        plan = self.plan(int(subscription["plan_id"]), public=False)
+        server, target, secret = self._panel_material(int(server_id))
         try:
             result = self.panel_adapter.provision(
-                endpoint=str(server["endpoint"]),
+                target=target,
                 secret=secret,
                 request=ProvisionRequest(
                     tenant_id=self.tenant_id,
@@ -339,6 +378,7 @@ class TenantBusinessService:
                     subscription_id=int(subscription_id),
                     customer_id=int(subscription["customer_id"]),
                     traffic_bytes=int(subscription["traffic_bytes"]),
+                    duration_days=int(plan["duration_days"]),
                     expires_at=str(subscription["expires_at"]),
                     idempotency_key=f"tenant:{self.tenant_id}:subscription:{int(subscription_id)}",
                 ),
@@ -357,7 +397,12 @@ class TenantBusinessService:
             )
             if changed.rowcount != 1:
                 raise TenantBusinessError("subscription state changed during provisioning")
-        return {"id": int(subscription_id), "status": "active", "external_ref": external_ref}
+        return {
+            "id": int(subscription_id),
+            "status": "active",
+            "external_ref": external_ref,
+            "subscription_url": str(result.subscription_url or ""),
+        }
 
     def sync_subscription_usage(self, actor_id: int, *, subscription_id: int) -> dict[str, Any]:
         """Read usage from a configured provider, then atomically persist it."""
@@ -369,10 +414,10 @@ class TenantBusinessService:
         if row is None or row["server_id"] is None or not row["external_ref"]:
             raise TenantBusinessError("subscription cannot be synchronized")
         subscription = dict(row)
-        server, secret = self._panel_material(int(subscription["server_id"]))
+        server, target, secret = self._panel_material(int(subscription["server_id"]))
         try:
             usage = self.panel_adapter.usage(
-                endpoint=str(server["endpoint"]), secret=secret, external_ref=str(subscription["external_ref"])
+                target=target, secret=secret, external_ref=str(subscription["external_ref"])
             )
         except PanelError as exc:
             raise TenantBusinessError("panel usage synchronization failed") from exc
@@ -390,6 +435,188 @@ class TenantBusinessService:
             if changed.rowcount != 1:
                 raise TenantBusinessError("subscription state changed during synchronization")
         return {"id": int(subscription_id), "usage_bytes": int(usage.usage_bytes), "status": state}
+
+    def _admin_subscription(self, actor_id: int, subscription_id: int) -> dict[str, Any]:
+        self._admin(actor_id)
+        row = self.conn.execute(
+            "SELECT * FROM tenant_subscriptions WHERE id=? AND tenant_id=?",
+            (int(subscription_id), self.tenant_id),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("subscription not found")
+        return dict(row)
+
+    @staticmethod
+    def _panel_user_dict(user) -> dict[str, Any]:
+        return {
+            "external_ref": str(user.external_ref),
+            "usage_bytes": int(user.usage_bytes),
+            "traffic_bytes": (
+                int(user.traffic_bytes) if user.traffic_bytes is not None else None
+            ),
+            "active": bool(user.active),
+            "expires_at": user.expires_at,
+            "last_online": user.last_online,
+            "subscription_url": str(user.subscription_url or ""),
+        }
+
+    def get_subscription_panel_user(
+        self, actor_id: int, *, subscription_id: int
+    ) -> dict[str, Any]:
+        subscription = self._admin_subscription(actor_id, subscription_id)
+        if subscription["server_id"] is None or not subscription["external_ref"]:
+            raise TenantBusinessError("subscription is not provisioned")
+        _, target, secret = self._panel_material(int(subscription["server_id"]))
+        try:
+            user = self.panel_adapter.get_user(
+                target=target,
+                secret=secret,
+                external_ref=str(subscription["external_ref"]),
+            )
+        except PanelError as exc:
+            raise TenantBusinessError("panel user lookup failed") from exc
+        finally:
+            secret = ""
+        return self._panel_user_dict(user)
+
+    def renew_subscription(
+        self,
+        actor_id: int,
+        *,
+        subscription_id: int,
+        traffic_gb: int,
+        duration_days: int,
+    ) -> dict[str, Any]:
+        subscription = self._admin_subscription(actor_id, subscription_id)
+        if subscription["server_id"] is None or not subscription["external_ref"]:
+            raise TenantBusinessError("subscription is not provisioned")
+        if int(traffic_gb) <= 0 or int(duration_days) <= 0:
+            raise ValueError("invalid renewal values")
+        traffic_bytes = int(traffic_gb) * 1024 * 1024 * 1024
+        expires_at = iso_utc(utcnow() + timedelta(days=int(duration_days)))
+        _, target, secret = self._panel_material(int(subscription["server_id"]))
+        try:
+            user = self.panel_adapter.renew(
+                target=target,
+                secret=secret,
+                external_ref=str(subscription["external_ref"]),
+                request=RenewRequest(
+                    traffic_bytes=traffic_bytes,
+                    duration_days=int(duration_days),
+                    expires_at=expires_at,
+                    reset_usage=True,
+                ),
+            )
+        except PanelError as exc:
+            raise TenantBusinessError("panel renewal failed") from exc
+        finally:
+            secret = ""
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_subscriptions SET traffic_bytes=?, usage_bytes=?, expires_at=?, status='active', updated_at=? "
+                "WHERE id=? AND tenant_id=? AND server_id=? AND external_ref=?",
+                (
+                    traffic_bytes,
+                    max(0, int(user.usage_bytes)),
+                    expires_at,
+                    now,
+                    int(subscription_id),
+                    self.tenant_id,
+                    int(subscription["server_id"]),
+                    str(subscription["external_ref"]),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("subscription state changed during renewal")
+        result = self._panel_user_dict(user)
+        result.update(
+            {
+                "id": int(subscription_id),
+                "status": "active",
+                "traffic_bytes": traffic_bytes,
+                "expires_at": expires_at,
+            }
+        )
+        return result
+
+    def set_subscription_enabled(
+        self, actor_id: int, *, subscription_id: int, enabled: bool
+    ) -> dict[str, Any]:
+        subscription = self._admin_subscription(actor_id, subscription_id)
+        if subscription["server_id"] is None or not subscription["external_ref"]:
+            raise TenantBusinessError("subscription is not provisioned")
+        _, target, secret = self._panel_material(int(subscription["server_id"]))
+        try:
+            user = self.panel_adapter.set_enabled(
+                target=target,
+                secret=secret,
+                external_ref=str(subscription["external_ref"]),
+                enabled=bool(enabled),
+            )
+        except PanelError as exc:
+            raise TenantBusinessError("panel account state change failed") from exc
+        finally:
+            secret = ""
+        state = "active" if bool(enabled) else "disabled"
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_subscriptions SET status=?, updated_at=? WHERE id=? AND tenant_id=?",
+                (state, now, int(subscription_id), self.tenant_id),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("subscription state changed")
+        result = self._panel_user_dict(user)
+        result.update({"id": int(subscription_id), "status": state})
+        return result
+
+    def delete_subscription_from_panel(
+        self, actor_id: int, *, subscription_id: int
+    ) -> dict[str, Any]:
+        subscription = self._admin_subscription(actor_id, subscription_id)
+        if subscription["server_id"] is None or not subscription["external_ref"]:
+            raise TenantBusinessError("subscription is not provisioned")
+        _, target, secret = self._panel_material(int(subscription["server_id"]))
+        try:
+            self.panel_adapter.delete_user(
+                target=target,
+                secret=secret,
+                external_ref=str(subscription["external_ref"]),
+            )
+        except PanelError as exc:
+            raise TenantBusinessError("panel user deletion failed") from exc
+        finally:
+            secret = ""
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_subscriptions SET status='disabled', updated_at=? WHERE id=? AND tenant_id=?",
+                (now, int(subscription_id), self.tenant_id),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("subscription state changed")
+        return {"id": int(subscription_id), "status": "disabled"}
+
+    def subscription_link(self, actor_id: int, *, subscription_id: int) -> str:
+        customer = self._customer(actor_id)
+        row = self.conn.execute(
+            "SELECT * FROM tenant_subscriptions WHERE id=? AND tenant_id=? AND customer_id=?",
+            (int(subscription_id), self.tenant_id, int(customer["id"])),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("subscription not found")
+        subscription = dict(row)
+        if subscription["server_id"] is None or not subscription["external_ref"]:
+            raise TenantBusinessError("subscription is not provisioned")
+        server = self.server(int(subscription["server_id"]))
+        try:
+            return self.panel_adapter.subscription_link(
+                target=self._panel_target(server),
+                external_ref=str(subscription["external_ref"]),
+            )
+        except PanelError as exc:
+            raise TenantBusinessError("subscription link is unavailable") from exc
 
     def create_ticket(self, actor_id: int, *, subject: str, body: str) -> dict[str, Any]:
         customer = self._customer(actor_id); now = iso_utc(utcnow())
