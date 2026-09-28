@@ -10,6 +10,41 @@ from MasterBot.service import Page
 from Shared.timeutils import format_tehran, parse_utc
 
 
+TENANT_STATUS_FA = {
+    "active": "🟢 فعال",
+    "suspended": "🟠 معلق",
+    "disabled": "🔴 غیرفعال",
+}
+
+RUNTIME_STATUS_FA = {
+    "provisioning": "🟡 در حال راه‌اندازی",
+    "ready": "🟢 آماده",
+    "disabled": "🔴 غیرفعال",
+    "error": "🔴 خطا",
+    "missing": "⚪ ثبت‌نشده",
+}
+
+PLAN_STATUS_FA = {
+    "active": "🟢 فعال",
+    "archived": "🗄 آرشیوشده",
+    "disabled": "🔴 غیرفعال",
+}
+
+LICENSE_STATUS_FA = {
+    "pending": "⏳ در انتظار",
+    "active": "🟢 فعال",
+    "grace": "🟡 مهلت تمدید",
+    "suspended": "🟠 معلق",
+    "expired": "🔴 منقضی",
+    "cancelled": "❌ لغوشده",
+}
+
+PAYMENT_KIND_FA = {
+    "card": "کارت‌به‌کارت",
+    "crypto": "ارز دیجیتال",
+}
+
+
 MAIN_MENU = (
     ("👤 کاربران فروشگاه", "menu:customers"),
     ("🤖 ربات‌های مشتریان", "menu:tenants"),
@@ -116,8 +151,10 @@ def platform_customer_detail(customer: dict[str, Any]) -> tuple[str, InlineKeybo
         lines.extend(["", "🧾 آخرین سفارش‌ها:"])
         for order in recent:
             lines.append(
-                f"• {order['public_id']} · {order['kind']} · "
-                f"{int(order['amount']):,} {order['currency']} · {order['status']}"
+                f"• {order['public_id']} · "
+                f"{_ORDER_KIND_FA.get(str(order['kind']), str(order['kind']))} · "
+                f"{int(order['amount']):,} {order['currency']} · "
+                f"{_ORDER_STATUS_FA.get(str(order['status']), str(order['status']))}"
             )
     next_status = "blocked" if customer["status"] == "active" else "active"
     keyboard = InlineKeyboardMarkup([
@@ -149,7 +186,7 @@ def tenants_view(page: Page, *, query: str = "") -> tuple[str, InlineKeyboardMar
         icon = "🟢" if item["status"] == "active" else "🔴"
         rows.append(
             [InlineKeyboardButton(
-                f"{icon} {item['name']} · {item['slug']}",
+                f"{icon} {item['name']}",
                 callback_data=f"tenant:view:{int(item['id'])}",
             )]
         )
@@ -168,34 +205,35 @@ def tenants_view(page: Page, *, query: str = "") -> tuple[str, InlineKeyboardMar
 
 
 def tenant_detail(row: dict[str, Any], readiness: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+    runtime_status = str(readiness.get("runtime_status") or "missing")
     text = (
-        f"👤 مشتری #{int(row['id'])}\n\n"
+        f"🤖 ربات مشتری #{int(row['id'])}\n\n"
         f"نام: {row['name']}\n"
-        f"شناسه: {row['slug']}\n"
+        f"شناسه داخلی: {row['slug']}\n"
         f"مالک تلگرام: {int(row['owner_telegram_id'])}\n"
-        f"وضعیت: {row['status']}\n"
-        f"AdminBot: {'✅' if readiness['admin'] else '❌'}\n"
-        f"UserBot: {'✅' if readiness['user'] else '❌'}\n"
-        f"Runtime: {readiness.get('runtime_status', 'missing')}\n"
-        f"آماده اجرا: {'✅' if readiness.get('ready') else '❌'}"
+        f"وضعیت: {TENANT_STATUS_FA.get(str(row['status']), str(row['status']))}\n"
+        f"ربات مدیریت: {'✅ ثبت‌شده' if readiness['admin'] else '❌ ثبت‌نشده'}\n"
+        f"ربات کاربران: {'✅ ثبت‌شده' if readiness['user'] else '❌ ثبت‌نشده'}\n"
+        f"اجرای سیستم: {RUNTIME_STATUS_FA.get(runtime_status, runtime_status)}\n"
+        f"آماده اجرا: {'✅ بله' if readiness.get('ready') else '❌ خیر'}"
     )
     tenant_id = int(row["id"])
     next_status = "suspended" if row["status"] == "active" else "active"
     status_label = "⛔ تعلیق" if next_status == "suspended" else "✅ فعال‌سازی"
     rows = [
         [
-            InlineKeyboardButton("🤖 ثبت AdminBot", callback_data=f"tenant:bot:{tenant_id}:admin"),
-            InlineKeyboardButton("🛍 ثبت UserBot", callback_data=f"tenant:bot:{tenant_id}:user"),
+            InlineKeyboardButton("🤖 ربات مدیریت", callback_data=f"tenant:bot:{tenant_id}:admin"),
+            InlineKeyboardButton("🛍 ربات کاربران", callback_data=f"tenant:bot:{tenant_id}:user"),
         ],
     ]
     secret_buttons: list[InlineKeyboardButton] = []
     if readiness["admin"]:
         secret_buttons.append(
-            InlineKeyboardButton("🔑 Secret Admin", callback_data=f"tenant:webhook:{tenant_id}:admin")
+            InlineKeyboardButton("🔑 کلید ربات مدیریت", callback_data=f"tenant:webhook:{tenant_id}:admin")
         )
     if readiness["user"]:
         secret_buttons.append(
-            InlineKeyboardButton("🔑 Secret User", callback_data=f"tenant:webhook:{tenant_id}:user")
+            InlineKeyboardButton("🔑 کلید ربات کاربران", callback_data=f"tenant:webhook:{tenant_id}:user")
         )
     if secret_buttons:
         rows.append(secret_buttons)
@@ -211,7 +249,8 @@ def plans_view(page: Page, *, query: str = "") -> tuple[str, InlineKeyboardMarku
     rows: list[list[InlineKeyboardButton]] = []
     for item in page.items:
         rows.append([InlineKeyboardButton(
-            f"📦 {item['name']} · {int(item['duration_days'])} روز · {item['status']}",
+            f"📦 {item['name']} · {int(item['duration_days'])} روز · "
+            f"{PLAN_STATUS_FA.get(str(item['status']), str(item['status']))}",
             callback_data=f"plan:view:{int(item['id'])}",
         )])
     text = "📦 مدیریت پلن‌ها"
@@ -243,7 +282,7 @@ def plan_detail(
         f"نمایش در فروشگاه: {'✅' if is_public else '❌'}\n"
         f"مدت تست: {int(row.get('trial_days', 0))} روز\n"
         f"پلن تست اصلی: {'✅' if is_trial else '—'}\n"
-        f"وضعیت: {row['status']}"
+        f"وضعیت: {PLAN_STATUS_FA.get(str(row['status']), str(row['status']))}"
     )
     target = "archived" if row["status"] == "active" else "active"
     public_target = 0 if is_public else 1
@@ -298,7 +337,8 @@ def licenses_view(page: Page, *, query: str = "") -> tuple[str, InlineKeyboardMa
     rows: list[list[InlineKeyboardButton]] = []
     for item in page.items:
         rows.append([InlineKeyboardButton(
-            f"🔐 #{int(item['id'])} · مشتری {int(item['tenant_id'])} · {item['status']}",
+            f"🔐 #{int(item['id'])} · مشتری {int(item['tenant_id'])} · "
+            f"{LICENSE_STATUS_FA.get(str(item['status']), str(item['status']))}",
             callback_data=f"license:view:{int(item['id'])}",
         )])
     text = "🔐 مدیریت لایسنس‌ها"
@@ -320,7 +360,7 @@ def license_detail(row: dict[str, Any], *, timezone_name: str) -> tuple[str, Inl
         f"🔐 لایسنس #{int(row['id'])}\n\n"
         f"مشتری: {row['tenant_name']} (#{int(row['tenant_id'])})\n"
         f"پلن: {row['plan_name']}\n"
-        f"وضعیت: {row['status']}\n"
+        f"وضعیت: {LICENSE_STATUS_FA.get(str(row['status']), str(row['status']))}\n"
         f"انقضا: {expires}"
     )
     license_id = int(row["id"])
@@ -489,7 +529,7 @@ def order_detail_view(order: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]
         for receipt in receipts[:5]:
             lines.append(
                 f"• #{int(receipt['id'])} · {receipt['method_title']} · "
-                f"{receipt['status']}"
+                f"{_RECEIPT_STATUS_FA.get(str(receipt['status']), str(receipt['status']))}"
             )
 
     buttons: list[list[InlineKeyboardButton]] = []
@@ -643,7 +683,7 @@ def payment_method_detail(method: dict[str, Any]) -> tuple[str, InlineKeyboardMa
         f"{icon} روش پرداخت #{int(method['id'])}",
         "",
         f"عنوان: {method['title']}",
-        f"نوع: {method['kind']}",
+        f"نوع: {PAYMENT_KIND_FA.get(str(method['kind']), str(method['kind']))}",
         f"ارز: {method['currency']}",
         f"مقصد: {method['destination']}",
     ]
