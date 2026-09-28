@@ -8,6 +8,7 @@ the adapter boundary; concrete provider HTTP dialects remain separate.
 
 from __future__ import annotations
 
+import json
 import secrets
 import sqlite3
 from datetime import timedelta
@@ -94,17 +95,42 @@ class TenantBusinessService:
         endpoint: str = "",
         admin_path: str = "",
         user_path: str = "",
+        xui_flavor: str = "",
+        xui_inbound_ids: str = "",
+        xui_public_origin: str = "",
+        xui_sub_path: str = "",
     ) -> dict[str, Any]:
         self._admin(actor_id)
         panel_kind = str(panel_kind or "").strip().lower()
         if panel_kind not in ("manual", "hiddify", "xui"):
             raise ValueError("invalid panel kind")
+        flavor = str(xui_flavor or "").strip().lower()
+        if panel_kind == "xui" and flavor not in ("sanaei", "alireza"):
+            raise ValueError("invalid X-UI flavor")
+        if panel_kind != "xui":
+            flavor = ""
+        inbound_ids = str(xui_inbound_ids or "").strip().replace("،", ",")
+        if inbound_ids:
+            for part in inbound_ids.replace(" ", ",").split(","):
+                if not part:
+                    continue
+                try:
+                    value = int(part)
+                except ValueError as exc:
+                    raise ValueError("invalid X-UI inbound ids") from exc
+                if value < 0:
+                    raise ValueError("invalid X-UI inbound ids")
+        sub_path = str(xui_sub_path or "").strip()
+        if panel_kind == "xui" and not sub_path:
+            sub_path = "/sub/"
         now = iso_utc(utcnow())
         with transaction(self.conn):
             cursor = self.conn.execute(
                 "INSERT INTO tenant_servers "
-                "(tenant_id, label, panel_kind, endpoint, admin_path, user_path, status, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+                "(tenant_id, label, panel_kind, endpoint, admin_path, user_path, "
+                "xui_flavor, xui_inbound_ids, xui_public_origin, xui_sub_path, "
+                "status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
                 (
                     self.tenant_id,
                     _text(label, 80),
@@ -112,12 +138,15 @@ class TenantBusinessService:
                     _text(endpoint, 250, required=False) or None,
                     _text(admin_path, 160, required=False) or None,
                     _text(user_path, 160, required=False) or None,
+                    flavor or None,
+                    _text(inbound_ids, 160, required=False) or None,
+                    _text(xui_public_origin, 250, required=False) or None,
+                    _text(sub_path, 160, required=False) or None,
                     now,
                     now,
                 ),
             )
         return self.server(int(cursor.lastrowid or 0))
-
     def server(self, server_id: int) -> dict[str, Any]:
         row = self.conn.execute("SELECT * FROM tenant_servers WHERE id = ? AND tenant_id = ?", (int(server_id), self.tenant_id)).fetchone()
         if row is None:
@@ -131,45 +160,58 @@ class TenantBusinessService:
         """Choose the only server automatic sales provisioning may target."""
         self._admin(actor_id)
         server = self.server(int(server_id))
-        if server["status"] != "active" or server["panel_kind"] != "hiddify":
-            raise TenantBusinessError("default provisioning server must be an active hiddify server")
+        kind = str(server["panel_kind"])
+        if server["status"] != "active" or kind not in ("hiddify", "xui"):
+            raise TenantBusinessError(
+                "default provisioning server must be an active supported panel"
+            )
+        if kind == "xui" and str(server.get("xui_flavor") or "") not in (
+            "sanaei",
+            "alireza",
+        ):
+            raise TenantBusinessError("X-UI flavor is not configured")
         if not self.panel_status(int(server_id))["configured"]:
             raise TenantBusinessError("default provisioning server is not configured")
         now = iso_utc(utcnow())
         with transaction(self.conn):
             self.conn.execute(
-                "UPDATE tenant_servers SET is_default=0, updated_at=? WHERE tenant_id=? AND is_default=1",
+                "UPDATE tenant_servers SET is_default=0, updated_at=? "
+                "WHERE tenant_id=? AND is_default=1",
                 (now, self.tenant_id),
             )
             changed = self.conn.execute(
                 "UPDATE tenant_servers SET is_default=1, updated_at=? "
-                "WHERE id=? AND tenant_id=? AND status='active' AND panel_kind='hiddify'",
+                "WHERE id=? AND tenant_id=? AND status='active' "
+                "AND panel_kind IN ('hiddify','xui')",
                 (now, int(server_id), self.tenant_id),
             )
             if changed.rowcount != 1:
-                raise TenantBusinessError("server is not eligible for automatic provisioning")
+                raise TenantBusinessError(
+                    "server is not eligible for automatic provisioning"
+                )
         return self.server(int(server_id))
-
     def _provisioning_server(self) -> dict[str, Any]:
         rows = [
             dict(row)
             for row in self.conn.execute(
                 "SELECT s.* FROM tenant_servers s "
-                "JOIN tenant_panel_credentials c ON c.server_id=s.id AND c.tenant_id=s.tenant_id "
-                "WHERE s.tenant_id=? AND s.status='active' AND s.panel_kind='hiddify' "
+                "JOIN tenant_panel_credentials c "
+                "ON c.server_id=s.id AND c.tenant_id=s.tenant_id "
+                "WHERE s.tenant_id=? AND s.status='active' "
+                "AND (s.panel_kind='hiddify' OR "
+                "(s.panel_kind='xui' AND s.xui_flavor IN ('sanaei','alireza'))) "
                 "ORDER BY s.is_default DESC, s.id ASC",
                 (self.tenant_id,),
             ).fetchall()
         ]
         if not rows:
-            raise TenantBusinessError("no configured hiddify server is available")
+            raise TenantBusinessError("no configured provisioning server is available")
         defaults = [row for row in rows if int(row.get("is_default") or 0) == 1]
         if len(defaults) == 1:
             return defaults[0]
         if len(rows) == 1:
             return rows[0]
         raise TenantBusinessError("default provisioning server is required")
-
     def provision_pending_subscription(self, actor_id: int, *, subscription_id: int) -> dict[str, Any]:
         """Provision through the tenant's deterministic sales server selection."""
         self._admin(actor_id)
@@ -179,34 +221,114 @@ class TenantBusinessService:
             subscription_id=int(subscription_id),
             server_id=int(server["id"]),
         )
-    def set_panel_credential(self, actor_id: int, *, server_id: int, secret: str) -> dict[str, Any]:
-        """Replace one server secret, returning only safe configuration status."""
-        self._admin(actor_id)
-        server = self.server(server_id)
-        if str(server["panel_kind"]) == "manual" or not str(server.get("endpoint") or "").strip():
-            raise TenantBusinessError("server has no configured panel endpoint")
+    def _store_panel_secret(
+        self, *, server_id: int, secret: str
+    ) -> dict[str, Any]:
         if self.secret_cipher is None:
             raise TenantBusinessError("panel credential encryption is unavailable")
+        raw = str(secret or "")
+        if not raw.strip():
+            raise TenantBusinessError("panel credential is empty")
         try:
-            encrypted = self.secret_cipher.encrypt_secret(secret)
-            digest = fingerprint_token(secret)
+            encrypted = self.secret_cipher.encrypt_secret(raw)
+            digest = fingerprint_token(raw)
         except TokenCipherError as exc:
             raise TenantBusinessError("invalid panel credential") from exc
         finally:
+            raw = ""
             secret = ""
         now = iso_utc(utcnow())
         try:
             with transaction(self.conn):
                 self.conn.execute(
-                    "INSERT INTO tenant_panel_credentials (server_id, tenant_id, encrypted_secret, secret_fingerprint, created_at, updated_at) "
+                    "INSERT INTO tenant_panel_credentials "
+                    "(server_id, tenant_id, encrypted_secret, secret_fingerprint, created_at, updated_at) "
                     "VALUES (?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(server_id) DO UPDATE SET encrypted_secret=excluded.encrypted_secret, secret_fingerprint=excluded.secret_fingerprint, updated_at=excluded.updated_at",
-                    (int(server_id), self.tenant_id, encrypted, digest, now, now),
+                    "ON CONFLICT(server_id) DO UPDATE SET "
+                    "encrypted_secret=excluded.encrypted_secret, "
+                    "secret_fingerprint=excluded.secret_fingerprint, "
+                    "updated_at=excluded.updated_at",
+                    (
+                        int(server_id),
+                        self.tenant_id,
+                        encrypted,
+                        digest,
+                        now,
+                        now,
+                    ),
                 )
         except sqlite3.IntegrityError as exc:
-            raise TenantBusinessError("panel credential is already used by this tenant") from exc
+            raise TenantBusinessError(
+                "panel credential is already used by this tenant"
+            ) from exc
         return {"server_id": int(server_id), "configured": True}
 
+    def set_panel_credential(
+        self, actor_id: int, *, server_id: int, secret: str
+    ) -> dict[str, Any]:
+        """Replace one encrypted panel secret (Hiddify/backward-compatible)."""
+        self._admin(actor_id)
+        server = self.server(server_id)
+        if (
+            str(server["panel_kind"]) == "manual"
+            or not str(server.get("endpoint") or "").strip()
+        ):
+            raise TenantBusinessError("server has no configured panel endpoint")
+        return self._store_panel_secret(server_id=int(server_id), secret=secret)
+
+    def set_xui_credential(
+        self,
+        actor_id: int,
+        *,
+        server_id: int,
+        api_token: str = "",
+        username: str = "",
+        password: str = "",
+        secret_header: str = "",
+    ) -> dict[str, Any]:
+        """Store flavor-specific X-UI credentials as one encrypted JSON blob."""
+        self._admin(actor_id)
+        server = self.server(server_id)
+        if str(server["panel_kind"]) != "xui":
+            raise TenantBusinessError("server is not X-UI")
+        if not str(server.get("endpoint") or "").strip():
+            raise TenantBusinessError("server has no configured panel endpoint")
+        flavor = str(server.get("xui_flavor") or "").strip().lower()
+        if flavor == "sanaei":
+            token = str(api_token or "").strip()
+            if not token:
+                raise TenantBusinessError("Sanaei API token is required")
+            material = {
+                "version": 1,
+                "flavor": "sanaei",
+                "api_token": token,
+            }
+        elif flavor == "alireza":
+            user = str(username or "").strip()
+            passwd = str(password or "").strip()
+            if not user or not passwd:
+                raise TenantBusinessError(
+                    "Alireza username and password are required"
+                )
+            material = {
+                "version": 1,
+                "flavor": "alireza",
+                "username": user,
+                "password": passwd,
+                "secret_header": str(secret_header or "").strip(),
+            }
+        else:
+            raise TenantBusinessError("X-UI flavor is not configured")
+        serialized = json.dumps(
+            material, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+        )
+        try:
+            return self._store_panel_secret(
+                server_id=int(server_id), secret=serialized
+            )
+        finally:
+            serialized = ""
+            material.clear()
     def panel_status(self, server_id: int) -> dict[str, Any]:
         self.server(server_id)
         row = self.conn.execute(
@@ -221,29 +343,44 @@ class TenantBusinessService:
             endpoint=str(server.get("endpoint") or "").strip(),
             admin_path=str(server.get("admin_path") or "").strip(),
             user_path=str(server.get("user_path") or "").strip(),
+            xui_flavor=str(server.get("xui_flavor") or "").strip().lower(),
+            xui_inbound_ids=str(server.get("xui_inbound_ids") or "").strip(),
+            xui_public_origin=str(server.get("xui_public_origin") or "").strip(),
+            xui_sub_path=str(server.get("xui_sub_path") or "").strip(),
         )
-
     def _panel_material(
         self, server_id: int
     ) -> tuple[dict[str, Any], PanelTarget, str]:
         server = self.server(server_id)
         endpoint = str(server.get("endpoint") or "").strip()
-        if str(server["status"]) != "active" or not endpoint or str(server["panel_kind"]) == "manual":
+        if (
+            str(server["status"]) != "active"
+            or not endpoint
+            or str(server["panel_kind"]) == "manual"
+        ):
             raise TenantBusinessError("server is not ready for panel provisioning")
+        if str(server["panel_kind"]) == "xui" and str(
+            server.get("xui_flavor") or ""
+        ) not in ("sanaei", "alireza"):
+            raise TenantBusinessError("X-UI flavor is not configured")
         if self.secret_cipher is None:
             raise TenantBusinessError("panel credential encryption is unavailable")
         row = self.conn.execute(
-            "SELECT encrypted_secret FROM tenant_panel_credentials WHERE server_id=? AND tenant_id=?",
+            "SELECT encrypted_secret FROM tenant_panel_credentials "
+            "WHERE server_id=? AND tenant_id=?",
             (int(server_id), self.tenant_id),
         ).fetchone()
         if row is None:
             raise TenantBusinessError("panel credential is not configured")
         try:
-            secret = self.secret_cipher.decrypt_secret(str(row["encrypted_secret"]))
+            secret = self.secret_cipher.decrypt_secret(
+                str(row["encrypted_secret"])
+            )
             return server, self._panel_target(server), secret
         except TokenCipherError as exc:
-            raise TenantBusinessError("panel credential cannot be decrypted") from exc
-
+            raise TenantBusinessError(
+                "panel credential cannot be decrypted"
+            ) from exc
     def add_node(self, actor_id: int, *, label: str, server_id: int | None = None, location: str = "") -> dict[str, Any]:
         self._admin(actor_id)
         if server_id is not None:

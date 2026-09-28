@@ -17,11 +17,14 @@ Conversation state is stored in `tenant_user_state` under the composite scope
 `tenant_id + bot_role + telegram_user_id`. Each application receives a state
 store permanently bound to its own tenant and role.
 
-Hiddify sales are live through the provider adapter. Approved purchase orders
-are fulfilled only after remote provisioning succeeds. Renewal orders reuse the
-same receipt-review flow and remain `paid` if the panel call fails, so an admin
-can retry safely. Hiddify renewal requests carry a remote retry marker so a
-retry cannot reset post-renewal usage a second time.
+Hiddify, X-UI Sanaei and X-UI Alireza are live through the provider adapter.
+Approved purchase orders are fulfilled only after remote provisioning succeeds.
+Renewal orders reuse the same receipt-review flow and remain `paid` if the
+panel call fails, so an admin can retry safely. Provider renewal requests carry
+a remote retry marker so a retry cannot reset post-renewal usage a second time.
+X-UI can target the first active inbound, every supported inbound, or an
+explicit comma-separated inbound list while preserving one stable subscription
+identity across copies.
 
 A shard-safe lifecycle coordinator runs every
 `RUNTIME_LIFECYCLE_SECONDS` (default 180). Tenant ownership for maintenance
@@ -39,6 +42,8 @@ RUNTIME_SHARD_COUNT=4 RUNTIME_SHARD_INDEX=2 python3 -m TenantRuntime
 RUNTIME_SHARD_COUNT=4 RUNTIME_SHARD_INDEX=3 python3 -m TenantRuntime
 ```
 
-The current handlers provide tenant-scoped sales, payment review, Hiddify
+The current handlers provide tenant-scoped sales, payment review, Hiddify/X-UI
 provisioning, paid renewal, subscription lifecycle controls and support tools.
+Sanaei uses an encrypted Bearer API token; Alireza uses encrypted
+username/password and an optional encrypted Xray application secret header.
 The implementation is independent and does not import the reference SellBot.

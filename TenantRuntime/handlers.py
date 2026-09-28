@@ -163,34 +163,65 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if data == "biz:addserver":
                 context.user_data["biz_flow"] = {"kind": "server"}
                 await update.callback_query.edit_message_text(
-                    "نام | نوع پنل (manual/hiddify/xui) | آدرس | مسیر ادمین | مسیر کاربر\n"
-                    "برای Hiddify پنج مقدار را وارد کنید.",
+                    "فرمت Hiddify:\n"
+                    "نام | hiddify | آدرس | مسیر ادمین | مسیر کاربر\n\n"
+                    "فرمت X-UI:\n"
+                    "نام | xui | آدرس پنل | sanaei/alireza | inboundها | آدرس عمومی اشتراک | مسیر اشتراک\n"
+                    "inbound خالی = اولین inbound، عدد 0 = همه، یا مثل 1,2,3\n"
+                    "مسیر اشتراک در صورت خالی بودن /sub/ است.",
                     reply_markup=_menu(spec),
                 ); return
             if data.startswith("biz:server:"):
                 server_id = int(data.rsplit(":", 1)[1])
                 server = business.server(server_id)
                 panel = business.panel_status(server_id)
+                xui_info = ""
+                if server["panel_kind"] == "xui":
+                    xui_info = (
+                        f"\nنسخه X-UI: {server.get('xui_flavor') or '-'}"
+                        f"\nInboundها: {server.get('xui_inbound_ids') or 'اولین فعال'}"
+                        f"\nآدرس عمومی اشتراک: {server.get('xui_public_origin') or 'خود دامنه پنل'}"
+                        f"\nمسیر اشتراک: {server.get('xui_sub_path') or '/sub/'}"
+                    )
                 text = (
                     f"🖥 {server['label']}\n"
                     f"نوع پنل: {server['panel_kind']}\n"
                     f"آدرس: {server.get('endpoint') or 'ثبت نشده'}\n"
                     f"مسیر ادمین: {server.get('admin_path') or '-'}\n"
-                    f"مسیر کاربر: {server.get('user_path') or '-'}\n"
+                    f"مسیر کاربر: {server.get('user_path') or '-'}"
+                    f"{xui_info}\n"
                     f"کلید دسترسی: {'✅ ثبت شده' if panel['configured'] else '❌ ثبت نشده'}\n"
                     f"سرور پیش‌فرض فروش: {'⭐ بله' if int(server.get('is_default') or 0) else 'خیر'}"
                 )
-                rows = [[InlineKeyboardButton("🔐 ثبت یا تعویض کلید پنل", callback_data=f"biz:secret:{server_id}")]]
-                if server["panel_kind"] == "hiddify" and panel["configured"] and not int(server.get("is_default") or 0):
+                rows = [[InlineKeyboardButton("🔐 ثبت یا تعویض دسترسی پنل", callback_data=f"biz:secret:{server_id}")]]
+                if server["panel_kind"] in ("hiddify", "xui") and panel["configured"] and not int(server.get("is_default") or 0):
                     rows.append([InlineKeyboardButton("⭐ انتخاب به عنوان سرور فروش", callback_data=f"biz:defaultserver:{server_id}")])
                 rows.append([InlineKeyboardButton("↩️ سرورها", callback_data="biz:servers")])
                 await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows)); return
             if data.startswith("biz:secret:"):
                 server_id = int(data.rsplit(":", 1)[1])
-                business.server(server_id)
-                context.user_data["biz_flow"] = {"kind": "panel_secret", "server_id": server_id}
+                server = business.server(server_id)
+                if server["panel_kind"] == "xui":
+                    flavor = str(server.get("xui_flavor") or "")
+                    context.user_data["biz_flow"] = {
+                        "kind": "xui_secret",
+                        "server_id": server_id,
+                        "flavor": flavor,
+                    }
+                    prompt = (
+                        "API Token پنل Sanaei را بفرستید."
+                        if flavor == "sanaei"
+                        else "نام کاربری | رمز عبور | Secret Header اختیاری\n"
+                             "اگر Secret Header ندارید فقط نام کاربری | رمز عبور را بفرستید."
+                    )
+                else:
+                    context.user_data["biz_flow"] = {
+                        "kind": "panel_secret",
+                        "server_id": server_id,
+                    }
+                    prompt = "API Key پنل Hiddify را بفرستید."
                 await update.callback_query.edit_message_text(
-                    "کلید API یا رمز پنل را بفرستید. پیام شما پس از ثبت حذف می‌شود.",
+                    prompt + "\nپیام شما پس از ثبت حذف می‌شود.",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ سرورها", callback_data="biz:servers")]]),
                 ); return
             if data.startswith("biz:defaultserver:"):
@@ -408,20 +439,63 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             if kind == "panel_secret":
                 if not text:
                     raise ValueError("empty secret")
-                business.set_panel_credential(actor, server_id=int(flow["server_id"]), secret=text)
+                business.set_panel_credential(
+                    actor,
+                    server_id=int(flow["server_id"]),
+                    secret=text,
+                )
                 try:
                     await update.effective_message.delete()
                 except Exception:
                     pass
-            elif kind == "server" and 2 <= len(fields) <= 5:
-                business.add_server(
-                    actor,
-                    label=fields[0],
-                    panel_kind=fields[1],
-                    endpoint=fields[2] if len(fields) >= 3 else "",
-                    admin_path=fields[3] if len(fields) >= 4 else "",
-                    user_path=fields[4] if len(fields) >= 5 else "",
-                )
+            elif kind == "xui_secret":
+                flavor = str(flow.get("flavor") or "")
+                if flavor == "sanaei":
+                    if not text:
+                        raise ValueError("empty token")
+                    business.set_xui_credential(
+                        actor,
+                        server_id=int(flow["server_id"]),
+                        api_token=text,
+                    )
+                elif flavor == "alireza" and 2 <= len(fields) <= 3:
+                    business.set_xui_credential(
+                        actor,
+                        server_id=int(flow["server_id"]),
+                        username=fields[0],
+                        password=fields[1],
+                        secret_header=fields[2] if len(fields) == 3 else "",
+                    )
+                else:
+                    raise ValueError("invalid X-UI credential")
+                try:
+                    await update.effective_message.delete()
+                except Exception:
+                    pass
+            elif kind == "server" and 2 <= len(fields) <= 7:
+                panel_kind = fields[1].lower()
+                if panel_kind == "xui":
+                    if len(fields) < 4:
+                        raise ValueError("X-UI flavor is required")
+                    business.add_server(
+                        actor,
+                        label=fields[0],
+                        panel_kind=panel_kind,
+                        endpoint=fields[2],
+                        xui_flavor=fields[3],
+                        xui_inbound_ids=fields[4] if len(fields) >= 5 else "",
+                        xui_public_origin=fields[5] if len(fields) >= 6 else "",
+                        xui_sub_path=fields[6] if len(fields) >= 7 else "",
+                    )
+                else:
+                    business.add_server(
+                        actor,
+                        label=fields[0],
+                        panel_kind=panel_kind,
+                        endpoint=fields[2] if len(fields) >= 3 else "",
+                        admin_path=fields[3] if len(fields) >= 4 else "",
+                        user_path=fields[4] if len(fields) >= 5 else "",
+                    )
             elif kind == "node" and 1 <= len(fields) <= 2:
                 business.add_node(actor, label=fields[0], location=fields[1] if len(fields) == 2 else "")
             elif kind == "plan" and len(fields) == 5:
