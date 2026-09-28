@@ -468,12 +468,27 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             parts = data.split(":")
             action, receipt_raw = parts[1], parts[2]
             receipt_id = _parse_int(receipt_raw, "receipt id")
+            if action == "reject":
+                context.user_data["flow"] = {
+                    "kind": "payment_reject_note",
+                    "receipt_id": receipt_id,
+                }
+                await _render(
+                    update,
+                    "❌ دلیل رد پرداخت را بنویسید.\n"
+                    "اگر توضیحی ندارید، فقط - بفرستید.",
+                    back_keyboard(f"payment:receipt:{receipt_id}"),
+                )
+                return
             context.user_data["confirm"] = {
-                "kind": "payment_review", "receipt_id": receipt_id, "approve": action == "approve",
+                "kind": "payment_review",
+                "receipt_id": receipt_id,
+                "approve": True,
+                "review_note": "",
             }
             await _render(
                 update,
-                "تأیید نهایی می‌کنید؟ این عملیات فقط یک‌بار انجام می‌شود.",
+                "✅ پرداخت تأیید شود؟ این عملیات فقط یک‌بار انجام می‌شود.",
                 confirm_keyboard("payment_review", f"payment:receipt:{receipt_id}"),
             )
             return
@@ -837,13 +852,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if expected == "payment_review":
                 approved = bool(pending["approve"])
                 reviewed = _portal(context).review_receipt(
-                    actor, int(pending["receipt_id"]), approve=approved
+                    actor,
+                    int(pending["receipt_id"]),
+                    approve=approved,
+                    review_note=str(pending.get("review_note") or ""),
                 )
                 if not approved:
-                    notification = (
-                        f"❌ پرداخت سفارش {reviewed['public_id']} تأیید نشد.\n"
-                        "در صورت نیاز با پشتیبانی تماس بگیرید."
-                    )
+                    note = str(reviewed.get("review_note") or "").strip()
+                    notification = f"❌ پرداخت سفارش {reviewed['public_id']} تأیید نشد."
+                    if note:
+                        notification += f"\n\nعلت: {note}"
+                    notification += "\n\nدر صورت نیاز با پشتیبانی تماس بگیرید."
                 elif reviewed["order_kind"] == "wallet_topup":
                     notification = (
                         f"✅ شارژ کیف پول {reviewed['public_id']} تأیید شد.\n"
@@ -1074,6 +1093,24 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             context.user_data.pop("flow", None)
             await _show_tenant(update, context, int(row["id"]))
+            return
+        if kind == "payment_reject_note":
+            receipt_id = int(flow["receipt_id"])
+            note = "" if text == "-" else text[:300]
+            context.user_data.pop("flow", None)
+            context.user_data["confirm"] = {
+                "kind": "payment_review",
+                "receipt_id": receipt_id,
+                "approve": False,
+                "review_note": note,
+            }
+            await update.effective_message.reply_text(
+                "❌ رد این پرداخت تأیید شود؟"
+                + (f"\n\nعلت: {note}" if note else ""),
+                reply_markup=confirm_keyboard(
+                    "payment_review", f"payment:receipt:{receipt_id}"
+                ),
+            )
             return
         if kind == "customer_wallet_adjust":
             fields = _split_fields(text, 2, 3)
