@@ -919,6 +919,88 @@ class CustomerPortalService:
         assert row is not None
         return dict(row)
 
+    def list_receipts_admin(
+        self,
+        actor_id: int,
+        *,
+        page: int = 0,
+        page_size: int = 8,
+        status: str = "all",
+        query: str = "",
+    ) -> Page:
+        require_master_admin(actor_id, self.master_admin_id)
+        allowed = {"all", "pending", "approved", "rejected"}
+        state = str(status or "all").strip()
+        if state not in allowed:
+            raise ValueError("invalid receipt status filter")
+        safe_page = max(0, int(page))
+        safe_size = max(1, min(int(page_size), 20))
+        offset = safe_page * safe_size
+        clauses: list[str] = []
+        params: list[Any] = []
+        if state != "all":
+            clauses.append("r.status = ?")
+            params.append(state)
+        text = str(query or "").strip()
+        if text:
+            like = f"%{text}%"
+            parts = [
+                "o.public_id LIKE ?",
+                "c.display_name LIKE ?",
+                "c.username LIKE ?",
+                "r.reference LIKE ?",
+            ]
+            params.extend([like, like, like, like])
+            if text.isdigit():
+                parts.extend([
+                    "c.telegram_user_id = ?",
+                    "r.id = ?",
+                    "o.id = ?",
+                ])
+                params.extend([int(text), int(text), int(text)])
+            clauses.append("(" + " OR ".join(parts) + ")")
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = self.conn.execute(
+            "SELECT r.*, o.public_id, o.amount, o.currency, o.kind,"
+            " o.status AS order_status, o.customer_id,"
+            " c.telegram_user_id, c.display_name, c.username,"
+            " m.title AS method_title, m.kind AS method_kind"
+            " FROM payment_receipts AS r"
+            " JOIN customer_orders AS o ON o.id = r.order_id"
+            " JOIN platform_customers AS c ON c.id = o.customer_id"
+            " JOIN payment_methods AS m ON m.id = r.payment_method_id"
+            + where
+            + " ORDER BY r.id DESC LIMIT ? OFFSET ?",
+            tuple(params + [safe_size + 1, offset]),
+        ).fetchall()
+        items = [dict(row) for row in rows]
+        return Page(
+            items=items[:safe_size],
+            page=safe_page,
+            page_size=safe_size,
+            has_previous=safe_page > 0,
+            has_next=len(items) > safe_size,
+        )
+
+    def get_receipt_admin(self, actor_id: int, receipt_id: int) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        row = self.conn.execute(
+            "SELECT r.*, o.public_id, o.amount, o.currency, o.kind,"
+            " o.status AS order_status, o.customer_id,"
+            " c.telegram_user_id, c.display_name, c.username,"
+            " m.title AS method_title, m.kind AS method_kind,"
+            " m.destination AS method_destination"
+            " FROM payment_receipts AS r"
+            " JOIN customer_orders AS o ON o.id = r.order_id"
+            " JOIN platform_customers AS c ON c.id = o.customer_id"
+            " JOIN payment_methods AS m ON m.id = r.payment_method_id"
+            " WHERE r.id = ?",
+            (int(receipt_id),),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("receipt not found")
+        return dict(row)
+
     def list_pending_receipts(self, actor_id: int, *, limit: int = 30) -> list[dict[str, Any]]:
         require_master_admin(actor_id, self.master_admin_id)
         rows = self.conn.execute(
