@@ -527,6 +527,82 @@ class CustomerPortalService:
         result["recent_orders"] = [dict(item) for item in recent_orders]
         return result
 
+    def adjust_customer_wallet(
+        self,
+        actor_id: int,
+        customer_id: int,
+        *,
+        currency: str,
+        amount: int,
+        note: str = "",
+    ) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        customer = self.get_platform_customer_admin(actor_id, int(customer_id))
+        code = _clean_text(currency, maximum=8).upper()
+        if not 3 <= len(code) <= 8 or not code.isalnum():
+            raise ValueError("currency must be 3-8 alphanumeric characters")
+        delta = int(amount)
+        if delta == 0:
+            raise ValueError("wallet adjustment must be non-zero")
+        clean_note = _clean_text(note, maximum=180, required=False)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            self.conn.execute(
+                "INSERT INTO wallet_accounts (customer_id, currency, balance, updated_at)"
+                " VALUES (?, ?, 0, ?) ON CONFLICT(customer_id, currency) DO NOTHING",
+                (int(customer_id), code, now),
+            )
+            if delta > 0:
+                changed = self.conn.execute(
+                    "UPDATE wallet_accounts SET balance = balance + ?, updated_at = ?"
+                    " WHERE customer_id = ? AND currency = ?",
+                    (delta, now, int(customer_id), code),
+                )
+            else:
+                changed = self.conn.execute(
+                    "UPDATE wallet_accounts SET balance = balance + ?, updated_at = ?"
+                    " WHERE customer_id = ? AND currency = ? AND balance >= ?",
+                    (delta, now, int(customer_id), code, abs(delta)),
+                )
+            if changed.rowcount != 1:
+                raise PaymentStateError("موجودی برای این کاهش کافی نیست.")
+            row = self.conn.execute(
+                "SELECT balance FROM wallet_accounts WHERE customer_id = ? AND currency = ?",
+                (int(customer_id), code),
+            ).fetchone()
+            assert row is not None
+            balance = int(row["balance"])
+            self.conn.execute(
+                "INSERT INTO wallet_transactions"
+                " (customer_id, currency, amount, kind, order_id, idempotency_key,"
+                " resulting_balance, created_at)"
+                " VALUES (?, ?, ?, 'admin', NULL, ?, ?, ?)",
+                (
+                    int(customer_id), code, delta,
+                    f"admin-adjust:{secrets.token_hex(12)}", balance, now,
+                ),
+            )
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id),
+                tenant_id=None,
+                action="wallet.admin_adjust",
+                entity_type="platform_customer",
+                entity_id=str(int(customer_id)),
+                metadata={
+                    "currency": code,
+                    "amount": delta,
+                    "resulting_balance": balance,
+                    "note": clean_note,
+                    "telegram_user_id": int(customer["telegram_user_id"]),
+                },
+            )
+        return {
+            "customer_id": int(customer_id),
+            "currency": code,
+            "amount": delta,
+            "balance": balance,
+        }
+
     def set_platform_customer_status(
         self, actor_id: int, customer_id: int, status: str
     ) -> dict[str, Any]:
