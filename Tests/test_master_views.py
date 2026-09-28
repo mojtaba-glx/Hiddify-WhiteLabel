@@ -10,6 +10,7 @@ import pytest
 from telegram.ext import ApplicationHandlerStop, TypeHandler
 
 from MasterBot.handlers import access_gate, on_callback, on_text
+from MasterBot.customer_views import CUSTOMER_BUTTONS, customer_main_keyboard
 from MasterBot.main import build_application
 from MasterBot.service import BotIdentity, MasterService, Page
 from MasterBot.views import (
@@ -204,3 +205,30 @@ def test_token_message_is_deleted_and_never_saved_in_flow(conn) -> None:
     assert token not in repr(context.user_data)
     stored = service.conn.execute("SELECT * FROM tenant_bots").fetchone()
     assert token not in str(dict(stored))
+
+
+def test_customer_keyboard_exposes_only_storefront_actions() -> None:
+    keyboard = customer_main_keyboard()
+    labels = [button for row in keyboard.keyboard for button in row]
+    assert set(labels) == set(CUSTOMER_BUTTONS)
+    assert "⚙️ تنظیمات" not in labels
+    assert "💳 پرداخت‌ها" not in labels
+    assert "🔐 لایسنس‌ها" not in labels
+
+
+def test_access_gate_blocks_customer_forging_settings_callback(conn) -> None:
+    service = MasterService(
+        conn, master_admin_id=9001, cipher=FernetTokenCipher(generate_key())
+    )
+    query = SimpleNamespace(data="menu:settings", answer=AsyncMock())
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=12),
+        callback_query=query,
+        effective_message=None,
+    )
+    context = SimpleNamespace(
+        application=SimpleNamespace(bot_data={"master_service": service})
+    )
+    with pytest.raises(ApplicationHandlerStop):
+        asyncio.run(access_gate(update, context))
+    query.answer.assert_awaited_once_with("Access denied", show_alert=True)
