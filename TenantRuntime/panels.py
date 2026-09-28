@@ -21,6 +21,10 @@ class PanelTarget:
     endpoint: str
     admin_path: str = ""
     user_path: str = ""
+    xui_flavor: str = ""
+    xui_inbound_ids: str = ""
+    xui_public_origin: str = ""
+    xui_sub_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -210,5 +214,11 @@ def build_default_panel_adapter() -> PanelAdapter:
     """Build the production router without importing optional providers at module load."""
 
     from TenantRuntime.hiddify import HiddifyPanelAdapter
+    from TenantRuntime.xui import XuiPanelAdapter
 
-    return RoutedPanelAdapter({"hiddify": HiddifyPanelAdapter()})
+    return RoutedPanelAdapter(
+        {
+            "hiddify": HiddifyPanelAdapter(),
+            "xui": XuiPanelAdapter(),
+        }
+    )
