@@ -25,7 +25,7 @@ Hiddify-WhiteLabel/
 ├── Ops/                  # Phase 6 - health, encrypted backup, locks, systemd
 ├── Shared/               # settings, redacted logging, crypto, time, access
 ├── Database/             # connection, repositories, migration runner
-├── Migrations/           # versioned SQL (currently 0001 through 0008)
+├── Migrations/           # versioned SQL (currently 0001 through 0011)
 ├── Tests/                # offline pytest suite, fake tokens only
 ├── scripts/              # migrate helper
 ├── install.sh            # English operations menu and systemd installer
@@ -125,10 +125,15 @@ Each provisioned tenant now has its own business records in the shared
 database, always scoped by `tenant_id`: servers, nodes, sale plans, end users,
 payment methods, orders, receipts, subscriptions, tickets and smart links.
 The TenantAdminBot manages these records. The TenantUserBot lets its users
-choose a plan, submit a text or photo receipt, view subscriptions and create a
-support ticket. A reviewed receipt produces a subscription in
-`pending_provisioning`; the actual Hiddify/X-UI adapter remains a separate
-future integration, so no panel credential is accepted or stored yet.
+choose a plan, submit a text or photo receipt, view subscriptions, renew an
+existing service and create a support ticket. Hiddify provisioning is live:
+payment approval leaves an order `paid` until the remote operation succeeds,
+then the order becomes `fulfilled`. Failed purchase or renewal fulfillment is
+retryable. Panel credentials remain encrypted at rest and tenant scoped.
+
+Subscription usage and last-online state are synchronized periodically. Time-
+or quota-expired Hiddify users are verified disabled before the local service
+is marked `expired`; an expired service cannot be re-enabled without renewal.
 
 The MasterBot JobQueue runs the Phase-3 evaluator at the configured interval.
 It advances expiry/grace states, suspends expired licenses, persists 7/3/1-day
