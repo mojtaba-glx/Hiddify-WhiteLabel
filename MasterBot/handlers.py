@@ -33,6 +33,9 @@ from MasterBot.views import (
     license_detail,
     licenses_view,
     main_menu_keyboard,
+    financial_dashboard_view,
+    order_detail_view,
+    orders_view,
     payment_method_detail,
     platform_customer_detail,
     platform_customers_view,
@@ -128,6 +131,28 @@ def _parse_int(raw: str, label: str) -> int:
     if value < 0:
         raise ValueError(f"{label} must be non-negative")
     return value
+
+
+async def _show_orders(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, page_number: int = 0
+) -> None:
+    actor = int(_actor_id(update) or 0)
+    status = str(context.user_data.get("order_status_filter") or "all")
+    query = str(context.user_data.get("order_query") or "")
+    page = _portal(context).list_all_orders(
+        actor, page=page_number, status=status, query=query
+    )
+    text, keyboard = orders_view(page, status=status, query=query)
+    await _render(update, text, keyboard)
+
+
+async def _show_order(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: int
+) -> None:
+    actor = int(_actor_id(update) or 0)
+    order = _portal(context).get_order_admin(actor, int(order_id))
+    text, keyboard = order_detail_view(order)
+    await _render(update, text, keyboard)
 
 
 async def _show_platform_customers(
@@ -277,6 +302,37 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         if data == "menu:main":
             await show_main(update, context)
+            return
+        if data == "menu:orders":
+            context.user_data["order_status_filter"] = "all"
+            context.user_data.pop("order_query", None)
+            await _show_orders(update, context)
+            return
+        if data.startswith("orderadmin:filter:"):
+            status = data.split(":", 2)[2]
+            context.user_data["order_status_filter"] = status
+            context.user_data.pop("order_query", None)
+            await _show_orders(update, context)
+            return
+        if data.startswith("orderadmin:page:"):
+            parts = data.split(":")
+            if len(parts) != 4:
+                raise ValueError("invalid order page callback")
+            context.user_data["order_status_filter"] = parts[2]
+            await _show_orders(update, context, _parse_int(parts[3], "page"))
+            return
+        if data == "orderadmin:search":
+            context.user_data["flow"] = {"kind": "order_search"}
+            await _render(
+                update,
+                "🔎 شناسه سفارش، نام، یوزرنیم یا شناسه تلگرام مشتری را بفرستید:",
+                back_keyboard("menu:orders"),
+            )
+            return
+        if data.startswith("orderadmin:view:"):
+            await _show_order(
+                update, context, _parse_int(data.rsplit(":", 1)[1], "order id")
+            )
             return
         if data == "menu:payments":
             await _show_payments(update, context)
@@ -679,16 +735,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         if data == "menu:stats":
             stats = service.statistics(actor)
-            text = (
-                "📊 آمار سامانه\n\n"
-                f"مشتریان: {stats['tenants_total']} (فعال: {stats['tenants_active']})\n"
-                f"ربات‌های فعال: {stats['bots_active']}\n"
-                f"پلن‌های فعال: {stats['plans_active']}\n"
-                f"لایسنس‌های فعال: {stats['licenses_active']}\n"
-                f"لایسنس‌های معلق: {stats['licenses_suspended']}\n"
-                f"هشدارهای باز: {stats['warnings_open']}"
-            )
-            await _render(update, text, back_keyboard())
+            finance = _portal(context).financial_summary(actor)
+            text, keyboard = financial_dashboard_view(stats, finance)
+            await _render(update, text, keyboard)
             return
         if data == "menu:warnings" or data.startswith("warning:page:"):
             page_no = 0 if data == "menu:warnings" else _parse_int(data.rsplit(":", 1)[1], "page")
@@ -867,6 +916,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             context.user_data.pop("flow", None)
             await _show_tenant(update, context, int(row["id"]))
+            return
+        if kind == "order_search":
+            context.user_data.pop("flow", None)
+            context.user_data["order_query"] = text[:100]
+            await _show_orders(update, context)
             return
         if kind == "platform_customer_search":
             context.user_data.pop("flow", None)
