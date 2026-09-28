@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
@@ -16,7 +15,7 @@ from MasterBot.service import TokenVerificationError
 
 
 async def _main() -> int:
-    token = os.environ.get("WL_BOT_TOKEN", "")
+    token = sys.stdin.read().rstrip("\r\n")
     try:
         identity = await TelegramGetMeVerifier().verify(token)
     except TokenVerificationError:
