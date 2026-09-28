@@ -255,6 +255,7 @@ rollback_units() {
     local rollback_dir unit target runtime_unit old_count new_count max_count
     [[ -f "$ROOT_DIR/runtime/last-unit-rollback" ]] || return 0
     rollback_dir="$(cat "$ROOT_DIR/runtime/last-unit-rollback")"
+
     systemctl stop "$MASTER_UNIT" >/dev/null 2>&1 || true
     old_count="$(cat "$rollback_dir/old-shard-count" 2>/dev/null || shard_count)"
     new_count="$(shard_count)"
@@ -274,8 +275,30 @@ rollback_units() {
             rm -f "$target"
         fi
     done
+
     systemctl daemon-reload || true
-    echo "ROLLBACK: previous systemd unit files restored." >&2
+
+    if [[ -f "$rollback_dir/$MASTER_UNIT.enabled" ]]; then
+        systemctl enable "$MASTER_UNIT" >/dev/null 2>&1 || true
+    else
+        systemctl disable "$MASTER_UNIT" >/dev/null 2>&1 || true
+    fi
+    if [[ -f "$rollback_dir/$MASTER_UNIT.active" ]]; then
+        systemctl start "$MASTER_UNIT" >/dev/null 2>&1 || true
+    fi
+
+    while IFS= read -r runtime_unit; do
+        if [[ -f "$rollback_dir/$runtime_unit.enabled" ]]; then
+            systemctl enable "$runtime_unit" >/dev/null 2>&1 || true
+        else
+            systemctl disable "$runtime_unit" >/dev/null 2>&1 || true
+        fi
+        if [[ -f "$rollback_dir/$runtime_unit.active" ]]; then
+            systemctl start "$runtime_unit" >/dev/null 2>&1 || true
+        fi
+    done < <(runtime_units_for_count "$max_count")
+
+    echo "ROLLBACK: previous systemd units and service state restored." >&2
 }
 
 start_services() {
