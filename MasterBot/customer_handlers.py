@@ -83,11 +83,29 @@ async def show_customer_home(update: Update, context: ContextTypes.DEFAULT_TYPE)
         username=(getattr(user, "username", None) if user else None),
     )
     context.user_data.clear()
-    await render(update, customer_home_text(_display_name(update)), customer_main_keyboard())
+    settings = service.storefront_settings()
+    await render(
+        update,
+        customer_home_text(
+            _display_name(update),
+            store_name=str(settings["store_name"]),
+            support_contact=str(settings["support_contact"]),
+        ),
+        customer_main_keyboard(),
+    )
 
 
 async def _show_plans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    plans = portal(context).list_public_plans()
+    service = portal(context)
+    settings = service.storefront_settings()
+    if not settings["sales_enabled"]:
+        await render(
+            update,
+            f"🛒 خرید ربات\n\n{settings['maintenance_message']}",
+            plans_keyboard([]),
+        )
+        return
+    plans = service.list_public_plans()
     text = "🛒 خرید ربات\n\nپلن موردنظر را انتخاب کنید:"
     if not plans:
         text = "🛒 خرید ربات\n\nدر حال حاضر پلن فعالی برای فروش ثبت نشده است."
