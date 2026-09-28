@@ -489,6 +489,101 @@ def platform_settings_view(settings: dict[str, Any]) -> tuple[str, InlineKeyboar
     return text, InlineKeyboardMarkup(rows)
 
 
+
+_RECEIPT_STATUS_FA = {
+    "pending": "در انتظار بررسی",
+    "approved": "تأییدشده",
+    "rejected": "ردشده",
+}
+
+
+def payment_history_view(
+    page: Page, *, status: str = "all", query: str = ""
+) -> tuple[str, InlineKeyboardMarkup]:
+    labels = {
+        "all": "همه",
+        "pending": "در انتظار",
+        "approved": "تأییدشده",
+        "rejected": "ردشده",
+    }
+    text = f"💳 تاریخچه پرداخت‌ها · {labels.get(status, status)}"
+    if query:
+        text += f"\n🔎 {query[:40]}"
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in page.items:
+        state = _RECEIPT_STATUS_FA.get(str(item["status"]), str(item["status"]))
+        rows.append([InlineKeyboardButton(
+            f"#{int(item['id'])} · {int(item['amount']):,} {item['currency']} · {state}",
+            callback_data=f"payment:history:view:{int(item['id'])}",
+        )])
+    if not page.items:
+        text += "\n\nپرداختی در این بخش وجود ندارد."
+    rows.append(_pager(f"payment:history:page:{status}", page))
+    rows.extend([
+        [
+            InlineKeyboardButton("همه", callback_data="payment:history:filter:all"),
+            InlineKeyboardButton("⏳ در انتظار", callback_data="payment:history:filter:pending"),
+        ],
+        [
+            InlineKeyboardButton("✅ تأییدشده", callback_data="payment:history:filter:approved"),
+            InlineKeyboardButton("❌ ردشده", callback_data="payment:history:filter:rejected"),
+        ],
+        [InlineKeyboardButton("🔎 جست‌وجو", callback_data="payment:history:search")],
+        [InlineKeyboardButton("↩️ پرداخت‌ها", callback_data="menu:payments")],
+    ])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def payment_receipt_detail(receipt: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+    state = _RECEIPT_STATUS_FA.get(str(receipt["status"]), str(receipt["status"]))
+    kind = _ORDER_KIND_FA.get(str(receipt["kind"]), str(receipt["kind"]))
+    username = f"@{receipt['username']}" if receipt.get("username") else "—"
+    lines = [
+        f"💳 پرداخت #{int(receipt['id'])}",
+        "",
+        f"وضعیت: {state}",
+        f"سفارش: {receipt['public_id']}",
+        f"نوع سفارش: {kind}",
+        f"مبلغ: {int(receipt['amount']):,} {receipt['currency']}",
+        f"روش: {receipt['method_title']}",
+        f"مشتری: {receipt['display_name']}",
+        f"یوزرنیم: {username}",
+        f"شناسه تلگرام: {int(receipt['telegram_user_id'])}",
+    ]
+    if receipt.get("reference"):
+        lines.append(f"پیگیری: {receipt['reference']}")
+    lines.append(f"ثبت: {str(receipt['created_at']).replace('T', ' ')[:19]}")
+    if receipt.get("reviewed_at"):
+        lines.append(f"بررسی: {str(receipt['reviewed_at']).replace('T', ' ')[:19]}")
+    if receipt.get("review_note"):
+        lines.append(f"یادداشت بررسی: {receipt['review_note']}")
+
+    rows: list[list[InlineKeyboardButton]] = []
+    if receipt["status"] == "pending" and receipt["order_status"] == "payment_review":
+        rows.append([
+            InlineKeyboardButton(
+                "✅ تأیید پرداخت",
+                callback_data=f"payment:approve:{int(receipt['id'])}",
+            ),
+            InlineKeyboardButton(
+                "❌ رد پرداخت",
+                callback_data=f"payment:reject:{int(receipt['id'])}",
+            ),
+        ])
+    rows.extend([
+        [InlineKeyboardButton(
+            "🧾 مشاهده سفارش",
+            callback_data=f"orderadmin:view:{int(receipt['order_id'])}",
+        )],
+        [InlineKeyboardButton(
+            "👤 پروفایل مشتری",
+            callback_data=f"customeradmin:view:{int(receipt['customer_id'])}",
+        )],
+        [InlineKeyboardButton("↩️ تاریخچه پرداخت‌ها", callback_data="payment:history")],
+    ])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
 def payment_method_detail(method: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
     icon = "💳" if method["kind"] == "card" else "💎"
     lines = [
