@@ -35,12 +35,22 @@ def customer_main_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def customer_home_text(display_name: str) -> str:
-    return (
-        f"👋 سلام {display_name}، خوش آمدید.\n\n"
+def customer_home_text(
+    display_name: str,
+    *,
+    store_name: str = "فروش ربات اختصاصی",
+    support_contact: str = "",
+) -> str:
+    lines = [
+        f"👋 سلام {display_name}، خوش آمدید.",
+        "",
+        f"🤖 {store_name}",
         "از اینجا می‌توانید ربات اختصاصی خود را بخرید، پرداخت را ثبت کنید، "
-        "سرویس‌ها و کیف پول را ببینید و ربات‌هایتان را راه‌اندازی کنید."
-    )
+        "سرویس‌ها و کیف پول را ببینید و ربات‌هایتان را راه‌اندازی کنید.",
+    ]
+    if support_contact:
+        lines.extend(["", f"☎️ پشتیبانی: {support_contact}"])
+    return "\n".join(lines)
 
 
 def plans_keyboard(plans: Iterable[dict[str, Any]]) -> InlineKeyboardMarkup:
