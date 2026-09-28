@@ -44,6 +44,57 @@ PAYMENT_KIND_FA = {
     "crypto": "ارز دیجیتال",
 }
 
+WARNING_EVENT_FA = {
+    "license.expiring": "نزدیک‌شدن به انقضای لایسنس",
+}
+
+WARNING_STATUS_FA = {
+    "pending": "⏳ در انتظار ارسال",
+    "processing": "🔄 در حال ارسال",
+    "sent": "✅ ارسال‌شده",
+    "failed": "🔴 ناموفق",
+    "skipped": "⚪ ردشده",
+}
+
+AUDIT_ACTION_FA = {
+    "tenant.create": "ساخت ربات مشتری",
+    "tenant.update": "ویرایش ربات مشتری",
+    "tenant.status": "تغییر وضعیت ربات مشتری",
+    "tenant.provision": "راه‌اندازی کامل ربات مشتری",
+    "tenant.runtime_enable": "تغییر وضعیت اجرای ربات",
+    "tenant_bot.enroll": "ثبت ربات تلگرام",
+    "tenant_bot.webhook_rotate": "تعویض کلید وب‌هوک",
+    "plan.create": "ساخت پلن",
+    "plan.update": "ویرایش پلن",
+    "plan.status": "تغییر وضعیت پلن",
+    "plan.commerce_configure": "تنظیم فروش پلن",
+    "license.create": "ساخت لایسنس",
+    "license.transition": "تغییر وضعیت لایسنس",
+    "license.renew": "تمدید لایسنس",
+    "customer.order_cancel": "لغو سفارش مشتری",
+    "customer.order_fulfill": "تکمیل سفارش مشتری",
+    "wallet.admin_adjust": "اصلاح کیف پول توسط مدیر",
+    "platform_customer.status": "تغییر وضعیت کاربر فروشگاه",
+    "payment_method.create": "افزودن روش پرداخت",
+    "payment_method.update": "ویرایش روش پرداخت",
+    "payment_method.status": "تغییر وضعیت روش پرداخت",
+    "payment.receipt_review": "بررسی رسید پرداخت",
+    "platform_setting.update": "ویرایش تنظیمات فروشگاه",
+    "platform_setting.trial_plan": "تغییر پلن تست",
+}
+
+ENTITY_TYPE_FA = {
+    "tenant": "ربات مشتری",
+    "tenant_bot": "ربات تلگرام",
+    "license_plan": "پلن",
+    "license": "لایسنس",
+    "customer_order": "سفارش",
+    "platform_customer": "کاربر فروشگاه",
+    "payment_method": "روش پرداخت",
+    "payment_receipt": "رسید",
+    "platform_setting": "تنظیمات",
+}
+
 
 MAIN_MENU = (
     ("👤 کاربران فروشگاه", "menu:customers"),
@@ -713,12 +764,32 @@ def confirm_keyboard(action: str, cancel_callback: str) -> InlineKeyboardMarkup:
     ])
 
 
-def audit_text(items: Iterable[dict[str, Any]]) -> str:
-    lines = ["🧾 آخرین رویدادها"]
-    for item in items:
-        lines.append(
-            f"#{int(item['id'])} · {item['action']} · {item['entity_type']}:{item['entity_id']}"
+def warnings_text(items: Iterable[dict[str, Any]]) -> str:
+    rows = list(items)
+    lines = ["⚠️ هشدارهای سامانه"]
+    for item in rows:
+        event = WARNING_EVENT_FA.get(
+            str(item["event_type"]), str(item["event_type"])
         )
-    if len(lines) == 1:
-        lines.append("رویدادی ثبت نشده است.")
+        status = WARNING_STATUS_FA.get(str(item["status"]), str(item["status"]))
+        lines.append(f"\n#{int(item['id'])} · {event}\n{status}")
+    if not rows:
+        lines.append("\n✅ هشدار بازی وجود ندارد.")
+    return "\n".join(lines)
+
+
+def audit_text(items: Iterable[dict[str, Any]]) -> str:
+    rows = list(items)
+    lines = ["🧾 تاریخچه عملیات"]
+    for item in rows:
+        action = AUDIT_ACTION_FA.get(str(item["action"]), str(item["action"]))
+        entity = ENTITY_TYPE_FA.get(
+            str(item["entity_type"]), str(item["entity_type"])
+        )
+        lines.append(
+            f"\n#{int(item['id'])} · {action}\n"
+            f"{entity}: {item['entity_id']}"
+        )
+    if not rows:
+        lines.append("\nرویدادی ثبت نشده است.")
     return "\n".join(lines)
