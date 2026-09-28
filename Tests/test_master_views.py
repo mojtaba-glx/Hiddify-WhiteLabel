@@ -209,7 +209,7 @@ def test_token_message_is_deleted_and_never_saved_in_flow(conn) -> None:
 
 def test_customer_keyboard_exposes_only_storefront_actions() -> None:
     keyboard = customer_main_keyboard()
-    labels = [button for row in keyboard.keyboard for button in row]
+    labels = [button.text for row in keyboard.keyboard for button in row]
     assert set(labels) == set(CUSTOMER_BUTTONS)
     assert "⚙️ تنظیمات" not in labels
     assert "💳 پرداخت‌ها" not in labels
