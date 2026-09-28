@@ -127,6 +127,58 @@ class TenantBusinessService:
     def list_servers(self) -> list[dict[str, Any]]:
         return [dict(row) for row in self.conn.execute("SELECT * FROM tenant_servers WHERE tenant_id = ? ORDER BY id DESC", (self.tenant_id,)).fetchall()]
 
+    def set_default_server(self, actor_id: int, *, server_id: int) -> dict[str, Any]:
+        """Choose the only server automatic sales provisioning may target."""
+        self._admin(actor_id)
+        server = self.server(int(server_id))
+        if server["status"] != "active" or server["panel_kind"] != "hiddify":
+            raise TenantBusinessError("default provisioning server must be an active hiddify server")
+        if not self.panel_status(int(server_id))["configured"]:
+            raise TenantBusinessError("default provisioning server is not configured")
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            self.conn.execute(
+                "UPDATE tenant_servers SET is_default=0, updated_at=? WHERE tenant_id=? AND is_default=1",
+                (now, self.tenant_id),
+            )
+            changed = self.conn.execute(
+                "UPDATE tenant_servers SET is_default=1, updated_at=? "
+                "WHERE id=? AND tenant_id=? AND status='active' AND panel_kind='hiddify'",
+                (now, int(server_id), self.tenant_id),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("server is not eligible for automatic provisioning")
+        return self.server(int(server_id))
+
+    def _provisioning_server(self) -> dict[str, Any]:
+        rows = [
+            dict(row)
+            for row in self.conn.execute(
+                "SELECT s.* FROM tenant_servers s "
+                "JOIN tenant_panel_credentials c ON c.server_id=s.id AND c.tenant_id=s.tenant_id "
+                "WHERE s.tenant_id=? AND s.status='active' AND s.panel_kind='hiddify' "
+                "ORDER BY s.is_default DESC, s.id ASC",
+                (self.tenant_id,),
+            ).fetchall()
+        ]
+        if not rows:
+            raise TenantBusinessError("no configured hiddify server is available")
+        defaults = [row for row in rows if int(row.get("is_default") or 0) == 1]
+        if len(defaults) == 1:
+            return defaults[0]
+        if len(rows) == 1:
+            return rows[0]
+        raise TenantBusinessError("default provisioning server is required")
+
+    def provision_pending_subscription(self, actor_id: int, *, subscription_id: int) -> dict[str, Any]:
+        """Provision through the tenant's deterministic sales server selection."""
+        self._admin(actor_id)
+        server = self._provisioning_server()
+        return self.activate_subscription(
+            actor_id,
+            subscription_id=int(subscription_id),
+            server_id=int(server["id"]),
+        )
     def set_panel_credential(self, actor_id: int, *, server_id: int, secret: str) -> dict[str, Any]:
         """Replace one server secret, returning only safe configuration status."""
         self._admin(actor_id)
@@ -305,23 +357,65 @@ class TenantBusinessService:
         return {"id": int(cursor.lastrowid or 0), "order_id": int(order_id)}
 
     def review_receipt(self, actor_id: int, receipt_id: int, *, approve: bool) -> dict[str, Any]:
-        self._admin(actor_id); now = iso_utc(utcnow())
+        """Review payment only; remote provisioning is deliberately outside this transaction."""
+        self._admin(actor_id)
+        now = iso_utc(utcnow())
+        subscription_id: int | None = None
         with transaction(self.conn):
-            row = self.conn.execute("SELECT r.*, o.customer_id, o.plan_id, o.status AS order_status, p.traffic_gb, p.duration_days FROM tenant_receipts r JOIN tenant_orders o ON o.id=r.order_id JOIN tenant_sale_plans p ON p.id=o.plan_id WHERE r.id=? AND r.tenant_id=?", (int(receipt_id), self.tenant_id)).fetchone()
-            if row is None: raise TenantBusinessError("receipt not found")
+            row = self.conn.execute(
+                "SELECT r.*, o.customer_id, o.plan_id, o.status AS order_status, p.traffic_gb, p.duration_days "
+                "FROM tenant_receipts r JOIN tenant_orders o ON o.id=r.order_id "
+                "JOIN tenant_sale_plans p ON p.id=o.plan_id "
+                "WHERE r.id=? AND r.tenant_id=?",
+                (int(receipt_id), self.tenant_id),
+            ).fetchone()
+            if row is None:
+                raise TenantBusinessError("receipt not found")
             receipt = dict(row)
-            if receipt["status"] != "pending" or receipt["order_status"] != "payment_review": raise TenantBusinessError("receipt was already reviewed")
-            changed = self.conn.execute("UPDATE tenant_receipts SET status=?, reviewed_by=?, reviewed_at=? WHERE id=? AND tenant_id=? AND status='pending'", ("approved" if approve else "rejected", int(actor_id), now, int(receipt_id), self.tenant_id))
-            if changed.rowcount != 1: raise TenantBusinessError("receipt state changed")
+            if receipt["status"] != "pending" or receipt["order_status"] != "payment_review":
+                raise TenantBusinessError("receipt was already reviewed")
+            changed = self.conn.execute(
+                "UPDATE tenant_receipts SET status=?, reviewed_by=?, reviewed_at=? "
+                "WHERE id=? AND tenant_id=? AND status='pending'",
+                ("approved" if approve else "rejected", int(actor_id), now, int(receipt_id), self.tenant_id),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("receipt state changed")
+
             target = "rejected"
             if approve:
                 expires = iso_utc(utcnow() + timedelta(days=int(receipt["duration_days"])))
-                self.conn.execute("INSERT INTO tenant_subscriptions (tenant_id, customer_id, plan_id, order_id, server_id, status, usage_bytes, traffic_bytes, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, 'pending_provisioning', 0, ?, ?, ?, ?)", (self.tenant_id, int(receipt["customer_id"]), int(receipt["plan_id"]), int(receipt["order_id"]), int(receipt["traffic_gb"]) * 1024 * 1024 * 1024, expires, now, now))
-                target = "fulfilled"
-            changed = self.conn.execute("UPDATE tenant_orders SET status=?, updated_at=? WHERE id=? AND tenant_id=? AND status='payment_review'", (target, now, int(receipt["order_id"]), self.tenant_id))
-            if changed.rowcount != 1: raise TenantBusinessError("order state changed")
-        return {"order_id": int(receipt["order_id"]), "status": target, "customer_id": int(receipt["customer_id"])}
+                cursor = self.conn.execute(
+                    "INSERT INTO tenant_subscriptions "
+                    "(tenant_id, customer_id, plan_id, order_id, server_id, status, usage_bytes, traffic_bytes, expires_at, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, NULL, 'pending_provisioning', 0, ?, ?, ?, ?)",
+                    (
+                        self.tenant_id,
+                        int(receipt["customer_id"]),
+                        int(receipt["plan_id"]),
+                        int(receipt["order_id"]),
+                        int(receipt["traffic_gb"]) * 1024 * 1024 * 1024,
+                        expires,
+                        now,
+                        now,
+                    ),
+                )
+                subscription_id = int(cursor.lastrowid or 0)
+                target = "paid"
 
+            changed = self.conn.execute(
+                "UPDATE tenant_orders SET status=?, updated_at=? "
+                "WHERE id=? AND tenant_id=? AND status='payment_review'",
+                (target, now, int(receipt["order_id"]), self.tenant_id),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("order state changed")
+        return {
+            "order_id": int(receipt["order_id"]),
+            "status": target,
+            "customer_id": int(receipt["customer_id"]),
+            "subscription_id": subscription_id,
+        }
     def list_receipts_admin(self, actor_id: int) -> list[dict[str, Any]]:
         self._admin(actor_id)
         rows = self.conn.execute(
@@ -352,11 +446,10 @@ class TenantBusinessService:
         return [dict(row) for row in rows]
 
     def activate_subscription(self, actor_id: int, *, subscription_id: int, server_id: int) -> dict[str, Any]:
-        """Provision a pending subscription through an explicit adapter.
+        """Provision a pending subscription, then atomically mark the paid order fulfilled.
 
-        The remote call occurs outside the SQLite transaction. The mandatory
-        idempotency key means a provider adapter can safely retry after a
-        process interruption; the local state changes via compare-and-swap.
+        The provider call happens outside SQLite. Provider adapters receive a stable
+        idempotency key, so a retry cannot intentionally create a second remote user.
         """
         self._admin(actor_id)
         row = self.conn.execute(
@@ -387,6 +480,7 @@ class TenantBusinessService:
             raise TenantBusinessError("panel provisioning failed") from exc
         finally:
             secret = ""
+
         external_ref = _text(result.external_ref, 255)
         now = iso_utc(utcnow())
         with transaction(self.conn):
@@ -397,13 +491,21 @@ class TenantBusinessService:
             )
             if changed.rowcount != 1:
                 raise TenantBusinessError("subscription state changed during provisioning")
+            if subscription.get("order_id") is not None:
+                order_changed = self.conn.execute(
+                    "UPDATE tenant_orders SET status='fulfilled', updated_at=? "
+                    "WHERE id=? AND tenant_id=? AND status IN ('paid', 'fulfilled')",
+                    (now, int(subscription["order_id"]), self.tenant_id),
+                )
+                if order_changed.rowcount != 1:
+                    raise TenantBusinessError("order state changed during provisioning")
         return {
             "id": int(subscription_id),
+            "order_id": int(subscription["order_id"]) if subscription.get("order_id") is not None else None,
             "status": "active",
             "external_ref": external_ref,
             "subscription_url": str(result.subscription_url or ""),
         }
-
     def sync_subscription_usage(self, actor_id: int, *, subscription_id: int) -> dict[str, Any]:
         """Read usage from a configured provider, then atomically persist it."""
         self._admin(actor_id)
