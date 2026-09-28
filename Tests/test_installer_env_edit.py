@@ -69,3 +69,33 @@ def test_installer_does_not_pass_secret_values_via_env_command_arguments() -> No
     assert "env WL_ENV_VALUE=" not in content
     assert "env WL_BOT_TOKEN=" not in content
     assert "printf '%s' \"$token\"" in content
+
+def test_env_editor_updates_smart_subscription_public_url(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "SMART_SUB_PUBLIC_BASE_URL=\nSMART_SUB_PORT=8091\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+
+    result = _run(
+        env_file,
+        "SMART_SUB_PUBLIC_BASE_URL",
+        "https://sub.example.com/",
+    )
+    assert result.returncode == 0, result.stderr
+    text = env_file.read_text(encoding="utf-8")
+    assert "SMART_SUB_PUBLIC_BASE_URL=https://sub.example.com\n" in text
+
+
+def test_env_editor_rejects_invalid_smart_subscription_settings(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    original = "SMART_SUB_PUBLIC_BASE_URL=https://old.example\nSMART_SUB_PORT=8091\n"
+    env_file.write_text(original, encoding="utf-8")
+    env_file.chmod(0o600)
+
+    assert _run(env_file, "SMART_SUB_PUBLIC_BASE_URL", "ftp://bad").returncode != 0
+    assert env_file.read_text(encoding="utf-8") == original
+    assert _run(env_file, "SMART_SUB_PORT", "70000").returncode != 0
+    assert env_file.read_text(encoding="utf-8") == original
+

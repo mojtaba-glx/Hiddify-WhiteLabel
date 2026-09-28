@@ -114,6 +114,9 @@ class RuntimeSettings:
     poll_timeout_seconds: int = 20
     license_cache_ttl_seconds: int = 15
     lifecycle_seconds: int = 180
+    smart_sub_host: str = "127.0.0.1"
+    smart_sub_port: int = 8091
+    smart_sub_public_base_url: str = ""
 
     def __post_init__(self) -> None:
         if not str(self.token_encryption_key or "").strip():
@@ -134,6 +137,15 @@ class RuntimeSettings:
             raise SettingsError("RUNTIME_CACHE_TTL_SECONDS must be at least 1")
         if int(self.lifecycle_seconds) < 60:
             raise SettingsError("RUNTIME_LIFECYCLE_SECONDS must be at least 60")
+        if not str(self.smart_sub_host or "").strip():
+            raise SettingsError("SMART_SUB_HOST is required")
+        if not 1 <= int(self.smart_sub_port) <= 65535:
+            raise SettingsError("SMART_SUB_PORT must be between 1 and 65535")
+        public_base = str(self.smart_sub_public_base_url or "").strip()
+        if public_base and not (
+            public_base.startswith("http://") or public_base.startswith("https://")
+        ):
+            raise SettingsError("SMART_SUB_PUBLIC_BASE_URL must use http or https")
 
     def __repr__(self) -> str:
         return (
@@ -144,7 +156,10 @@ class RuntimeSettings:
             f"start_concurrency={self.start_concurrency}, "
             f"poll_timeout_seconds={self.poll_timeout_seconds}, "
             f"license_cache_ttl_seconds={self.license_cache_ttl_seconds}, "
-            f"lifecycle_seconds={self.lifecycle_seconds})"
+            f"lifecycle_seconds={self.lifecycle_seconds}, "
+            f"smart_sub_host={self.smart_sub_host!r}, "
+            f"smart_sub_port={self.smart_sub_port}, "
+            f"smart_sub_public_base_url={self.smart_sub_public_base_url!r})"
         )
 
 
@@ -242,4 +257,15 @@ def load_runtime_from_env(
             default=180,
             minimum=60,
         ),
+        smart_sub_host=str(
+            source.get("SMART_SUB_HOST", "") or "127.0.0.1"
+        ).strip(),
+        smart_sub_port=_parse_positive_int(
+            source.get("SMART_SUB_PORT"),
+            name="SMART_SUB_PORT",
+            default=8091,
+        ),
+        smart_sub_public_base_url=str(
+            source.get("SMART_SUB_PUBLIC_BASE_URL", "") or ""
+        ).strip().rstrip("/"),
     )

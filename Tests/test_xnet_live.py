@@ -390,3 +390,23 @@ def test_invalid_xnet_target_never_echoes_secret() -> None:
         )
     assert "do-not-leak" not in str(exc.value)
     assert "also-secret" not in str(exc.value)
+
+def test_xnet_native_subscription_content_is_fetched() -> None:
+    body = "anytls://secret@xnet.example:443#XNET"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/sub/u-content"
+        return httpx.Response(200, request=request, text=body)
+
+    adapter = XnetPanelAdapter(transport=httpx.MockTransport(handler))
+    target = PanelTarget(
+        kind="xnet",
+        endpoint="https://panel.example:8080",
+        xnet_public_origin="https://sub.example",
+        xnet_sub_port=443,
+        xnet_sub_path="sub",
+    )
+    assert adapter.subscription_content(
+        target=target, secret="unused", external_ref="u-content"
+    ) == body
+

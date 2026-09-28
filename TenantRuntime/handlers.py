@@ -255,10 +255,27 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ سرورها", callback_data="biz:servers")]]),
                 ); return
             if data == "biz:nodes":
-                items = business.list_nodes(); text = "🔗 نودها\n" + ("\n".join(f"• {x['label']} · {x.get('location') or '-'}" for x in items) or "موردی نیست.")
-                await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ نود", callback_data="biz:addnode")], [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")]])); return
+                items = business.list_nodes()
+                text = "🔗 نودهای Multi-node\n" + ("\n".join(
+                    f"• {x['label']} · server #{x.get('server_id') or '-'} · "
+                    f"{x.get('server_label') or 'بدون سرور'} · {x.get('provider_kind') or '-'} · "
+                    f"{x.get('location') or '-'} · {x['status']}"
+                    for x in items
+                ) or "موردی نیست.")
+                await update.callback_query.edit_message_text(
+                    text,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("➕ نود", callback_data="biz:addnode")],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
+                ); return
             if data == "biz:addnode":
-                context.user_data["biz_flow"] = {"kind": "node"}; await update.callback_query.edit_message_text("نام نود | لوکیشن اختیاری", reply_markup=_menu(spec)); return
+                context.user_data["biz_flow"] = {"kind": "node"}
+                await update.callback_query.edit_message_text(
+                    "نام نود | Server ID | لوکیشن اختیاری\n"
+                    "Server ID را از بخش «سرورها» بردارید. هر نود فعال به‌صورت خودکار وارد سرویس‌های Multi-node می‌شود.",
+                    reply_markup=_menu(spec),
+                ); return
             if data == "biz:plans":
                 items = business.list_plans(public=False); text = "📦 پلن‌های فروش\n" + ("\n".join(f"• {x['name']} · {x['traffic_gb']}GB · {x['duration_days']} روز · {x['price']:,} {x['currency']}" for x in items) or "موردی نیست.")
                 await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ پلن", callback_data="biz:addplan")], [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")]])); return
@@ -306,15 +323,68 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     f"آخرین اتصال: {x.get('last_online') or '-'}"
                     for x in items
                 ) or "موردی نیست.")
-                rows = [[InlineKeyboardButton(
-                    f"🔄 سینک #{x['id']}", callback_data=f"biz:syncsub:{x['id']}"
-                )] for x in items[:12] if x["status"] in ("active", "disabled")]
+                rows = []
+                for x in items[:12]:
+                    if x["status"] in ("active", "disabled"):
+                        rows.append([
+                            InlineKeyboardButton(
+                                f"🔄 سینک #{x['id']}",
+                                callback_data=f"biz:syncsub:{x['id']}",
+                            ),
+                            InlineKeyboardButton(
+                                f"🧩 نودها #{x['id']}",
+                                callback_data=f"biz:subnodes:{x['id']}",
+                            ),
+                        ])
                 rows += [
                     [InlineKeyboardButton("🔄 همگام‌سازی همه", callback_data="biz:syncall")],
                     [InlineKeyboardButton("⏱ اعمال انقضا", callback_data="biz:expireall")],
                     [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
                 ]
                 await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows)); return
+            if data.startswith("biz:subnodes:"):
+                subscription_id = int(data.rsplit(":", 1)[1])
+                nodes = business.subscription_nodes_admin(
+                    actor, subscription_id=subscription_id
+                )
+                text = f"🧩 نودهای سرویس #{subscription_id}\n" + (
+                    "\n".join(
+                        f"• {'⭐ ' if int(x.get('is_primary') or 0) else ''}"
+                        f"{x.get('server_label') or x['server_id']} · "
+                        f"{x.get('provider_kind') or '-'} · {x['status']} · "
+                        f"{int(x.get('usage_bytes') or 0)/(1024**3):.2f}GB"
+                        f"{' · خطا: '+str(x.get('last_error')) if x.get('last_error') else ''}"
+                        for x in nodes
+                    )
+                    or "هنوز mapping ثبت نشده است."
+                )
+                await update.callback_query.edit_message_text(
+                    text,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "🔁 Retry / همگام‌سازی نودها",
+                            callback_data=f"biz:retrynodes:{subscription_id}",
+                        )],
+                        [InlineKeyboardButton("↩️ سرویس‌ها", callback_data="biz:subs")],
+                    ]),
+                ); return
+            if data.startswith("biz:retrynodes:"):
+                subscription_id = int(data.rsplit(":", 1)[1])
+                result = business.repair_subscription_nodes(
+                    actor, subscription_id=subscription_id
+                )
+                await update.callback_query.edit_message_text(
+                    f"✅ نودهای سرویس #{subscription_id} بررسی شدند.\n"
+                    f"ساخته: {result['created']} · بازیابی: {result['restored']} · "
+                    f"غیرفعال: {result['disabled']} · خطا: {result['errors']}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "🧩 مشاهده نودها",
+                            callback_data=f"biz:subnodes:{subscription_id}",
+                        )],
+                        [InlineKeyboardButton("↩️ سرویس‌ها", callback_data="biz:subs")],
+                    ]),
+                ); return
             if data.startswith("biz:syncsub:"):
                 subscription_id = int(data.rsplit(":", 1)[1])
                 result = business.sync_subscription_usage(actor, subscription_id=subscription_id)
@@ -365,10 +435,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 items = business.list_tickets_admin(actor); text = "🎫 تیکت‌ها\n" + ("\n".join(f"#{x['id']} · {x['display_name']} · {x['subject']} · {x['status']}" for x in items) or "موردی نیست.")
                 await update.callback_query.edit_message_text(text, reply_markup=_menu(spec)); return
             if data == "biz:links":
-                items = business.list_smart_links(actor); text = "🔗 لینک‌های هوشمند\n" + ("\n".join(f"• {x['label']}: /start {x['code']}" for x in items) or "موردی نیست.")
-                await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ لینک", callback_data="biz:addlink")], [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")]])); return
-            if data == "biz:addlink":
-                context.user_data["biz_flow"] = {"kind": "link"}; await update.callback_query.edit_message_text("نام لینک | مقصد (مثال: buy)", reply_markup=_menu(spec)); return
+                items = business.list_smart_links(actor)
+                managed = [x for x in items if str(x.get("target") or "").startswith("subscription:")]
+                text = "🔗 لینک‌های هوشمند سرویس‌ها\n" + (
+                    "\n".join(
+                        f"• {x['label']} · {x['target']}\n  {x.get('public_url') or 'SMART_SUB_PUBLIC_BASE_URL تنظیم نشده'}"
+                        for x in managed
+                    )
+                    or "بعد از فعال‌شدن اولین سرویس، لینک هوشمند خودکار ساخته می‌شود."
+                )
+                await update.callback_query.edit_message_text(
+                    text,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")]
+                    ]),
+                ); return
         else:
             if data == "shop:buy":
                 plans = business.list_plans(); rows = [[InlineKeyboardButton(f"{p['name']} · {p['price']:,} {p['currency']}", callback_data=f"shop:plan:{p['id']}")] for p in plans] or [[InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")]]
@@ -553,8 +634,13 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         admin_path=fields[3] if len(fields) >= 4 else "",
                         user_path=fields[4] if len(fields) >= 5 else "",
                     )
-            elif kind == "node" and 1 <= len(fields) <= 2:
-                business.add_node(actor, label=fields[0], location=fields[1] if len(fields) == 2 else "")
+            elif kind == "node" and 2 <= len(fields) <= 3:
+                business.add_node(
+                    actor,
+                    label=fields[0],
+                    server_id=int(fields[1]),
+                    location=fields[2] if len(fields) == 3 else "",
+                )
             elif kind == "plan" and len(fields) == 5:
                 business.add_plan(actor, name=fields[0], traffic_gb=int(fields[1]), duration_days=int(fields[2]), price=int(fields[3]), currency=fields[4])
             elif kind == "payment" and len(fields) == 6:

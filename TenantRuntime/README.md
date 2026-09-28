@@ -36,6 +36,26 @@ tenant. It refreshes usage and last-online state, disables time/quota-expired
 accounts before marking them expired locally, and never reactivates an expired
 subscription without renewal.
 
+Active `tenant_nodes` define the Multi-node topology for new and repaired
+subscriptions. A primary mapping is mandatory; child mappings are best-effort
+and persist independent status/error metadata in
+`tenant_subscription_nodes`. Aggregate usage is the sum of the current
+topology, so a user cannot bypass the plan quota by switching locations.
+
+Shard index 0 also owns the managed subscription HTTP listener. Configure:
+
+```bash
+SMART_SUB_HOST=127.0.0.1
+SMART_SUB_PORT=8091
+SMART_SUB_PUBLIC_BASE_URL=https://sub.example.com
+```
+
+The public URL delivered to UserBot is
+`/sub/<opaque-code>/all.b64`. `/all.txt` is available for plain text. The
+opaque code resolves only to the tenant-scoped subscription recorded in
+`tenant_smart_links`; panel credentials are decrypted only inside the server
+while fetching each provider's native subscription.
+
 Run one process for each shard index:
 
 ```bash

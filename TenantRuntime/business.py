@@ -9,6 +9,7 @@ the adapter boundary; concrete provider HTTP dialects remain separate.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import sqlite3
 from datetime import timedelta
@@ -506,7 +507,335 @@ class TenantBusinessService:
         return dict(row)
 
     def list_nodes(self) -> list[dict[str, Any]]:
-        return [dict(row) for row in self.conn.execute("SELECT * FROM tenant_nodes WHERE tenant_id = ? ORDER BY id DESC", (self.tenant_id,)).fetchall()]
+        return [
+            dict(row)
+            for row in self.conn.execute(
+                "SELECT n.*, s.label AS server_label, "
+                "COALESCE(s.provider_kind,s.panel_kind) AS provider_kind "
+                "FROM tenant_nodes n "
+                "LEFT JOIN tenant_servers s "
+                "ON s.id=n.server_id AND s.tenant_id=n.tenant_id "
+                "WHERE n.tenant_id=? ORDER BY n.id DESC",
+                (self.tenant_id,),
+            ).fetchall()
+        ]
+    def _desired_subscription_servers(
+        self, primary_server_id: int
+    ) -> list[dict[str, Any]]:
+        rows = [
+            self._server_dict(row)
+            for row in self.conn.execute(
+                "SELECT DISTINCT s.* FROM tenant_servers s "
+                "JOIN tenant_panel_credentials c "
+                "ON c.server_id=s.id AND c.tenant_id=s.tenant_id "
+                "LEFT JOIN tenant_nodes n "
+                "ON n.server_id=s.id AND n.tenant_id=s.tenant_id "
+                "AND n.status='active' "
+                "WHERE s.tenant_id=? AND s.status='active' "
+                "AND (s.id=? OR n.id IS NOT NULL) "
+                "AND COALESCE(s.provider_kind,s.panel_kind) "
+                "IN ('hiddify','xui','xnet') "
+                "ORDER BY CASE WHEN s.id=? THEN 0 ELSE 1 END, s.id",
+                (
+                    self.tenant_id,
+                    int(primary_server_id),
+                    int(primary_server_id),
+                ),
+            ).fetchall()
+        ]
+        return rows
+
+    def _upsert_subscription_node(
+        self,
+        *,
+        subscription_id: int,
+        server_id: int,
+        external_ref: str | None,
+        is_primary: bool,
+        status: str,
+        usage_bytes: int = 0,
+        last_online: str | None = None,
+        last_error: str | None = None,
+    ) -> None:
+        now = iso_utc(utcnow())
+        self.conn.execute(
+            "INSERT INTO tenant_subscription_nodes "
+            "(tenant_id, subscription_id, server_id, external_ref, is_primary, "
+            "status, usage_bytes, last_online, last_error, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(tenant_id, subscription_id, server_id) DO UPDATE SET "
+            "external_ref=excluded.external_ref, "
+            "is_primary=excluded.is_primary, status=excluded.status, "
+            "usage_bytes=excluded.usage_bytes, last_online=excluded.last_online, "
+            "last_error=excluded.last_error, updated_at=excluded.updated_at",
+            (
+                self.tenant_id,
+                int(subscription_id),
+                int(server_id),
+                _text(external_ref, 255, required=False) or None,
+                1 if is_primary else 0,
+                str(status),
+                max(0, int(usage_bytes)),
+                _text(last_online, 80, required=False) or None,
+                _text(last_error, 300, required=False) or None,
+                now,
+                now,
+            ),
+        )
+
+    def _ensure_primary_subscription_node(
+        self, subscription: dict[str, Any]
+    ) -> None:
+        if not subscription.get("server_id") or not subscription.get("external_ref"):
+            return
+        existing = self.conn.execute(
+            "SELECT id FROM tenant_subscription_nodes "
+            "WHERE tenant_id=? AND subscription_id=? AND server_id=?",
+            (
+                self.tenant_id,
+                int(subscription["id"]),
+                int(subscription["server_id"]),
+            ),
+        ).fetchone()
+        if existing is None:
+            with transaction(self.conn):
+                self._upsert_subscription_node(
+                    subscription_id=int(subscription["id"]),
+                    server_id=int(subscription["server_id"]),
+                    external_ref=str(subscription["external_ref"]),
+                    is_primary=True,
+                    status=(
+                        "active"
+                        if str(subscription["status"]) == "active"
+                        else str(subscription["status"])
+                    ),
+                    usage_bytes=int(subscription.get("usage_bytes") or 0),
+                    last_online=subscription.get("last_online"),
+                )
+
+    def subscription_nodes_admin(
+        self, actor_id: int, *, subscription_id: int
+    ) -> list[dict[str, Any]]:
+        subscription = self._admin_subscription(actor_id, subscription_id)
+        self._ensure_primary_subscription_node(subscription)
+        return [
+            dict(row)
+            for row in self.conn.execute(
+                "SELECT m.*, s.label AS server_label, "
+                "COALESCE(s.provider_kind,s.panel_kind) AS provider_kind "
+                "FROM tenant_subscription_nodes m "
+                "JOIN tenant_servers s ON s.id=m.server_id AND s.tenant_id=m.tenant_id "
+                "WHERE m.tenant_id=? AND m.subscription_id=? "
+                "ORDER BY m.is_primary DESC, m.id",
+                (self.tenant_id, int(subscription_id)),
+            ).fetchall()
+        ]
+
+    def _ensure_subscription_smart_link(
+        self, *, subscription_id: int, label: str = ""
+    ) -> dict[str, Any]:
+        target = f"subscription:{int(subscription_id)}"
+        row = self.conn.execute(
+            "SELECT * FROM tenant_smart_links "
+            "WHERE tenant_id=? AND target=? ORDER BY id LIMIT 1",
+            (self.tenant_id, target),
+        ).fetchone()
+        if row is not None:
+            return dict(row)
+        now = iso_utc(utcnow())
+        code = secrets.token_urlsafe(24)
+        try:
+            with transaction(self.conn):
+                cursor = self.conn.execute(
+                    "INSERT INTO tenant_smart_links "
+                    "(tenant_id, code, label, target, status, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, 'active', ?, ?)",
+                    (
+                        self.tenant_id,
+                        code,
+                        _text(label or f"Subscription {int(subscription_id)}", 80),
+                        target,
+                        now,
+                        now,
+                    ),
+                )
+            link_id = int(cursor.lastrowid or 0)
+        except sqlite3.IntegrityError:
+            row = self.conn.execute(
+                "SELECT * FROM tenant_smart_links "
+                "WHERE tenant_id=? AND target=? ORDER BY id LIMIT 1",
+                (self.tenant_id, target),
+            ).fetchone()
+            if row is None:
+                raise
+            return dict(row)
+        row = self.conn.execute(
+            "SELECT * FROM tenant_smart_links WHERE id=? AND tenant_id=?",
+            (link_id, self.tenant_id),
+        ).fetchone()
+        assert row is not None
+        return dict(row)
+
+    def _smart_url(self, *, subscription_id: int, label: str = "") -> str:
+        link = self._ensure_subscription_smart_link(
+            subscription_id=int(subscription_id), label=label
+        )
+        public_base = str(
+            os.getenv("SMART_SUB_PUBLIC_BASE_URL", "") or ""
+        ).strip()
+        if not public_base:
+            return ""
+        from TenantRuntime.smart_subscription import smart_subscription_url
+
+        return smart_subscription_url(public_base, str(link["code"]))
+
+    def repair_subscription_nodes(
+        self, actor_id: int, *, subscription_id: int
+    ) -> dict[str, int]:
+        subscription = self._admin_subscription(actor_id, subscription_id)
+        if subscription["status"] not in ("active", "disabled"):
+            raise TenantBusinessError("subscription nodes cannot be repaired")
+        if not subscription.get("server_id") or not subscription.get("external_ref"):
+            raise TenantBusinessError("subscription is not provisioned")
+        self._ensure_primary_subscription_node(subscription)
+        plan = self.plan(int(subscription["plan_id"]), public=False)
+        desired = self._desired_subscription_servers(int(subscription["server_id"]))
+        desired_ids = {int(server["id"]) for server in desired}
+        created = restored = disabled = errors = 0
+
+        for server in desired:
+            server_id = int(server["id"])
+            if server_id == int(subscription["server_id"]):
+                continue
+            mapping = self.conn.execute(
+                "SELECT * FROM tenant_subscription_nodes "
+                "WHERE tenant_id=? AND subscription_id=? AND server_id=?",
+                (self.tenant_id, int(subscription_id), server_id),
+            ).fetchone()
+            secret = ""
+            try:
+                _, target, secret = self._panel_material(server_id)
+                if mapping is not None and mapping["external_ref"]:
+                    user = self.panel_adapter.get_user(
+                        target=target,
+                        secret=secret,
+                        external_ref=str(mapping["external_ref"]),
+                    )
+                    if subscription["status"] == "active" and not user.active:
+                        user = self.panel_adapter.set_enabled(
+                            target=target,
+                            secret=secret,
+                            external_ref=str(mapping["external_ref"]),
+                            enabled=True,
+                        )
+                    with transaction(self.conn):
+                        self._upsert_subscription_node(
+                            subscription_id=int(subscription_id),
+                            server_id=server_id,
+                            external_ref=user.external_ref,
+                            is_primary=False,
+                            status=(
+                                "active"
+                                if subscription["status"] == "active"
+                                else "disabled"
+                            ),
+                            usage_bytes=int(user.usage_bytes),
+                            last_online=user.last_online,
+                        )
+                    restored += 1
+                    continue
+
+                result = self.panel_adapter.provision(
+                    target=target,
+                    secret=secret,
+                    request=ProvisionRequest(
+                        tenant_id=self.tenant_id,
+                        server_id=server_id,
+                        subscription_id=int(subscription_id),
+                        customer_id=int(subscription["customer_id"]),
+                        traffic_bytes=int(subscription["traffic_bytes"]),
+                        duration_days=int(plan["duration_days"]),
+                        expires_at=str(subscription["expires_at"]),
+                        idempotency_key=(
+                            f"tenant:{self.tenant_id}:subscription:"
+                            f"{int(subscription_id)}:server:{server_id}"
+                        ),
+                    ),
+                )
+                if subscription["status"] == "disabled":
+                    self.panel_adapter.set_enabled(
+                        target=target,
+                        secret=secret,
+                        external_ref=result.external_ref,
+                        enabled=False,
+                    )
+                with transaction(self.conn):
+                    self._upsert_subscription_node(
+                        subscription_id=int(subscription_id),
+                        server_id=server_id,
+                        external_ref=result.external_ref,
+                        is_primary=False,
+                        status=str(subscription["status"]),
+                    )
+                created += 1
+            except PanelError:
+                with transaction(self.conn):
+                    self._upsert_subscription_node(
+                        subscription_id=int(subscription_id),
+                        server_id=server_id,
+                        external_ref=(
+                            str(mapping["external_ref"])
+                            if mapping is not None and mapping["external_ref"]
+                            else None
+                        ),
+                        is_primary=False,
+                        status="error",
+                        last_error="provider operation failed",
+                    )
+                errors += 1
+            finally:
+                secret = ""
+
+        stale = self.conn.execute(
+            "SELECT * FROM tenant_subscription_nodes "
+            "WHERE tenant_id=? AND subscription_id=? AND is_primary=0",
+            (self.tenant_id, int(subscription_id)),
+        ).fetchall()
+        for row in stale:
+            if int(row["server_id"]) in desired_ids or row["status"] == "disabled":
+                continue
+            secret = ""
+            try:
+                if row["external_ref"]:
+                    _, target, secret = self._panel_material(int(row["server_id"]))
+                    self.panel_adapter.set_enabled(
+                        target=target,
+                        secret=secret,
+                        external_ref=str(row["external_ref"]),
+                        enabled=False,
+                    )
+                with transaction(self.conn):
+                    self._upsert_subscription_node(
+                        subscription_id=int(subscription_id),
+                        server_id=int(row["server_id"]),
+                        external_ref=row["external_ref"],
+                        is_primary=False,
+                        status="disabled",
+                        usage_bytes=int(row["usage_bytes"] or 0),
+                        last_online=row["last_online"],
+                    )
+                disabled += 1
+            except (PanelError, TenantBusinessError):
+                errors += 1
+            finally:
+                secret = ""
+
+        return {
+            "created": created,
+            "restored": restored,
+            "disabled": disabled,
+            "errors": errors,
+        }
 
     def add_plan(self, actor_id: int, *, name: str, traffic_gb: int, duration_days: int, price: int, currency: str = "IRR") -> dict[str, Any]:
         self._admin(actor_id)
@@ -850,21 +1179,18 @@ class TenantBusinessService:
         return [dict(row) for row in rows]
 
     def activate_subscription(self, actor_id: int, *, subscription_id: int, server_id: int) -> dict[str, Any]:
-        """Provision a pending subscription, then atomically mark the paid order fulfilled.
-
-        The provider call happens outside SQLite. Provider adapters receive a stable
-        idempotency key, so a retry cannot intentionally create a second remote user.
-        """
+        """Provision the required primary, then fan out to active tenant nodes."""
         self._admin(actor_id)
         row = self.conn.execute(
-            "SELECT * FROM tenant_subscriptions WHERE id=? AND tenant_id=? AND status='pending_provisioning'",
+            "SELECT * FROM tenant_subscriptions "
+            "WHERE id=? AND tenant_id=? AND status='pending_provisioning'",
             (int(subscription_id), self.tenant_id),
         ).fetchone()
         if row is None:
             raise TenantBusinessError("subscription is not awaiting provisioning")
         subscription = dict(row)
         plan = self.plan(int(subscription["plan_id"]), public=False)
-        server, target, secret = self._panel_material(int(server_id))
+        _, target, secret = self._panel_material(int(server_id))
         try:
             result = self.panel_adapter.provision(
                 target=target,
@@ -877,7 +1203,9 @@ class TenantBusinessService:
                     traffic_bytes=int(subscription["traffic_bytes"]),
                     duration_days=int(plan["duration_days"]),
                     expires_at=str(subscription["expires_at"]),
-                    idempotency_key=f"tenant:{self.tenant_id}:subscription:{int(subscription_id)}",
+                    idempotency_key=(
+                        f"tenant:{self.tenant_id}:subscription:{int(subscription_id)}"
+                    ),
                 ),
             )
         except PanelError as exc:
@@ -889,12 +1217,28 @@ class TenantBusinessService:
         now = iso_utc(utcnow())
         with transaction(self.conn):
             changed = self.conn.execute(
-                "UPDATE tenant_subscriptions SET server_id=?, external_ref=?, status='active', updated_at=? "
+                "UPDATE tenant_subscriptions "
+                "SET server_id=?, external_ref=?, status='active', updated_at=? "
                 "WHERE id=? AND tenant_id=? AND status='pending_provisioning'",
-                (int(server_id), external_ref, now, int(subscription_id), self.tenant_id),
+                (
+                    int(server_id),
+                    external_ref,
+                    now,
+                    int(subscription_id),
+                    self.tenant_id,
+                ),
             )
             if changed.rowcount != 1:
-                raise TenantBusinessError("subscription state changed during provisioning")
+                raise TenantBusinessError(
+                    "subscription state changed during provisioning"
+                )
+            self._upsert_subscription_node(
+                subscription_id=int(subscription_id),
+                server_id=int(server_id),
+                external_ref=external_ref,
+                is_primary=True,
+                status="active",
+            )
             if subscription.get("order_id") is not None:
                 order_changed = self.conn.execute(
                     "UPDATE tenant_orders SET status='fulfilled', updated_at=? "
@@ -902,16 +1246,38 @@ class TenantBusinessService:
                     (now, int(subscription["order_id"]), self.tenant_id),
                 )
                 if order_changed.rowcount != 1:
-                    raise TenantBusinessError("order state changed during provisioning")
+                    raise TenantBusinessError(
+                        "order state changed during provisioning"
+                    )
+        link = self._ensure_subscription_smart_link(
+            subscription_id=int(subscription_id),
+            label=str(plan.get("name") or f"Subscription {int(subscription_id)}"),
+        )
+        try:
+            nodes = self.repair_subscription_nodes(
+                actor_id, subscription_id=int(subscription_id)
+            )
+        except TenantBusinessError:
+            nodes = {"created": 0, "restored": 0, "disabled": 0, "errors": 1}
+        smart_url = self._smart_url(
+            subscription_id=int(subscription_id),
+            label=str(plan.get("name") or ""),
+        )
         return {
             "id": int(subscription_id),
-            "order_id": int(subscription["order_id"]) if subscription.get("order_id") is not None else None,
+            "order_id": (
+                int(subscription["order_id"])
+                if subscription.get("order_id") is not None
+                else None
+            ),
             "status": "active",
             "external_ref": external_ref,
-            "subscription_url": str(result.subscription_url or ""),
+            "smart_code": str(link["code"]),
+            "node_report": nodes,
+            "subscription_url": smart_url or str(result.subscription_url or ""),
         }
     def sync_subscription_usage(self, actor_id: int, *, subscription_id: int) -> dict[str, Any]:
-        """Refresh usage/online state and expire a depleted or time-expired service."""
+        """Aggregate usage/last-online across every active provider mapping."""
         self._admin(actor_id)
         row = self.conn.execute(
             "SELECT * FROM tenant_subscriptions "
@@ -921,36 +1287,124 @@ class TenantBusinessService:
         if row is None or row["server_id"] is None or not row["external_ref"]:
             raise TenantBusinessError("subscription cannot be synchronized")
         subscription = dict(row)
-        _, target, secret = self._panel_material(int(subscription["server_id"]))
-        try:
-            usage = self.panel_adapter.usage(
-                target=target,
-                secret=secret,
-                external_ref=str(subscription["external_ref"]),
+        self._ensure_primary_subscription_node(subscription)
+        desired_ids = {
+            int(server["id"])
+            for server in self._desired_subscription_servers(
+                int(subscription["server_id"])
             )
-            usage_bytes = int(usage.usage_bytes)
-            if usage_bytes < 0:
-                raise TenantBusinessError("panel returned invalid usage")
-            now_dt = utcnow()
-            due = self._subscription_is_due(
-                subscription, now=now_dt, usage_bytes=usage_bytes
-            )
-            if due and bool(usage.active):
-                self.panel_adapter.set_enabled(
+        }
+        mappings = [
+            row
+            for row in self.conn.execute(
+                "SELECT * FROM tenant_subscription_nodes "
+                "WHERE tenant_id=? AND subscription_id=? "
+                "AND external_ref IS NOT NULL "
+                "ORDER BY is_primary DESC, id",
+                (self.tenant_id, int(subscription_id)),
+            ).fetchall()
+            if int(row["server_id"]) in desired_ids
+        ]
+        if not mappings:
+            raise TenantBusinessError("subscription has no panel targets")
+
+        snapshots: list[tuple[sqlite3.Row, Any]] = []
+        primary_usage = None
+        node_errors = 0
+        for mapping in mappings:
+            secret = ""
+            try:
+                _, target, secret = self._panel_material(int(mapping["server_id"]))
+                usage = self.panel_adapter.usage(
                     target=target,
                     secret=secret,
-                    external_ref=str(subscription["external_ref"]),
-                    enabled=False,
+                    external_ref=str(mapping["external_ref"]),
                 )
-        except PanelError as exc:
-            raise TenantBusinessError("panel usage synchronization failed") from exc
-        finally:
-            secret = ""
+                if int(usage.usage_bytes) < 0:
+                    raise TenantBusinessError("panel returned invalid usage")
+                snapshots.append((mapping, usage))
+                if int(mapping["is_primary"] or 0) == 1:
+                    primary_usage = usage
+            except (PanelError, TenantBusinessError):
+                with transaction(self.conn):
+                    self._upsert_subscription_node(
+                        subscription_id=int(subscription_id),
+                        server_id=int(mapping["server_id"]),
+                        external_ref=str(mapping["external_ref"]),
+                        is_primary=bool(mapping["is_primary"]),
+                        status="error",
+                        usage_bytes=int(mapping["usage_bytes"] or 0),
+                        last_online=mapping["last_online"],
+                        last_error="usage sync failed",
+                    )
+                if int(mapping["is_primary"] or 0) == 1:
+                    raise TenantBusinessError(
+                        "primary panel usage synchronization failed"
+                    )
+                node_errors += 1
+            finally:
+                secret = ""
+
+        if primary_usage is None:
+            raise TenantBusinessError("primary panel usage is unavailable")
+
+        usage_bytes = sum(max(0, int(usage.usage_bytes)) for _, usage in snapshots)
+        last_online_values = [
+            str(usage.last_online)
+            for _, usage in snapshots
+            if usage.last_online
+        ]
+        last_online = max(last_online_values) if last_online_values else None
+        now_dt = utcnow()
+        due = self._subscription_is_due(
+            subscription, now=now_dt, usage_bytes=usage_bytes
+        )
+
+        if due:
+            disable_errors = 0
+            for mapping, usage in snapshots:
+                if not bool(usage.active):
+                    continue
+                secret = ""
+                try:
+                    _, target, secret = self._panel_material(int(mapping["server_id"]))
+                    self.panel_adapter.set_enabled(
+                        target=target,
+                        secret=secret,
+                        external_ref=str(mapping["external_ref"]),
+                        enabled=False,
+                    )
+                except (PanelError, TenantBusinessError):
+                    disable_errors += 1
+                finally:
+                    secret = ""
+            if disable_errors:
+                raise TenantBusinessError(
+                    "expiry could not be enforced on every subscription node"
+                )
 
         now = iso_utc(now_dt)
-        state = "expired" if due else ("active" if bool(usage.active) else "disabled")
+        state = (
+            "expired"
+            if due
+            else ("active" if bool(primary_usage.active) else "disabled")
+        )
         expired_at = now if due else None
         with transaction(self.conn):
+            for mapping, usage in snapshots:
+                self._upsert_subscription_node(
+                    subscription_id=int(subscription_id),
+                    server_id=int(mapping["server_id"]),
+                    external_ref=str(mapping["external_ref"]),
+                    is_primary=bool(mapping["is_primary"]),
+                    status=(
+                        "expired"
+                        if due
+                        else ("active" if bool(usage.active) else "disabled")
+                    ),
+                    usage_bytes=max(0, int(usage.usage_bytes)),
+                    last_online=usage.last_online,
+                )
             changed = self.conn.execute(
                 "UPDATE tenant_subscriptions "
                 "SET usage_bytes=?, status=?, last_online=?, last_synced_at=?, "
@@ -959,7 +1413,7 @@ class TenantBusinessService:
                 (
                     usage_bytes,
                     state,
-                    usage.last_online,
+                    last_online,
                     now,
                     expired_at,
                     now,
@@ -975,10 +1429,10 @@ class TenantBusinessService:
             "id": int(subscription_id),
             "usage_bytes": usage_bytes,
             "status": state,
-            "last_online": usage.last_online,
+            "last_online": last_online,
             "last_synced_at": now,
+            "node_errors": node_errors,
         }
-
     def sync_all_subscriptions(self, actor_id: int, *, limit: int = 250) -> dict[str, int]:
         self._admin(actor_id)
         rows = self.conn.execute(
@@ -1031,25 +1485,48 @@ class TenantBusinessService:
         if subscription["status"] == "expired":
             return {"id": int(subscription_id), "status": "expired"}
         if subscription["status"] not in ("active", "disabled"):
-            raise TenantBusinessError("subscription cannot expire from its current state")
+            raise TenantBusinessError(
+                "subscription cannot expire from its current state"
+            )
         if not self._subscription_is_due(subscription):
             raise TenantBusinessError("subscription is not expired")
         if subscription["server_id"] is None or not subscription["external_ref"]:
             raise TenantBusinessError("subscription is not provisioned")
-        _, target, secret = self._panel_material(int(subscription["server_id"]))
-        try:
-            self.panel_adapter.set_enabled(
-                target=target,
-                secret=secret,
-                external_ref=str(subscription["external_ref"]),
-                enabled=False,
-            )
-        except PanelError as exc:
-            raise TenantBusinessError("panel expiry enforcement failed") from exc
-        finally:
+        self._ensure_primary_subscription_node(subscription)
+        mappings = self.conn.execute(
+            "SELECT * FROM tenant_subscription_nodes "
+            "WHERE tenant_id=? AND subscription_id=? AND external_ref IS NOT NULL "
+            "ORDER BY is_primary DESC, id",
+            (self.tenant_id, int(subscription_id)),
+        ).fetchall()
+        for mapping in mappings:
             secret = ""
+            try:
+                _, target, secret = self._panel_material(int(mapping["server_id"]))
+                self.panel_adapter.set_enabled(
+                    target=target,
+                    secret=secret,
+                    external_ref=str(mapping["external_ref"]),
+                    enabled=False,
+                )
+            except (PanelError, TenantBusinessError) as exc:
+                raise TenantBusinessError(
+                    "panel expiry enforcement failed"
+                ) from exc
+            finally:
+                secret = ""
         now = iso_utc(utcnow())
         with transaction(self.conn):
+            for mapping in mappings:
+                self._upsert_subscription_node(
+                    subscription_id=int(subscription_id),
+                    server_id=int(mapping["server_id"]),
+                    external_ref=str(mapping["external_ref"]),
+                    is_primary=bool(mapping["is_primary"]),
+                    status="expired",
+                    usage_bytes=int(mapping["usage_bytes"] or 0),
+                    last_online=mapping["last_online"],
+                )
             changed = self.conn.execute(
                 "UPDATE tenant_subscriptions "
                 "SET status='expired', expired_at=?, updated_at=? "
@@ -1057,9 +1534,10 @@ class TenantBusinessService:
                 (now, now, int(subscription_id), self.tenant_id),
             )
             if changed.rowcount != 1:
-                raise TenantBusinessError("subscription state changed during expiry")
+                raise TenantBusinessError(
+                    "subscription state changed during expiry"
+                )
         return {"id": int(subscription_id), "status": "expired"}
-
     def expire_due_subscriptions(self, actor_id: int, *, limit: int = 250) -> dict[str, int]:
         self._admin(actor_id)
         now = iso_utc(utcnow())
@@ -1129,11 +1607,13 @@ class TenantBusinessService:
             raise TenantBusinessError("subscription is not provisioned")
         if int(traffic_gb) <= 0 or int(duration_days) <= 0:
             raise ValueError("invalid renewal values")
+        self._ensure_primary_subscription_node(subscription)
         next_plan_id = int(plan_id or subscription["plan_id"])
         if plan_id is not None:
             self.plan(next_plan_id, public=False)
         traffic_bytes = int(traffic_gb) * 1024 * 1024 * 1024
         expires_at = iso_utc(utcnow() + timedelta(days=int(duration_days)))
+        base_key = str(idempotency_key or "")
         _, target, secret = self._panel_material(int(subscription["server_id"]))
         try:
             user = self.panel_adapter.renew(
@@ -1145,13 +1625,14 @@ class TenantBusinessService:
                     duration_days=int(duration_days),
                     expires_at=expires_at,
                     reset_usage=True,
-                    idempotency_key=str(idempotency_key or ""),
+                    idempotency_key=base_key,
                 ),
             )
         except PanelError as exc:
             raise TenantBusinessError("panel renewal failed") from exc
         finally:
             secret = ""
+
         now = iso_utc(utcnow())
         with transaction(self.conn):
             changed = self.conn.execute(
@@ -1174,7 +1655,18 @@ class TenantBusinessService:
                 ),
             )
             if changed.rowcount != 1:
-                raise TenantBusinessError("subscription state changed during renewal")
+                raise TenantBusinessError(
+                    "subscription state changed during renewal"
+                )
+            self._upsert_subscription_node(
+                subscription_id=int(subscription_id),
+                server_id=int(subscription["server_id"]),
+                external_ref=user.external_ref,
+                is_primary=True,
+                status="active",
+                usage_bytes=max(0, int(user.usage_bytes)),
+                last_online=user.last_online,
+            )
             if fulfillment_order_id is not None:
                 order_changed = self.conn.execute(
                     "UPDATE tenant_orders SET status='fulfilled', updated_at=? "
@@ -1183,6 +1675,75 @@ class TenantBusinessService:
                 )
                 if order_changed.rowcount != 1:
                     raise TenantBusinessError("renewal order state changed")
+
+        secondary_errors = 0
+        rows = self.conn.execute(
+            "SELECT * FROM tenant_subscription_nodes "
+            "WHERE tenant_id=? AND subscription_id=? AND is_primary=0 "
+            "AND external_ref IS NOT NULL "
+            "AND status IN ('active','disabled','expired','error')",
+            (self.tenant_id, int(subscription_id)),
+        ).fetchall()
+        for row in rows:
+            node_secret = ""
+            try:
+                _, node_target, node_secret = self._panel_material(
+                    int(row["server_id"])
+                )
+                node_user = self.panel_adapter.renew(
+                    target=node_target,
+                    secret=node_secret,
+                    external_ref=str(row["external_ref"]),
+                    request=RenewRequest(
+                        traffic_bytes=traffic_bytes,
+                        duration_days=int(duration_days),
+                        expires_at=expires_at,
+                        reset_usage=True,
+                        idempotency_key=(
+                            f"{base_key}:server:{int(row['server_id'])}"
+                            if base_key
+                            else (
+                                f"tenant:{self.tenant_id}:subscription:"
+                                f"{int(subscription_id)}:renew:server:"
+                                f"{int(row['server_id'])}:{expires_at}"
+                            )
+                        ),
+                    ),
+                )
+                with transaction(self.conn):
+                    self._upsert_subscription_node(
+                        subscription_id=int(subscription_id),
+                        server_id=int(row["server_id"]),
+                        external_ref=node_user.external_ref,
+                        is_primary=False,
+                        status="active",
+                        usage_bytes=max(0, int(node_user.usage_bytes)),
+                        last_online=node_user.last_online,
+                    )
+            except (PanelError, TenantBusinessError):
+                with transaction(self.conn):
+                    self._upsert_subscription_node(
+                        subscription_id=int(subscription_id),
+                        server_id=int(row["server_id"]),
+                        external_ref=str(row["external_ref"]),
+                        is_primary=False,
+                        status="error",
+                        usage_bytes=int(row["usage_bytes"] or 0),
+                        last_online=row["last_online"],
+                        last_error="renewal failed",
+                    )
+                secondary_errors += 1
+            finally:
+                node_secret = ""
+
+        try:
+            repair = self.repair_subscription_nodes(
+                actor_id, subscription_id=int(subscription_id)
+            )
+            secondary_errors += int(repair.get("errors") or 0)
+        except TenantBusinessError:
+            secondary_errors += 1
+
         result = self._panel_user_dict(user)
         result.update(
             {
@@ -1190,6 +1751,11 @@ class TenantBusinessService:
                 "status": "active",
                 "traffic_bytes": traffic_bytes,
                 "expires_at": expires_at,
+                "node_errors": secondary_errors,
+                "subscription_url": self._smart_url(
+                    subscription_id=int(subscription_id)
+                )
+                or str(user.subscription_url or ""),
             }
         )
         return result
@@ -1202,18 +1768,41 @@ class TenantBusinessService:
         due = self._subscription_is_due(subscription)
         if bool(enabled) and (subscription["status"] == "expired" or due):
             raise TenantBusinessError("expired subscription requires renewal")
-        _, target, secret = self._panel_material(int(subscription["server_id"]))
-        try:
-            user = self.panel_adapter.set_enabled(
-                target=target,
-                secret=secret,
-                external_ref=str(subscription["external_ref"]),
-                enabled=bool(enabled),
-            )
-        except PanelError as exc:
-            raise TenantBusinessError("panel account state change failed") from exc
-        finally:
+        self._ensure_primary_subscription_node(subscription)
+        mappings = self.conn.execute(
+            "SELECT * FROM tenant_subscription_nodes "
+            "WHERE tenant_id=? AND subscription_id=? AND external_ref IS NOT NULL "
+            "ORDER BY is_primary DESC, id",
+            (self.tenant_id, int(subscription_id)),
+        ).fetchall()
+        results: list[tuple[sqlite3.Row, Any]] = []
+        for mapping in mappings:
             secret = ""
+            try:
+                _, target, secret = self._panel_material(int(mapping["server_id"]))
+                user = self.panel_adapter.set_enabled(
+                    target=target,
+                    secret=secret,
+                    external_ref=str(mapping["external_ref"]),
+                    enabled=bool(enabled),
+                )
+                results.append((mapping, user))
+            except (PanelError, TenantBusinessError) as exc:
+                raise TenantBusinessError(
+                    "panel account state change failed"
+                ) from exc
+            finally:
+                secret = ""
+        primary_user = next(
+            (
+                user
+                for mapping, user in results
+                if int(mapping["is_primary"] or 0) == 1
+            ),
+            None,
+        )
+        if primary_user is None:
+            raise TenantBusinessError("primary panel target is unavailable")
         state = (
             "expired"
             if subscription["status"] == "expired" or due
@@ -1221,6 +1810,16 @@ class TenantBusinessService:
         )
         now = iso_utc(utcnow())
         with transaction(self.conn):
+            for mapping, user in results:
+                self._upsert_subscription_node(
+                    subscription_id=int(subscription_id),
+                    server_id=int(mapping["server_id"]),
+                    external_ref=user.external_ref,
+                    is_primary=bool(mapping["is_primary"]),
+                    status=state,
+                    usage_bytes=max(0, int(user.usage_bytes)),
+                    last_online=user.last_online,
+                )
             changed = self.conn.execute(
                 "UPDATE tenant_subscriptions "
                 "SET status=?, expired_at=?, last_online=?, last_synced_at=?, updated_at=? "
@@ -1228,7 +1827,7 @@ class TenantBusinessService:
                 (
                     state,
                     now if state == "expired" else None,
-                    user.last_online,
+                    primary_user.last_online,
                     now,
                     now,
                     int(subscription_id),
@@ -1237,7 +1836,7 @@ class TenantBusinessService:
             )
             if changed.rowcount != 1:
                 raise TenantBusinessError("subscription state changed")
-        result = self._panel_user_dict(user)
+        result = self._panel_user_dict(primary_user)
         result.update({"id": int(subscription_id), "status": state})
         return result
     def delete_subscription_from_panel(
@@ -1246,27 +1845,43 @@ class TenantBusinessService:
         subscription = self._admin_subscription(actor_id, subscription_id)
         if subscription["server_id"] is None or not subscription["external_ref"]:
             raise TenantBusinessError("subscription is not provisioned")
-        _, target, secret = self._panel_material(int(subscription["server_id"]))
-        try:
-            self.panel_adapter.delete_user(
-                target=target,
-                secret=secret,
-                external_ref=str(subscription["external_ref"]),
-            )
-        except PanelError as exc:
-            raise TenantBusinessError("panel user deletion failed") from exc
-        finally:
+        self._ensure_primary_subscription_node(subscription)
+        mappings = self.conn.execute(
+            "SELECT * FROM tenant_subscription_nodes "
+            "WHERE tenant_id=? AND subscription_id=? AND external_ref IS NOT NULL "
+            "ORDER BY is_primary DESC, id",
+            (self.tenant_id, int(subscription_id)),
+        ).fetchall()
+        for mapping in mappings:
             secret = ""
+            try:
+                _, target, secret = self._panel_material(int(mapping["server_id"]))
+                self.panel_adapter.delete_user(
+                    target=target,
+                    secret=secret,
+                    external_ref=str(mapping["external_ref"]),
+                )
+            except (PanelError, TenantBusinessError) as exc:
+                raise TenantBusinessError("panel user deletion failed") from exc
+            finally:
+                secret = ""
         now = iso_utc(utcnow())
         with transaction(self.conn):
+            self.conn.execute(
+                "UPDATE tenant_subscription_nodes "
+                "SET status='disabled', updated_at=? "
+                "WHERE tenant_id=? AND subscription_id=?",
+                (now, self.tenant_id, int(subscription_id)),
+            )
             changed = self.conn.execute(
-                "UPDATE tenant_subscriptions SET status='disabled', updated_at=? WHERE id=? AND tenant_id=?",
+                "UPDATE tenant_subscriptions "
+                "SET status='disabled', updated_at=? "
+                "WHERE id=? AND tenant_id=?",
                 (now, int(subscription_id), self.tenant_id),
             )
             if changed.rowcount != 1:
                 raise TenantBusinessError("subscription state changed")
         return {"id": int(subscription_id), "status": "disabled"}
-
     def subscription_link(self, actor_id: int, *, subscription_id: int) -> str:
         customer = self._customer(actor_id)
         row = self.conn.execute(
@@ -1277,10 +1892,15 @@ class TenantBusinessService:
         if row is None:
             raise TenantBusinessError("subscription not found")
         subscription = dict(row)
-        if subscription["status"] != "active" or self._subscription_is_due(subscription):
+        if subscription["status"] != "active" or self._subscription_is_due(
+            subscription
+        ):
             raise TenantBusinessError("subscription is not active")
         if subscription["server_id"] is None or not subscription["external_ref"]:
             raise TenantBusinessError("subscription is not provisioned")
+        smart_url = self._smart_url(subscription_id=int(subscription_id))
+        if smart_url:
+            return smart_url
         server = self.server(int(subscription["server_id"]))
         try:
             return self.panel_adapter.subscription_link(
@@ -1288,7 +1908,9 @@ class TenantBusinessService:
                 external_ref=str(subscription["external_ref"]),
             )
         except PanelError as exc:
-            raise TenantBusinessError("subscription link is unavailable") from exc
+            raise TenantBusinessError(
+                "subscription link is unavailable"
+            ) from exc
     def create_ticket(self, actor_id: int, *, subject: str, body: str) -> dict[str, Any]:
         customer = self._customer(actor_id); now = iso_utc(utcnow())
         with transaction(self.conn):
@@ -1308,4 +1930,22 @@ class TenantBusinessService:
 
     def list_smart_links(self, actor_id: int) -> list[dict[str, Any]]:
         self._admin(actor_id)
-        return [dict(row) for row in self.conn.execute("SELECT * FROM tenant_smart_links WHERE tenant_id=? ORDER BY id DESC", (self.tenant_id,)).fetchall()]
+        public_base = str(
+            os.getenv("SMART_SUB_PUBLIC_BASE_URL", "") or ""
+        ).strip()
+        from TenantRuntime.smart_subscription import smart_subscription_url
+
+        items: list[dict[str, Any]] = []
+        for row in self.conn.execute(
+            "SELECT * FROM tenant_smart_links "
+            "WHERE tenant_id=? ORDER BY id DESC",
+            (self.tenant_id,),
+        ).fetchall():
+            item = dict(row)
+            item["public_url"] = (
+                smart_subscription_url(public_base, str(item["code"]))
+                if str(item["target"]).startswith("subscription:")
+                else ""
+            )
+            items.append(item)
+        return items

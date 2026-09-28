@@ -652,3 +652,23 @@ def test_invalid_xui_target_never_echoes_secret() -> None:
             external_ref="user-id",
         )
     assert "do-not-leak" not in str(exc.value)
+
+def test_xui_native_subscription_content_is_fetched() -> None:
+    body = "trojan://pass@xui.example:443#XUI"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/sub/u-content"
+        return httpx.Response(200, request=request, text=body)
+
+    adapter = XuiPanelAdapter(transport=httpx.MockTransport(handler))
+    target = PanelTarget(
+        kind="xui",
+        endpoint="https://panel.example",
+        xui_flavor="sanaei",
+        xui_public_origin="https://sub.example",
+        xui_sub_path="/sub/",
+    )
+    assert adapter.subscription_content(
+        target=target, secret="unused", external_ref="u-content"
+    ) == body
+

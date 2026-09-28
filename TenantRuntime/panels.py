@@ -103,6 +103,10 @@ class PanelAdapter(Protocol):
 
     def subscription_link(self, *, target: PanelTarget, external_ref: str) -> str: ...
 
+    def subscription_content(
+        self, *, target: PanelTarget, secret: str, external_ref: str
+    ) -> str: ...
+
 
 class UnconfiguredPanelAdapter:
     """Fail closed until an explicit provider adapter is selected."""
@@ -149,6 +153,12 @@ class UnconfiguredPanelAdapter:
 
     def subscription_link(self, *, target: PanelTarget, external_ref: str) -> str:
         del target, external_ref
+        self._fail()
+
+    def subscription_content(
+        self, *, target: PanelTarget, secret: str, external_ref: str
+    ) -> str:
+        del target, secret, external_ref
         self._fail()
 
 
@@ -211,6 +221,13 @@ class RoutedPanelAdapter:
     def subscription_link(self, *, target: PanelTarget, external_ref: str) -> str:
         return self._adapter(target).subscription_link(
             target=target, external_ref=external_ref
+        )
+
+    def subscription_content(
+        self, *, target: PanelTarget, secret: str, external_ref: str
+    ) -> str:
+        return self._adapter(target).subscription_content(
+            target=target, secret=secret, external_ref=external_ref
         )
 
 

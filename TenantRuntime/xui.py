@@ -1153,3 +1153,41 @@ class XuiPanelAdapter:
             raise PanelError("X-UI subscription identifier is unavailable")
         origin = _clean_origin(target.xui_public_origin, target.endpoint)
         return f"{origin}{_sub_path(target)}{quote(ref, safe='-._~')}"
+
+    def subscription_content(
+        self, *, target: PanelTarget, secret: str, external_ref: str
+    ) -> str:
+        del secret
+        url = self.subscription_link(target=target, external_ref=external_ref)
+        mode = _ssl_mode()
+        attempts: list[bool | ssl.SSLContext]
+        if mode == "insecure":
+            attempts = [_insecure_context()]
+        elif mode == "auto":
+            attempts = [True, _insecure_context()]
+        else:
+            attempts = [True]
+        last_error: BaseException | None = None
+        for index, verify in enumerate(attempts):
+            try:
+                with httpx.Client(
+                    timeout=self._timeout,
+                    verify=verify,
+                    transport=self._transport,
+                    follow_redirects=True,
+                ) as client:
+                    response = client.get(
+                        url, headers={"Accept": "text/plain,*/*"}
+                    )
+                if response.status_code >= 400:
+                    raise _StatusError(response.status_code)
+                text = response.text.strip()
+                if text:
+                    return text
+                raise PanelError("X-UI subscription is empty")
+            except httpx.TransportError as exc:
+                last_error = exc
+                if mode == "auto" and index == 0 and _looks_like_tls_error(exc):
+                    continue
+                raise PanelError("X-UI subscription fetch failed") from exc
+        raise PanelError("X-UI subscription fetch failed") from last_error

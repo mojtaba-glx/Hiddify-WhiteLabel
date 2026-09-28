@@ -15,6 +15,8 @@ ALLOWED_KEYS = {
     "MASTER_ADMIN_ID",
     "RUNTIME_SHARD_COUNT",
     "DISPLAY_TIMEZONE",
+    "SMART_SUB_PUBLIC_BASE_URL",
+    "SMART_SUB_PORT",
 }
 
 
@@ -32,6 +34,18 @@ def validate(key: str, value: str) -> str:
     elif key == "DISPLAY_TIMEZONE":
         if not clean or len(clean) > 100 or any(ch in clean for ch in "\r\n\x00"):
             raise ValueError("invalid timezone")
+    elif key == "SMART_SUB_PUBLIC_BASE_URL":
+        if (
+            not clean
+            or len(clean) > 250
+            or not (clean.startswith("http://") or clean.startswith("https://"))
+            or any(ch in clean for ch in "\r\n\x00")
+        ):
+            raise ValueError("invalid smart subscription public URL")
+        clean = clean.rstrip("/")
+    elif key == "SMART_SUB_PORT":
+        if not clean.isdigit() or not 1 <= int(clean) <= 65535:
+            raise ValueError("smart subscription port must be between 1 and 65535")
     else:
         raise ValueError("environment key is not editable")
     return clean
