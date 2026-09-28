@@ -23,6 +23,12 @@ def test_runtime_defaults_and_secret_repr() -> None:
     assert settings.smart_sub_host == "127.0.0.1"
     assert settings.smart_sub_port == 8091
     assert settings.smart_sub_public_base_url == ""
+    assert settings.enforcer_seconds == 20
+    assert settings.enforcer_batch_size == 30
+    assert settings.enforcer_hot_usage_ratio == 0.85
+    assert settings.node_freeze_failures == 3
+    assert settings.reminder_days == 3
+    assert settings.reminder_remaining_gb == 3
     assert settings.token_encryption_key not in repr(settings)
     assert not hasattr(settings, "master_bot_token")
 
@@ -40,6 +46,15 @@ def test_runtime_overrides() -> None:
             SMART_SUB_HOST="0.0.0.0",
             SMART_SUB_PORT="18091",
             SMART_SUB_PUBLIC_BASE_URL="https://sub.example.com",
+            RUNTIME_ENFORCER_SECONDS="25",
+            RUNTIME_ENFORCER_BATCH_SIZE="40",
+            RUNTIME_ENFORCER_HOT_USAGE_RATIO="0.9",
+            RUNTIME_NODE_FREEZE_FAILURES="4",
+            RUNTIME_REMINDER_DAYS="5",
+            RUNTIME_REMINDER_REMAINING_GB="4",
+            RUNTIME_REMINDER_LEASE_SECONDS="180",
+            RUNTIME_REMINDER_MAX_RETRIES="7",
+            RUNTIME_REMINDER_RETRY_BASE_SECONDS="45",
         )
     )
     assert (settings.shard_count, settings.shard_index) == (8, 7)
@@ -51,6 +66,15 @@ def test_runtime_overrides() -> None:
     assert settings.smart_sub_host == "0.0.0.0"
     assert settings.smart_sub_port == 18091
     assert settings.smart_sub_public_base_url == "https://sub.example.com"
+    assert settings.enforcer_seconds == 25
+    assert settings.enforcer_batch_size == 40
+    assert settings.enforcer_hot_usage_ratio == 0.9
+    assert settings.node_freeze_failures == 4
+    assert settings.reminder_days == 5
+    assert settings.reminder_remaining_gb == 4
+    assert settings.reminder_lease_seconds == 180
+    assert settings.reminder_max_retries == 7
+    assert settings.reminder_retry_base_seconds == 45
 
 
 @pytest.mark.parametrize(
@@ -70,6 +94,16 @@ def test_runtime_overrides() -> None:
         {"SMART_SUB_PORT": "0"},
         {"SMART_SUB_PORT": "65536"},
         {"SMART_SUB_PUBLIC_BASE_URL": "ftp://invalid.example"},
+        {"RUNTIME_ENFORCER_SECONDS": "9"},
+        {"RUNTIME_ENFORCER_BATCH_SIZE": "0"},
+        {"RUNTIME_ENFORCER_HOT_USAGE_RATIO": "bad"},
+        {"RUNTIME_ENFORCER_HOT_USAGE_RATIO": "0.49"},
+        {"RUNTIME_NODE_FREEZE_FAILURES": "21"},
+        {"RUNTIME_REMINDER_DAYS": "31"},
+        {"RUNTIME_REMINDER_REMAINING_GB": "1001"},
+        {"RUNTIME_REMINDER_LEASE_SECONDS": "9"},
+        {"RUNTIME_REMINDER_MAX_RETRIES": "21"},
+        {"RUNTIME_REMINDER_RETRY_BASE_SECONDS": "3601"},
     ],
 )
 def test_invalid_runtime_settings_fail_closed(change) -> None:
