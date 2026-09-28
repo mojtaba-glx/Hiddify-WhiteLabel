@@ -126,3 +126,10 @@ def test_bootstrap_dry_run_is_safe_and_describes_full_install() -> None:
     assert "git" in output.lower()
     assert "install.sh install" in output
     assert "/usr/local/bin/whitelabel" in output
+
+
+def test_shard_change_has_env_and_systemd_rollback() -> None:
+    content = (ROOT / "install.sh").read_text(encoding="utf-8")
+    assert "env-before-shards-$$" in content
+    assert "restoring previous configuration" in content
+    assert "rollback_units" in content
