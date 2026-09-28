@@ -444,3 +444,65 @@ def test_failed_reminder_delivery_is_retried_with_backoff(
     )
     assert any(d.event_key == day_delivery.event_key for d in later)
     assert report.requeued >= 1
+
+def test_old_period_warning_is_skipped_after_renewal_change(
+    conn, factories, cipher
+) -> None:
+    state = _setup(conn, factories, cipher)
+    sub_id = int(state["subscription"]["id"])
+    now = utcnow()
+    conn.execute(
+        "UPDATE tenant_subscriptions SET expires_at=? WHERE id=?",
+        (iso_utc(now + timedelta(days=1)), sub_id),
+    )
+    assert enqueue_due_reminders(
+        conn,
+        tenant_id=int(state["tenant"]["id"]),
+        days_threshold=3,
+        remaining_gb_threshold=3,
+        now=now,
+    ) >= 1
+    conn.execute(
+        "UPDATE tenant_subscriptions SET expires_at=? WHERE id=?",
+        (iso_utc(now + timedelta(days=30)), sub_id),
+    )
+    deliveries, report = claim_due_deliveries(
+        conn,
+        cipher=cipher,
+        shard_count=1,
+        shard_index=0,
+        lease_seconds=60,
+        max_retries=3,
+        retry_base_seconds=10,
+        now=now,
+    )
+    assert deliveries == []
+    assert report.skipped >= 1
+
+
+def test_successful_renewal_clears_pending_enforcement_state(
+    conn, factories, cipher
+) -> None:
+    state = _setup(conn, factories, cipher)
+    sub_id = int(state["subscription"]["id"])
+    conn.execute(
+        "UPDATE tenant_subscriptions "
+        "SET enforcement_pending=1, enforcement_error='old pending' WHERE id=?",
+        (sub_id,),
+    )
+    state["service"].renew_subscription(
+        state["owner"],
+        subscription_id=sub_id,
+        traffic_gb=30,
+        duration_days=30,
+        idempotency_key="renew-clear-enforcer",
+    )
+    stored = conn.execute(
+        "SELECT enforcement_pending, enforcement_error, enforced_at "
+        "FROM tenant_subscriptions WHERE id=?",
+        (sub_id,),
+    ).fetchone()
+    assert int(stored["enforcement_pending"]) == 0
+    assert stored["enforcement_error"] is None
+    assert stored["enforced_at"] is None
+
