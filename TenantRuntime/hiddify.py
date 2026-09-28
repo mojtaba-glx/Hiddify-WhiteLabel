@@ -1,0 +1,474 @@
+"""Independent Hiddify Manager live adapter for TenantRuntime.
+
+This module intentionally contains no imports from Hiddify-SellBot.  Its API
+dialect follows the Hiddify Manager v11/v12 endpoints and translates account
+state fields for v13+.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import re
+import ssl
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+from urllib.parse import urlsplit
+
+import httpx
+
+from TenantRuntime.panels import (
+    PanelError,
+    PanelTarget,
+    PanelUserResult,
+    ProvisionRequest,
+    ProvisionResult,
+    RenewRequest,
+    UsageResult,
+)
+
+_GIB = 1024 ** 3
+_UUID_NAMESPACE = uuid.UUID("ee6fb2f8-49c2-4de8-8d6e-a94da8867644")
+
+
+class _StatusError(PanelError):
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"panel returned HTTP {int(status_code)}")
+        self.status_code = int(status_code)
+
+
+def _clean_base(endpoint: str) -> str:
+    text = str(endpoint or "").strip().rstrip("/")
+    parsed = urlsplit(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise PanelError("invalid Hiddify endpoint")
+    if parsed.query or parsed.fragment:
+        raise PanelError("invalid Hiddify endpoint")
+    return text
+
+
+def _clean_path(value: str, *, name: str) -> str:
+    text = str(value or "").strip().strip("/")
+    if not text or any(part in {"", ".", ".."} for part in text.split("/")):
+        raise PanelError(f"Hiddify {name} path is not configured")
+    if "?" in text or "#" in text:
+        raise PanelError(f"invalid Hiddify {name} path")
+    return text
+
+
+def _admin_base(target: PanelTarget) -> str:
+    return f"{_clean_base(target.endpoint)}/{_clean_path(target.admin_path, name='admin')}"
+
+
+def _user_base(target: PanelTarget, external_ref: str) -> str:
+    ref = str(external_ref or "").strip()
+    if not ref or "/" in ref or "?" in ref or "#" in ref:
+        raise PanelError("invalid panel user reference")
+    return f"{_clean_base(target.endpoint)}/{_clean_path(target.user_path, name='user')}/{ref}"
+
+
+def _api_timeout() -> float:
+    try:
+        value = float(os.getenv("HIDDIFY_API_TIMEOUT_SECONDS", "8") or "8")
+    except (TypeError, ValueError):
+        value = 8.0
+    return min(max(value, 2.0), 60.0)
+
+
+def _ssl_mode() -> str:
+    raw = str(os.getenv("HIDDIFY_SSL_MODE", "secure") or "secure").strip().lower()
+    aliases = {
+        "1": "secure",
+        "true": "secure",
+        "on": "secure",
+        "0": "insecure",
+        "false": "insecure",
+        "off": "insecure",
+    }
+    value = aliases.get(raw, raw)
+    return value if value in {"secure", "insecure", "auto"} else "secure"
+
+
+def _insecure_context() -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
+
+
+def _looks_like_tls_error(exc: Exception) -> bool:
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(word in text for word in ("ssl", "tls", "certificate", "hostname", "cert"))
+
+
+def _coerce_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return bool(int(value))
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "active", "enabled", "enable", "y"}:
+        return True
+    if text in {"0", "false", "no", "off", "inactive", "disabled", "disable", "n"}:
+        return False
+    return None
+
+
+def _is_disabled(data: dict[str, Any]) -> bool:
+    mode = str(data.get("mode") or "").strip().lower()
+    status = str(data.get("status") or "").strip().lower()
+    if mode in {"disable", "disabled", "inactive"}:
+        return True
+    if status in {"disable", "disabled", "inactive", "deactive", "off"}:
+        return True
+    return any(
+        _coerce_bool(data.get(key)) is False
+        for key in ("is_active", "active", "enabled", "enable")
+        if key in data
+    )
+
+
+def _is_enabled(data: dict[str, Any]) -> bool:
+    if _is_disabled(data):
+        return False
+    mode = str(data.get("mode") or "").strip().lower()
+    status = str(data.get("status") or "").strip().lower()
+    if mode in {"no_reset", "active", "enabled", "enable"}:
+        return True
+    if status in {"active", "enabled", "enable", "on"}:
+        return True
+    return any(
+        _coerce_bool(data.get(key)) is True
+        for key in ("is_active", "active", "enabled", "enable")
+        if key in data
+    )
+
+
+def _gb_to_bytes(value: Any) -> int:
+    try:
+        return max(0, int(round(float(value or 0) * _GIB)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bytes_to_gb(value: int) -> float:
+    return round(max(0, int(value)) / _GIB, 6)
+
+
+def _parse_major(version: Any) -> int:
+    match = re.match(r"^\s*v?(\d+)", str(version or "").strip(), flags=re.IGNORECASE)
+    return int(match.group(1)) if match else 0
+
+
+def _normalize_state_payload(payload: dict[str, Any], panel_major: int) -> dict[str, Any]:
+    result = dict(payload)
+    if int(panel_major) < 13:
+        return result
+    requested: bool | None = None
+    for key in ("enable", "is_active", "enabled", "active"):
+        if key in result:
+            parsed = _coerce_bool(result.get(key))
+            if parsed is not None:
+                requested = parsed
+                break
+    mode = str(result.get("mode") or "").strip().lower()
+    if mode in {"disable", "disabled", "inactive"}:
+        requested = False
+        result["mode"] = "no_reset"
+    for key in ("is_active", "enabled", "active", "status"):
+        result.pop(key, None)
+    if requested is not None:
+        result["enable"] = requested
+    return result
+
+
+class HiddifyPanelAdapter:
+    """Synchronous Hiddify v11/v12/v13 adapter used behind the runtime boundary."""
+
+    def __init__(
+        self,
+        *,
+        transport: httpx.BaseTransport | None = None,
+        timeout_seconds: float | None = None,
+    ) -> None:
+        self._transport = transport
+        self._timeout = float(timeout_seconds if timeout_seconds is not None else _api_timeout())
+        self._version_cache: dict[tuple[str, str], int] = {}
+
+    def _send(
+        self,
+        method: str,
+        url: str,
+        secret: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        verify: bool | ssl.SSLContext = True,
+    ) -> httpx.Response:
+        headers = {"Accept": "application/json", "Hiddify-API-Key": str(secret)}
+        with httpx.Client(
+            timeout=self._timeout,
+            verify=verify,
+            transport=self._transport,
+        ) as client:
+            return client.request(method, url, headers=headers, json=payload)
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        secret: str,
+        *,
+        payload: dict[str, Any] | None = None,
+    ) -> Any:
+        mode = _ssl_mode()
+        try:
+            if mode == "insecure":
+                response = self._send(method, url, secret, payload=payload, verify=_insecure_context())
+            elif mode == "auto":
+                try:
+                    response = self._send(method, url, secret, payload=payload, verify=True)
+                except httpx.TransportError as exc:
+                    if not _looks_like_tls_error(exc):
+                        raise
+                    response = self._send(
+                        method, url, secret, payload=payload, verify=_insecure_context()
+                    )
+            else:
+                response = self._send(method, url, secret, payload=payload, verify=True)
+        except httpx.TransportError as exc:
+            raise PanelError("Hiddify connection failed") from exc
+
+        if response.status_code >= 400:
+            raise _StatusError(response.status_code)
+        if not response.content:
+            return None
+        content_type = str(response.headers.get("content-type") or "").lower()
+        if "json" in content_type:
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise PanelError("Hiddify returned invalid JSON") from exc
+        try:
+            return response.json()
+        except ValueError:
+            return response.text
+
+    def _major(self, target: PanelTarget, secret: str) -> int:
+        key = (_clean_base(target.endpoint), str(target.admin_path or "").strip("/"))
+        if key in self._version_cache:
+            return self._version_cache[key]
+        major = 0
+        try:
+            data = self._request(
+                "GET", f"{_admin_base(target)}/api/v2/panel/info/", secret
+            )
+            if isinstance(data, dict):
+                major = _parse_major(data.get("version"))
+        except PanelError:
+            major = 0
+        self._version_cache[key] = major
+        return major
+
+    def _user_url(self, target: PanelTarget, external_ref: str) -> str:
+        return f"{_admin_base(target)}/api/v2/admin/user/{str(external_ref).strip()}/"
+
+    def _patch(
+        self,
+        target: PanelTarget,
+        secret: str,
+        external_ref: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        body = _normalize_state_payload(payload, self._major(target, secret))
+        data = self._request(
+            "PATCH", self._user_url(target, external_ref), secret, payload=body
+        )
+        if not isinstance(data, dict):
+            raise PanelError("Hiddify returned an invalid user response")
+        return data
+
+    def _get(self, target: PanelTarget, secret: str, external_ref: str) -> dict[str, Any]:
+        data = self._request("GET", self._user_url(target, external_ref), secret)
+        if not isinstance(data, dict):
+            raise PanelError("Hiddify returned an invalid user response")
+        return data
+
+    def _set_enabled_raw(
+        self, target: PanelTarget, secret: str, external_ref: str, enabled: bool
+    ) -> dict[str, Any]:
+        attempts = (
+            ({"is_active": True}, {"enable": True}, {"status": "active"}, {"mode": "no_reset"})
+            if enabled
+            else (
+                {"is_active": False},
+                {"enable": False},
+                {"status": "disable"},
+                {"mode": "disable"},
+            )
+        )
+        last: dict[str, Any] | None = None
+        for payload in attempts:
+            try:
+                last = self._patch(target, secret, external_ref, payload)
+                current = self._get(target, secret, external_ref)
+            except PanelError:
+                continue
+            if enabled and _is_enabled(current):
+                return current
+            if not enabled and _is_disabled(current):
+                return current
+            last = current
+        if isinstance(last, dict):
+            if enabled and _is_enabled(last):
+                return last
+            if not enabled and _is_disabled(last):
+                return last
+        raise PanelError("Hiddify account state change could not be verified")
+
+    def _snapshot(
+        self, target: PanelTarget, external_ref: str, data: dict[str, Any]
+    ) -> PanelUserResult:
+        ref = str(data.get("uuid") or data.get("id") or external_ref or "").strip()
+        if not ref:
+            raise PanelError("Hiddify user response has no identifier")
+        expires = None
+        for key in (
+            "expire",
+            "expire_date",
+            "end_date",
+            "expires_at",
+            "expiry_date",
+            "expiration_date",
+        ):
+            if data.get(key) not in (None, ""):
+                expires = str(data.get(key))
+                break
+        last_online = (
+            str(data.get("last_online")).strip()
+            if data.get("last_online") not in (None, "")
+            else None
+        )
+        return PanelUserResult(
+            external_ref=ref,
+            usage_bytes=_gb_to_bytes(data.get("current_usage_GB")),
+            active=_is_enabled(data) and not _is_disabled(data),
+            traffic_bytes=_gb_to_bytes(data.get("usage_limit_GB")),
+            expires_at=expires,
+            last_online=last_online,
+            subscription_url=self.subscription_link(target=target, external_ref=ref),
+        )
+
+    def provision(
+        self, *, target: PanelTarget, secret: str, request: ProvisionRequest
+    ) -> ProvisionResult:
+        if str(target.kind).strip().lower() != "hiddify":
+            raise PanelError("Hiddify adapter received the wrong panel kind")
+        external_ref = str(
+            uuid.uuid5(_UUID_NAMESPACE, f"whitelabel:{request.idempotency_key}")
+        )
+        payload = {
+            "uuid": external_ref,
+            "name": f"wl-t{int(request.tenant_id)}-s{int(request.subscription_id)}",
+            "usage_limit_GB": _bytes_to_gb(request.traffic_bytes),
+            "package_days": max(1, int(request.duration_days)),
+            "start_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "current_usage_GB": 0,
+            "is_active": True,
+            "comment": (
+                f"WhiteLabel tenant={int(request.tenant_id)} "
+                f"subscription={int(request.subscription_id)}"
+            ),
+        }
+        body = _normalize_state_payload(payload, self._major(target, secret))
+        try:
+            data = self._request(
+                "POST", f"{_admin_base(target)}/api/v2/admin/user/", secret, payload=body
+            )
+        except _StatusError as exc:
+            if exc.status_code not in {400, 409, 422}:
+                raise
+            # Deterministic UUID makes a retry safe: accept an already-created row.
+            try:
+                data = self._get(target, secret, external_ref)
+            except PanelError:
+                raise exc
+        if not isinstance(data, dict):
+            raise PanelError("Hiddify returned an invalid create response")
+        created_ref = str(data.get("uuid") or external_ref).strip()
+        if not created_ref:
+            raise PanelError("Hiddify create response has no identifier")
+        # Cross-version activation verification; this mirrors the proven
+        # compatibility behavior without depending on SellBot.
+        self._set_enabled_raw(target, secret, created_ref, True)
+        return ProvisionResult(
+            external_ref=created_ref,
+            subscription_url=self.subscription_link(
+                target=target, external_ref=created_ref
+            ),
+        )
+
+    def get_user(
+        self, *, target: PanelTarget, secret: str, external_ref: str
+    ) -> PanelUserResult:
+        return self._snapshot(target, external_ref, self._get(target, secret, external_ref))
+
+    def renew(
+        self, *, target: PanelTarget, secret: str, external_ref: str, request: RenewRequest
+    ) -> PanelUserResult:
+        payload: dict[str, Any] = {
+            "usage_limit_GB": _bytes_to_gb(request.traffic_bytes),
+            "package_days": max(1, int(request.duration_days)),
+        }
+        if request.reset_usage:
+            payload["current_usage_GB"] = 0
+            payload["start_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self._patch(target, secret, external_ref, payload)
+        current = self._set_enabled_raw(target, secret, external_ref, True)
+        return self._snapshot(target, external_ref, current)
+
+    def set_enabled(
+        self, *, target: PanelTarget, secret: str, external_ref: str, enabled: bool
+    ) -> PanelUserResult:
+        current = self._set_enabled_raw(target, secret, external_ref, bool(enabled))
+        return self._snapshot(target, external_ref, current)
+
+    def delete_user(
+        self, *, target: PanelTarget, secret: str, external_ref: str
+    ) -> None:
+        try:
+            self._request("DELETE", self._user_url(target, external_ref), secret)
+            return
+        except _StatusError as exc:
+            if exc.status_code == 404:
+                return
+        # Hiddify versions without DELETE fall back to a verified disable.
+        self._set_enabled_raw(target, secret, external_ref, False)
+
+    def _refresh_usage(self, target: PanelTarget, secret: str) -> None:
+        try:
+            data = self._request(
+                "GET", f"{_admin_base(target)}/api/v2/admin/update_user_usage/", secret
+            )
+            # v11/v12 may JSON-encode the object twice.  Nothing in this
+            # response is trusted for the per-user counter; the following GET is.
+            if isinstance(data, str):
+                data.strip()
+        except PanelError:
+            return
+
+    def usage(
+        self, *, target: PanelTarget, secret: str, external_ref: str
+    ) -> UsageResult:
+        self._refresh_usage(target, secret)
+        user = self._snapshot(target, external_ref, self._get(target, secret, external_ref))
+        return UsageResult(
+            usage_bytes=user.usage_bytes,
+            active=user.active,
+            last_online=user.last_online,
+        )
+
+    def subscription_link(self, *, target: PanelTarget, external_ref: str) -> str:
+        return f"{_user_base(target, external_ref)}/all.txt"

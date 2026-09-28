@@ -162,7 +162,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await update.callback_query.edit_message_text("🖥 سرورهای این tenant", reply_markup=InlineKeyboardMarkup(rows)); return
             if data == "biz:addserver":
                 context.user_data["biz_flow"] = {"kind": "server"}
-                await update.callback_query.edit_message_text("نام | نوع پنل (manual/hiddify/xui) | آدرس اختیاری", reply_markup=_menu(spec)); return
+                await update.callback_query.edit_message_text(
+                    "نام | نوع پنل (manual/hiddify/xui) | آدرس | مسیر ادمین | مسیر کاربر\n"
+                    "برای Hiddify پنج مقدار را وارد کنید.",
+                    reply_markup=_menu(spec),
+                ); return
             if data.startswith("biz:server:"):
                 server_id = int(data.rsplit(":", 1)[1])
                 server = business.server(server_id)
@@ -171,6 +175,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     f"🖥 {server['label']}\n"
                     f"نوع پنل: {server['panel_kind']}\n"
                     f"آدرس: {server.get('endpoint') or 'ثبت نشده'}\n"
+                    f"مسیر ادمین: {server.get('admin_path') or '-'}\n"
+                    f"مسیر کاربر: {server.get('user_path') or '-'}\n"
                     f"کلید دسترسی: {'✅ ثبت شده' if panel['configured'] else '❌ ثبت نشده'}"
                 )
                 rows = [[InlineKeyboardButton("🔐 ثبت یا تعویض کلید پنل", callback_data=f"biz:secret:{server_id}")]]
@@ -265,8 +271,15 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     await update.effective_message.delete()
                 except Exception:
                     pass
-            elif kind == "server" and 2 <= len(fields) <= 3:
-                business.add_server(actor, label=fields[0], panel_kind=fields[1], endpoint=fields[2] if len(fields) == 3 else "")
+            elif kind == "server" and 2 <= len(fields) <= 5:
+                business.add_server(
+                    actor,
+                    label=fields[0],
+                    panel_kind=fields[1],
+                    endpoint=fields[2] if len(fields) >= 3 else "",
+                    admin_path=fields[3] if len(fields) >= 4 else "",
+                    user_path=fields[4] if len(fields) >= 5 else "",
+                )
             elif kind == "node" and 1 <= len(fields) <= 2:
                 business.add_node(actor, label=fields[0], location=fields[1] if len(fields) == 2 else "")
             elif kind == "plan" and len(fields) == 5:

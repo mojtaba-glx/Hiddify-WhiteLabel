@@ -5,7 +5,15 @@ from __future__ import annotations
 import pytest
 
 from TenantRuntime.business import TenantBusinessError, TenantBusinessService
-from TenantRuntime.panels import PanelError, ProvisionRequest, ProvisionResult, UsageResult
+from TenantRuntime.panels import (
+    PanelError,
+    PanelTarget,
+    PanelUserResult,
+    ProvisionRequest,
+    ProvisionResult,
+    RenewRequest,
+    UsageResult,
+)
 
 
 class FakePanel:
@@ -13,18 +21,64 @@ class FakePanel:
         self.requests: list[ProvisionRequest] = []
         self.secrets: list[str] = []
         self.usage_calls: list[str] = []
+        self.enabled_calls: list[tuple[str, bool]] = []
+        self.deleted: list[str] = []
+        self.renewals: list[RenewRequest] = []
 
-    def provision(self, *, endpoint: str, secret: str, request: ProvisionRequest) -> ProvisionResult:
-        assert endpoint == "https://panel.example"
+    def provision(self, *, target: PanelTarget, secret: str, request: ProvisionRequest) -> ProvisionResult:
+        assert target.endpoint == "https://panel.example"
         self.secrets.append(secret)
         self.requests.append(request)
         return ProvisionResult(external_ref=f"remote-{request.subscription_id}")
 
-    def usage(self, *, endpoint: str, secret: str, external_ref: str) -> UsageResult:
-        assert endpoint == "https://panel.example"
+    def usage(self, *, target: PanelTarget, secret: str, external_ref: str) -> UsageResult:
+        assert target.endpoint == "https://panel.example"
         self.secrets.append(secret)
         self.usage_calls.append(external_ref)
         return UsageResult(usage_bytes=12345, active=True)
+
+    def get_user(self, *, target: PanelTarget, secret: str, external_ref: str) -> PanelUserResult:
+        self.secrets.append(secret)
+        return PanelUserResult(
+            external_ref=external_ref,
+            usage_bytes=12345,
+            active=True,
+            traffic_bytes=20 * 1024**3,
+            last_online="2026-09-29 00:15:00",
+            subscription_url=self.subscription_link(target=target, external_ref=external_ref),
+        )
+
+    def renew(
+        self, *, target: PanelTarget, secret: str, external_ref: str, request: RenewRequest
+    ) -> PanelUserResult:
+        self.secrets.append(secret)
+        self.renewals.append(request)
+        return PanelUserResult(
+            external_ref=external_ref,
+            usage_bytes=0,
+            active=True,
+            traffic_bytes=request.traffic_bytes,
+            subscription_url=self.subscription_link(target=target, external_ref=external_ref),
+        )
+
+    def set_enabled(
+        self, *, target: PanelTarget, secret: str, external_ref: str, enabled: bool
+    ) -> PanelUserResult:
+        self.secrets.append(secret)
+        self.enabled_calls.append((external_ref, enabled))
+        return PanelUserResult(
+            external_ref=external_ref,
+            usage_bytes=12345,
+            active=enabled,
+            subscription_url=self.subscription_link(target=target, external_ref=external_ref),
+        )
+
+    def delete_user(self, *, target: PanelTarget, secret: str, external_ref: str) -> None:
+        self.secrets.append(secret)
+        self.deleted.append(external_ref)
+
+    def subscription_link(self, *, target: PanelTarget, external_ref: str) -> str:
+        return f"{target.endpoint}/user/{external_ref}/all.txt"
 
 
 def _prepared_service(conn, factories, cipher):
@@ -92,3 +146,57 @@ def test_manual_server_and_cross_tenant_secret_are_rejected(conn, factories, cip
         left.set_panel_credential(7001, server_id=int(manual["id"]), secret="secret")
     with pytest.raises(TenantBusinessError):
         right.panel_status(int(manual["id"]))
+
+
+def test_live_hiddify_operations_stay_tenant_scoped(conn, factories, cipher) -> None:
+    service, panel, server, subscription = _prepared_service(conn, factories, cipher)
+    service.set_panel_credential(7001, server_id=int(server["id"]), secret="panel-secret")
+    active = service.activate_subscription(
+        7001, subscription_id=int(subscription["id"]), server_id=int(server["id"])
+    )
+    external_ref = active["external_ref"]
+
+    snapshot = service.get_subscription_panel_user(
+        7001, subscription_id=int(subscription["id"])
+    )
+    assert snapshot["external_ref"] == external_ref
+    assert snapshot["last_online"] == "2026-09-29 00:15:00"
+
+    renewed = service.renew_subscription(
+        7001, subscription_id=int(subscription["id"]), traffic_gb=50, duration_days=30
+    )
+    assert renewed["status"] == "active"
+    assert renewed["traffic_bytes"] == 50 * 1024**3
+    assert panel.renewals[-1].reset_usage is True
+
+    disabled = service.set_subscription_enabled(
+        7001, subscription_id=int(subscription["id"]), enabled=False
+    )
+    assert disabled["status"] == "disabled"
+    enabled = service.set_subscription_enabled(
+        7001, subscription_id=int(subscription["id"]), enabled=True
+    )
+    assert enabled["status"] == "active"
+
+    assert service.subscription_link(31, subscription_id=int(subscription["id"])).endswith(
+        f"/{external_ref}/all.txt"
+    )
+
+    foreign = factories.tenant(owner_telegram_id=7002)
+    foreign_service = TenantBusinessService(
+        conn,
+        tenant_id=int(foreign["id"]),
+        owner_telegram_id=7002,
+        secret_cipher=cipher,
+        panel_adapter=panel,
+    )
+    with pytest.raises(TenantBusinessError, match="subscription not found"):
+        foreign_service.get_subscription_panel_user(
+            7002, subscription_id=int(subscription["id"])
+        )
+
+    removed = service.delete_subscription_from_panel(
+        7001, subscription_id=int(subscription["id"])
+    )
+    assert removed["status"] == "disabled"
+    assert panel.deleted == [external_ref]
