@@ -1,6 +1,6 @@
 # Operations guide
 
-Version: 0.9.2 installer track
+Version: 0.9.2
 
 ## Supported host
 
