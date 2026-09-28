@@ -343,6 +343,67 @@ def _new_client(
     return client
 
 
+def _sanaei_update_payload(
+    client: dict[str, Any],
+    *,
+    total_bytes: int | None = None,
+    expires_at: str | None = None,
+    enabled: bool | None = None,
+    comment: str | None = None,
+) -> dict[str, Any]:
+    email = str(client.get("email") or "").strip()
+    sub_id = str(client.get("subId") or client.get("uuid") or "").strip()
+    uuid_field = str(client.get("uuid") or "").strip()
+    id_field = str(client.get("id") or "").strip()
+    xray_id = (
+        uuid_field
+        if "-" in uuid_field
+        else sub_id
+        if "-" in sub_id
+        else id_field
+        if "-" in id_field
+        else sub_id or uuid_field
+    )
+    result: dict[str, Any] = {
+        "email": email,
+        "subId": sub_id or xray_id,
+        "totalGB": (
+            max(0, int(total_bytes))
+            if total_bytes is not None
+            else max(0, _safe_int(client.get("totalGB")))
+        ),
+        "expiryTime": (
+            _expiry_ms(expires_at)
+            if expires_at is not None
+            else _safe_int(client.get("expiryTime"))
+        ),
+        "enable": (
+            bool(enabled)
+            if enabled is not None
+            else bool(client.get("enable", True))
+        ),
+        "tgId": _safe_int(client.get("tgId")),
+        "limitIp": max(0, _safe_int(client.get("limitIp"))),
+        "comment": (
+            str(comment)
+            if comment is not None
+            else str(client.get("comment") or "")
+        ),
+    }
+    if xray_id:
+        result["uuid"] = xray_id
+        result["id"] = xray_id
+    if client.get("password"):
+        result["password"] = str(client.get("password"))
+    if client.get("auth"):
+        result["auth"] = str(client.get("auth"))
+    if client.get("flow"):
+        result["flow"] = str(client.get("flow"))
+    if "limitHwid" in client:
+        result["limitHwid"] = max(0, _safe_int(client.get("limitHwid")))
+    return result
+
+
 def _credential(target: PanelTarget, secret: str) -> dict[str, str]:
     flavor = str(target.xui_flavor or "").strip().lower()
     if flavor not in {"sanaei", "alireza"}:
@@ -515,26 +576,17 @@ class XuiPanelAdapter:
         else:
             attempts = [True]
 
+        selected_client: httpx.Client | None = None
+        selected_session: _Session | None = None
         last_error: BaseException | None = None
         for index, verify in enumerate(attempts):
             client = self._client(verify)
             try:
-                session = self._authenticate(client, target, credential)
-                try:
-                    yield session
-                finally:
-                    client.close()
-                return
-            except httpx.TransportError as exc:
-                client.close()
-                last_error = exc
-                if (
-                    mode == "auto"
-                    and index == 0
-                    and _looks_like_tls_error(exc)
-                ):
-                    continue
-                raise PanelError("X-UI connection failed") from exc
+                selected_session = self._authenticate(
+                    client, target, credential
+                )
+                selected_client = client
+                break
             except PanelError as exc:
                 client.close()
                 last_error = exc
@@ -547,7 +599,12 @@ class XuiPanelAdapter:
                 ):
                     continue
                 raise
-        raise PanelError("X-UI connection failed") from last_error
+        if selected_client is None or selected_session is None:
+            raise PanelError("X-UI connection failed") from last_error
+        try:
+            yield selected_session
+        finally:
+            selected_client.close()
 
     def _list_inbounds(self, session: _Session) -> list[dict[str, Any]]:
         path = "inbounds/list" if session.flavor == "sanaei" else "inbounds/"
@@ -741,19 +798,20 @@ class XuiPanelAdapter:
             )
         )
         with self._session(target, secret) as session:
-            existing = self._existing(session, external_ref)
-            if existing is not None:
-                return ProvisionResult(
-                    external_ref=existing.external_ref,
-                    subscription_url=existing.subscription_url,
-                )
-
             inbounds = self._list_inbounds(session)
             selected = _select_inbounds(target, inbounds)
             base_email = _safe_email(request)
 
             if session.flavor == "sanaei":
-                first_protocol = str(selected[0].get("protocol") or "").strip().lower()
+                existing = self._existing(session, external_ref)
+                if existing is not None:
+                    return ProvisionResult(
+                        external_ref=existing.external_ref,
+                        subscription_url=existing.subscription_url,
+                    )
+                first_protocol = str(
+                    selected[0].get("protocol") or ""
+                ).strip().lower()
                 client = _new_client(
                     first_protocol,
                     external_ref=external_ref,
@@ -786,21 +844,53 @@ class XuiPanelAdapter:
                 snapshot = self._existing(session, external_ref)
                 if snapshot is None:
                     snapshot = self._snapshot(
-                        session, external_ref, client=client, inbounds=inbounds
+                        session,
+                        external_ref,
+                        client=client,
+                        inbounds=inbounds,
                     )
                 return ProvisionResult(
                     external_ref=snapshot.external_ref,
                     subscription_url=snapshot.subscription_url,
                 )
 
+            selected_ids = {
+                _safe_int(row.get("id")) for row in selected
+            }
+            existing_pairs = _find_pairs(inbounds, external_ref)
+            existing_ids = {
+                _safe_int(row.get("id")) for row, _ in existing_pairs
+            }
+            if selected_ids and selected_ids.issubset(existing_ids):
+                snapshot = self._snapshot(
+                    session,
+                    external_ref,
+                    inbounds=inbounds,
+                )
+                return ProvisionResult(
+                    external_ref=snapshot.external_ref,
+                    subscription_url=snapshot.subscription_url,
+                )
+
+            missing = [
+                row
+                for row in selected
+                if _safe_int(row.get("id")) not in existing_ids
+            ]
             created: list[tuple[int, str]] = []
             try:
                 for index, inbound in enumerate(selected):
-                    protocol = str(inbound.get("protocol") or "").strip().lower()
+                    if inbound not in missing:
+                        continue
+                    protocol = str(
+                        inbound.get("protocol") or ""
+                    ).strip().lower()
+                    inbound_id = _safe_int(inbound.get("id"))
+                    original_index = selected.index(inbound)
                     email = (
                         base_email
-                        if index == 0
-                        else f"{base_email}-{_safe_int(inbound.get('id'))}"[:64]
+                        if original_index == 0
+                        else f"{base_email}-{inbound_id}"[:64]
                     )
                     client = _new_client(
                         protocol,
@@ -819,11 +909,11 @@ class XuiPanelAdapter:
                         "POST",
                         "inbounds/addClient",
                         payload={
-                            "id": _safe_int(inbound.get("id")),
+                            "id": inbound_id,
                             "settings": json.dumps({"clients": [client]}),
                         },
                     )
-                    created.append((_safe_int(inbound.get("id")), client_id))
+                    created.append((inbound_id, client_id))
             except PanelError:
                 for inbound_id, client_id in created:
                     try:
@@ -833,18 +923,24 @@ class XuiPanelAdapter:
                         )
                     except PanelError:
                         pass
-                existing = self._existing(session, external_ref)
-                if existing is None:
-                    raise
+                raise
 
-            snapshot = self._existing(session, external_ref)
-            if snapshot is None:
-                raise PanelError("X-UI create could not be verified")
+            refreshed = self._list_inbounds(session)
+            refreshed_ids = {
+                _safe_int(row.get("id"))
+                for row, _ in _find_pairs(refreshed, external_ref)
+            }
+            if not selected_ids.issubset(refreshed_ids):
+                raise PanelError("X-UI create could not be verified on all inbounds")
+            snapshot = self._snapshot(
+                session,
+                external_ref,
+                inbounds=refreshed,
+            )
             return ProvisionResult(
                 external_ref=snapshot.external_ref,
                 subscription_url=snapshot.subscription_url,
             )
-
     def get_user(
         self, *, target: PanelTarget, secret: str, external_ref: str
     ) -> PanelUserResult:
@@ -885,22 +981,16 @@ class XuiPanelAdapter:
                 if not email:
                     raise PanelError("Sanaei user email is unavailable")
                 already = bool(marker) and marker in str(client.get("comment") or "")
-                updated = dict(client)
-                updated.pop("traffic", None)
-                updated.pop("inboundIds", None)
-                updated["email"] = email
-                updated["subId"] = str(client.get("subId") or external_ref)
-                if "uuid" in client:
-                    updated["uuid"] = str(client.get("uuid") or external_ref)
-                if "id" in client and "-" in str(client.get("id") or ""):
-                    updated["id"] = str(client.get("id") or external_ref)
-                updated["totalGB"] = max(0, int(request.traffic_bytes))
-                updated["expiryTime"] = _expiry_ms(request.expires_at)
-                updated["enable"] = True
+                comment = str(client.get("comment") or "")
                 if marker and not already:
-                    updated["comment"] = (
-                        f"{str(client.get('comment') or '').strip()} {marker}"
-                    ).strip()[:500]
+                    comment = f"{comment.strip()} {marker}".strip()[:500]
+                updated = _sanaei_update_payload(
+                    client,
+                    total_bytes=max(0, int(request.traffic_bytes)),
+                    expires_at=request.expires_at,
+                    enabled=True,
+                    comment=comment,
+                )
                 session.request(
                     "POST",
                     f"clients/update/{quote(email, safe='')}",
@@ -975,10 +1065,10 @@ class XuiPanelAdapter:
                 if client is None:
                     raise PanelError("X-UI user was not found")
                 email = str(client.get("email") or "").strip()
-                updated = dict(client)
-                updated.pop("traffic", None)
-                updated.pop("inboundIds", None)
-                updated["enable"] = bool(enabled)
+                updated = _sanaei_update_payload(
+                    client,
+                    enabled=bool(enabled),
+                )
                 session.request(
                     "POST",
                     f"clients/update/{quote(email, safe='')}",
