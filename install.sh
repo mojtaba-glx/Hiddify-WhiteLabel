@@ -523,7 +523,7 @@ change_master_token() {
         echo "ERROR: token was not changed." >&2
         return 1
     fi
-    backup="$ROOT_DIR/runtime/env-before-token-$"
+    backup="$ROOT_DIR/runtime/env-before-token-$$"
     cp -a "$ENV_FILE" "$backup"
     chmod 600 "$backup"
     if ! edit_env_value MASTER_BOT_TOKEN "$token"; then
