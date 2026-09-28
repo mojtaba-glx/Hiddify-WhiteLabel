@@ -131,6 +131,19 @@ def services_text(services: Iterable[dict[str, Any]], *, timezone_name: str) -> 
             "❌ هنوز ربات فعالی ندارید.\n"
             "برای شروع از «🛒 خرید ربات» یک پلن تهیه کنید."
         )
+    tenant_status = {
+        "active": "🟢 فعال",
+        "suspended": "🟠 معلق",
+        "disabled": "🔴 غیرفعال",
+    }
+    license_status = {
+        "pending": "⏳ در انتظار",
+        "active": "🟢 فعال",
+        "grace": "🟡 مهلت تمدید",
+        "suspended": "🟠 معلق",
+        "expired": "🔴 منقضی",
+        "cancelled": "❌ لغوشده",
+    }
     lines = ["📋 سرویس‌های من"]
     for item in rows:
         expiry = "نامشخص"
@@ -138,9 +151,9 @@ def services_text(services: Iterable[dict[str, Any]], *, timezone_name: str) -> 
             expiry = format_tehran(parse_utc(str(item["expires_at"])), timezone_name)
         lines.extend([
             "",
-            f"🤖 {item['name']} · {item['slug']}",
-            f"وضعیت سرویس: {item['status']}",
-            f"لایسنس: {item.get('license_status') or 'ندارد'}",
+            f"🤖 {item['name']}",
+            f"وضعیت: {tenant_status.get(str(item['status']), str(item['status']))}",
+            f"لایسنس: {license_status.get(str(item.get('license_status') or ''), 'ندارد')}",
             f"پلن: {item.get('plan_name') or 'نامشخص'}",
             f"انقضا: {expiry}",
         ])
@@ -170,11 +183,27 @@ def orders_text(orders: Iterable[dict[str, Any]]) -> str:
     rows = list(orders)
     if not rows:
         return "🧾 سفارش‌های من\n\nسفارشی ثبت نشده است."
+    status_labels = {
+        "pending_payment": "⏳ در انتظار پرداخت",
+        "payment_review": "🔎 در انتظار بررسی",
+        "paid": "✅ پرداخت‌شده",
+        "fulfilled": "✅ تکمیل‌شده",
+        "cancelled": "❌ لغوشده",
+        "rejected": "🔴 ردشده",
+    }
+    kind_labels = {
+        "purchase": "خرید ربات",
+        "renewal": "تمدید",
+        "wallet_topup": "شارژ کیف پول",
+        "trial": "لایسنس تست",
+    }
     lines = ["🧾 سفارش‌های من"]
     for item in rows:
+        title = item.get("plan_name") or kind_labels.get(str(item["kind"]), "سفارش")
         lines.append(
-            f"\n{item['public_id']} · {item.get('plan_name') or 'شارژ کیف پول'}\n"
-            f"{int(item['amount']):,} {item['currency']} · {item['status']}"
+            f"\n{item['public_id']} · {title}\n"
+            f"{int(item['amount']):,} {item['currency']} · "
+            f"{status_labels.get(str(item['status']), str(item['status']))}"
         )
     return "\n".join(lines)
 
