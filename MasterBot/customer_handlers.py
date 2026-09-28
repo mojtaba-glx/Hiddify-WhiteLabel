@@ -192,10 +192,21 @@ async def handle_customer_callback(
             return True
         if data.startswith("customer:walletpay:"):
             order = service.pay_order_from_wallet(actor, int(data.rsplit(":", 1)[1]))
+            next_text = (
+                f"✅ سفارش {order['public_id']} از کیف پول پرداخت شد."
+                if order["kind"] != "renewal"
+                else f"✅ تمدید {order['public_id']} با موفقیت انجام شد."
+            )
+            if order["kind"] != "renewal":
+                next_text += "\n\n🔑 حالا از «راه‌اندازی ربات» ادامه دهید."
             await render(
                 update,
-                f"✅ سفارش {order['public_id']} از کیف پول پرداخت شد.\nاکنون از «راه‌اندازی ربات» ادامه دهید.",
-                setup_keyboard(service.setup_candidates(actor)),
+                next_text,
+                setup_keyboard(service.setup_candidates(actor))
+                if order["kind"] != "renewal"
+                else InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "📋 سرویس‌های من", callback_data="customer:services"
+                )]]),
             )
             return True
         if data.startswith("customer:topup:"):
@@ -260,7 +271,10 @@ async def handle_customer_callback(
             context.user_data["customer_flow"] = {"kind": "setup_details", "order_id": order_id}
             await render(
                 update,
-                "🔑 نام و شناسه انگلیسی ربات را بفرستید:\nنام فروشگاه | slug\n\nمثال: Speed VPN | speed-vpn",
+                "🔑 راه‌اندازی ربات\n\n"
+                "نام فروشگاه و یک شناسه انگلیسی کوتاه را بفرستید:\n\n"
+                "نام فروشگاه | slug\n\n"
+                "مثال:\nSpeed VPN | speed-vpn",
                 InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data="customer:setup")]]),
             )
             return True
@@ -274,7 +288,15 @@ async def handle_customer_callback(
             )
             return True
         raise ValueError("unknown customer callback")
-    except (ValueError, sqlite3.IntegrityError, CustomerPortalError, MasterServiceError, ProvisioningError) as exc:
+    except CustomerPortalError as exc:
+        logger.warning("Customer callback rejected: %s", safe_format_exception(exc))
+        await render(
+            update,
+            str(exc),
+            InlineKeyboardMarkup([[InlineKeyboardButton("🏠 منوی مشتری", callback_data="customer:home")]]),
+        )
+        return True
+    except (ValueError, sqlite3.IntegrityError, MasterServiceError, ProvisioningError) as exc:
         logger.warning("Customer callback rejected: %s", safe_format_exception(exc))
         await render(
             update,
@@ -390,17 +412,30 @@ async def handle_customer_text(update: Update, context: ContextTypes.DEFAULT_TYP
                 admin_bot=admin_bot, user_bot=prepared,
             )
             context.user_data.pop("customer_flow", None)
+            admin_name = result.provisioning.admin_bot.telegram_username
+            user_name = result.provisioning.user_bot.telegram_username
+            lines = [
+                "✅ ربات اختصاصی شما با موفقیت راه‌اندازی شد.",
+                "",
+                f"🤖 ربات مدیریت: @{admin_name}" if admin_name else "🤖 ربات مدیریت: آماده",
+                f"🛍 ربات کاربران: @{user_name}" if user_name else "🛍 ربات کاربران: آماده",
+                "",
+                "📋 از بخش «سرویس‌های من» می‌توانید وضعیت لایسنس را مشاهده و تمدید کنید.",
+            ]
             await update.effective_chat.send_message(
-                "✅ ربات اختصاصی شما راه‌اندازی شد.\n\n"
-                f"Admin webhook secret: {result.provisioning.webhook_secrets.admin}\n"
-                f"User webhook secret: {result.provisioning.webhook_secrets.user}\n\n"
-                "این Secretها فقط یک‌بار نمایش داده می‌شوند؛ پیام را پس از استفاده حذف کنید.",
-                protect_content=True,
+                "\n".join(lines),
                 reply_markup=customer_main_keyboard(),
             )
             return True
         return False
-    except (ValueError, sqlite3.IntegrityError, CustomerPortalError, MasterServiceError, ProvisioningError) as exc:
+    except CustomerPortalError as exc:
+        logger.warning("Customer input rejected: %s", safe_format_exception(exc))
+        await update.effective_message.reply_text(
+            str(exc),
+            reply_markup=customer_main_keyboard(),
+        )
+        return True
+    except (ValueError, sqlite3.IntegrityError, MasterServiceError, ProvisioningError) as exc:
         logger.warning("Customer input rejected: %s", safe_format_exception(exc))
         await update.effective_message.reply_text(
             "❌ اطلاعات یا وضعیت درخواست معتبر نیست. دوباره تلاش کنید.",
@@ -428,7 +463,13 @@ async def handle_customer_photo(update: Update, context: ContextTypes.DEFAULT_TY
             "✅ تصویر رسید ثبت شد و در صف بررسی مدیر قرار گرفت.",
             reply_markup=customer_main_keyboard(),
         )
-    except (ValueError, sqlite3.IntegrityError, CustomerPortalError, MasterServiceError) as exc:
+    except CustomerPortalError as exc:
         logger.warning("Customer receipt photo rejected: %s", safe_format_exception(exc))
-        await update.effective_message.reply_text("❌ ثبت رسید انجام نشد؛ دوباره تلاش کنید.")
+        await update.effective_message.reply_text(str(exc), reply_markup=customer_main_keyboard())
+    except (ValueError, sqlite3.IntegrityError, MasterServiceError) as exc:
+        logger.warning("Customer receipt photo rejected: %s", safe_format_exception(exc))
+        await update.effective_message.reply_text(
+            "❌ ثبت رسید انجام نشد؛ دوباره تلاش کنید.",
+            reply_markup=customer_main_keyboard(),
+        )
     return True
