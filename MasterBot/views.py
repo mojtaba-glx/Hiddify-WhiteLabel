@@ -24,11 +24,26 @@ MAIN_MENU = (
 
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(MAIN_MENU[i][0], callback_data=MAIN_MENU[i][1])]
-        for i in range(len(MAIN_MENU))
-    ]
-    return InlineKeyboardMarkup(rows)
+    by_callback = {callback: label for label, callback in MAIN_MENU}
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(by_callback["menu:customers"], callback_data="menu:customers"),
+            InlineKeyboardButton(by_callback["menu:tenants"], callback_data="menu:tenants"),
+        ],
+        [
+            InlineKeyboardButton(by_callback["menu:licenses"], callback_data="menu:licenses"),
+            InlineKeyboardButton(by_callback["menu:plans"], callback_data="menu:plans"),
+        ],
+        [
+            InlineKeyboardButton(by_callback["menu:payments"], callback_data="menu:payments"),
+            InlineKeyboardButton(by_callback["menu:stats"], callback_data="menu:stats"),
+        ],
+        [
+            InlineKeyboardButton(by_callback["menu:warnings"], callback_data="menu:warnings"),
+            InlineKeyboardButton(by_callback["menu:audit"], callback_data="menu:audit"),
+        ],
+        [InlineKeyboardButton(by_callback["menu:settings"], callback_data="menu:settings")],
+    ])
 
 
 def back_keyboard(callback: str = "menu:main") -> InlineKeyboardMarkup:
