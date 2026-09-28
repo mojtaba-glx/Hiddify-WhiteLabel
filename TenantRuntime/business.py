@@ -1360,14 +1360,20 @@ class TenantBusinessService:
                 normal.append(row)
 
         batch = max(1, min(int(limit), 500))
-        selected: list[dict[str, Any]] = hot[:batch]
         next_cursor = max(0, int(cursor))
-        if len(selected) < batch and normal:
-            start = next_cursor % len(normal)
-            ordered = normal[start:] + normal[:start]
-            picked = ordered[: batch - len(selected)]
-            selected.extend(picked)
-            next_cursor = (start + len(picked)) % len(normal)
+        if len(hot) >= batch:
+            start = next_cursor % len(hot)
+            ordered_hot = hot[start:] + hot[:start]
+            selected = ordered_hot[:batch]
+            next_cursor = (start + len(selected)) % len(hot)
+        else:
+            selected = list(hot)
+            if normal:
+                start = next_cursor % len(normal)
+                ordered = normal[start:] + normal[:start]
+                picked = ordered[: batch - len(selected)]
+                selected.extend(picked)
+                next_cursor = (start + len(picked)) % len(normal)
 
         synced = expired = pending = errors = 0
         for row in selected:
