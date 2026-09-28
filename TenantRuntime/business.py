@@ -1276,8 +1276,129 @@ class TenantBusinessService:
             "node_report": nodes,
             "subscription_url": smart_url or str(result.subscription_url or ""),
         }
-    def sync_subscription_usage(self, actor_id: int, *, subscription_id: int) -> dict[str, Any]:
-        """Aggregate usage/last-online across every active provider mapping."""
+    def _mark_subscription_node_runtime_failure(
+        self,
+        *,
+        subscription_id: int,
+        mapping: sqlite3.Row | dict[str, Any],
+        error: str,
+        freeze_after: int = 3,
+    ) -> None:
+        row = dict(mapping)
+        fail_count = max(0, int(row.get("fail_count") or 0)) + 1
+        now = iso_utc(utcnow())
+        frozen_at = (
+            str(row.get("frozen_at") or "").strip()
+            or (now if fail_count >= max(1, int(freeze_after)) else "")
+        )
+        self.conn.execute(
+            "UPDATE tenant_subscription_nodes "
+            "SET fail_count=?, frozen_at=?, last_error=?, updated_at=? "
+            "WHERE tenant_id=? AND subscription_id=? AND server_id=?",
+            (
+                fail_count,
+                frozen_at or None,
+                _text(error, 300, required=False) or "provider operation failed",
+                now,
+                self.tenant_id,
+                int(subscription_id),
+                int(row["server_id"]),
+            ),
+        )
+
+    def enforce_subscription_batch(
+        self,
+        actor_id: int,
+        *,
+        limit: int = 30,
+        hot_usage_ratio: float = 0.85,
+        cursor: int = 0,
+        freeze_after: int = 3,
+    ) -> dict[str, int]:
+        """Bounded global-enforcer pass with hot-first + round-robin selection."""
+        self._admin(actor_id)
+        rows = [
+            dict(row)
+            for row in self.conn.execute(
+                "SELECT * FROM tenant_subscriptions "
+                "WHERE tenant_id=? AND status IN ('active','disabled') "
+                "AND server_id IS NOT NULL AND external_ref IS NOT NULL "
+                "ORDER BY id",
+                (self.tenant_id,),
+            ).fetchall()
+        ]
+        if not rows:
+            return {
+                "scanned": 0,
+                "synced": 0,
+                "expired": 0,
+                "pending": 0,
+                "errors": 0,
+                "next_cursor": 0,
+            }
+        ratio = min(max(float(hot_usage_ratio), 0.5), 1.0)
+        now = utcnow()
+        hot: list[dict[str, Any]] = []
+        normal: list[dict[str, Any]] = []
+        for row in rows:
+            usage = max(0, int(row.get("usage_bytes") or 0))
+            traffic = max(0, int(row.get("traffic_bytes") or 0))
+            near_usage = traffic > 0 and usage >= int(traffic * ratio)
+            try:
+                near_time = parse_utc(str(row["expires_at"])) <= (
+                    now + timedelta(days=1)
+                )
+            except Exception:
+                near_time = True
+            if (
+                int(row.get("enforcement_pending") or 0) == 1
+                or near_usage
+                or near_time
+            ):
+                hot.append(row)
+            else:
+                normal.append(row)
+
+        batch = max(1, min(int(limit), 500))
+        selected: list[dict[str, Any]] = hot[:batch]
+        next_cursor = max(0, int(cursor))
+        if len(selected) < batch and normal:
+            start = next_cursor % len(normal)
+            ordered = normal[start:] + normal[:start]
+            picked = ordered[: batch - len(selected)]
+            selected.extend(picked)
+            next_cursor = (start + len(picked)) % len(normal)
+
+        synced = expired = pending = errors = 0
+        for row in selected:
+            try:
+                result = self.sync_subscription_usage(
+                    actor_id,
+                    subscription_id=int(row["id"]),
+                    freeze_after=freeze_after,
+                )
+                synced += 1
+                expired += int(result["status"] == "expired")
+                pending += int(bool(result.get("enforcement_pending")))
+            except TenantBusinessError:
+                errors += 1
+        return {
+            "scanned": len(selected),
+            "synced": synced,
+            "expired": expired,
+            "pending": pending,
+            "errors": errors,
+            "next_cursor": next_cursor,
+        }
+
+    def sync_subscription_usage(
+        self,
+        actor_id: int,
+        *,
+        subscription_id: int,
+        freeze_after: int = 3,
+    ) -> dict[str, Any]:
+        """Aggregate usage safely and enforce expiry across every current node."""
         self._admin(actor_id)
         row = self.conn.execute(
             "SELECT * FROM tenant_subscriptions "
@@ -1309,8 +1430,12 @@ class TenantBusinessService:
             raise TenantBusinessError("subscription has no panel targets")
 
         snapshots: list[tuple[sqlite3.Row, Any]] = []
+        failed_mappings: list[sqlite3.Row] = []
         primary_usage = None
+        total_usage = 0
         node_errors = 0
+        last_online_values: list[str] = []
+
         for mapping in mappings:
             secret = ""
             try:
@@ -1320,51 +1445,43 @@ class TenantBusinessService:
                     secret=secret,
                     external_ref=str(mapping["external_ref"]),
                 )
-                if int(usage.usage_bytes) < 0:
-                    raise TenantBusinessError("panel returned invalid usage")
+                usage_bytes = max(0, int(usage.usage_bytes))
+                total_usage += usage_bytes
                 snapshots.append((mapping, usage))
+                if usage.last_online:
+                    last_online_values.append(str(usage.last_online))
                 if int(mapping["is_primary"] or 0) == 1:
                     primary_usage = usage
             except (PanelError, TenantBusinessError):
-                with transaction(self.conn):
-                    self._upsert_subscription_node(
-                        subscription_id=int(subscription_id),
-                        server_id=int(mapping["server_id"]),
-                        external_ref=str(mapping["external_ref"]),
-                        is_primary=bool(mapping["is_primary"]),
-                        status="error",
-                        usage_bytes=int(mapping["usage_bytes"] or 0),
-                        last_online=mapping["last_online"],
-                        last_error="usage sync failed",
-                    )
-                if int(mapping["is_primary"] or 0) == 1:
-                    raise TenantBusinessError(
-                        "primary panel usage synchronization failed"
-                    )
+                # Never drop a node's last known usage from the global total.
+                # This prevents quota bypass while a provider is unreachable.
+                total_usage += max(0, int(mapping["usage_bytes"] or 0))
+                failed_mappings.append(mapping)
                 node_errors += 1
+                with transaction(self.conn):
+                    self._mark_subscription_node_runtime_failure(
+                        subscription_id=int(subscription_id),
+                        mapping=mapping,
+                        error="usage sync failed",
+                        freeze_after=freeze_after,
+                    )
             finally:
                 secret = ""
 
-        if primary_usage is None:
-            raise TenantBusinessError("primary panel usage is unavailable")
-
-        usage_bytes = sum(max(0, int(usage.usage_bytes)) for _, usage in snapshots)
-        last_online_values = [
-            str(usage.last_online)
-            for _, usage in snapshots
-            if usage.last_online
-        ]
-        last_online = max(last_online_values) if last_online_values else None
+        last_online = max(last_online_values) if last_online_values else (
+            subscription.get("last_online")
+        )
         now_dt = utcnow()
         due = self._subscription_is_due(
-            subscription, now=now_dt, usage_bytes=usage_bytes
+            subscription, now=now_dt, usage_bytes=total_usage
         )
+        enforcement_pending = False
+        enforcement_error = None
 
         if due:
-            disable_errors = 0
-            for mapping, usage in snapshots:
-                if not bool(usage.active):
-                    continue
+            disable_failures = 0
+            # Enforce every mapping, including those whose usage read failed.
+            for mapping in mappings:
                 secret = ""
                 try:
                     _, target, secret = self._panel_material(int(mapping["server_id"]))
@@ -1375,47 +1492,68 @@ class TenantBusinessService:
                         enabled=False,
                     )
                 except (PanelError, TenantBusinessError):
-                    disable_errors += 1
+                    disable_failures += 1
+                    with transaction(self.conn):
+                        self._mark_subscription_node_runtime_failure(
+                            subscription_id=int(subscription_id),
+                            mapping=mapping,
+                            error="disable pending",
+                            freeze_after=freeze_after,
+                        )
                 finally:
                     secret = ""
-            if disable_errors:
-                raise TenantBusinessError(
-                    "expiry could not be enforced on every subscription node"
+            if disable_failures:
+                enforcement_pending = True
+                enforcement_error = (
+                    f"disable pending on {disable_failures} node(s)"
                 )
 
         now = iso_utc(now_dt)
-        state = (
-            "expired"
-            if due
-            else ("active" if bool(primary_usage.active) else "disabled")
-        )
-        expired_at = now if due else None
+        if due and not enforcement_pending:
+            state = "expired"
+        elif primary_usage is not None:
+            state = "active" if bool(primary_usage.active) else "disabled"
+        else:
+            # A transient primary outage must not invent a new service state.
+            state = str(subscription["status"])
+        expired_at = now if state == "expired" else None
+
         with transaction(self.conn):
             for mapping, usage in snapshots:
-                self._upsert_subscription_node(
-                    subscription_id=int(subscription_id),
-                    server_id=int(mapping["server_id"]),
-                    external_ref=str(mapping["external_ref"]),
-                    is_primary=bool(mapping["is_primary"]),
-                    status=(
-                        "expired"
-                        if due
-                        else ("active" if bool(usage.active) else "disabled")
+                self.conn.execute(
+                    "UPDATE tenant_subscription_nodes "
+                    "SET status=?, usage_bytes=?, last_online=?, fail_count=0, "
+                    "frozen_at=NULL, last_error=NULL, updated_at=? "
+                    "WHERE tenant_id=? AND subscription_id=? AND server_id=?",
+                    (
+                        (
+                            "expired"
+                            if state == "expired"
+                            else ("active" if bool(usage.active) else "disabled")
+                        ),
+                        max(0, int(usage.usage_bytes)),
+                        usage.last_online,
+                        now,
+                        self.tenant_id,
+                        int(subscription_id),
+                        int(mapping["server_id"]),
                     ),
-                    usage_bytes=max(0, int(usage.usage_bytes)),
-                    last_online=usage.last_online,
                 )
             changed = self.conn.execute(
                 "UPDATE tenant_subscriptions "
                 "SET usage_bytes=?, status=?, last_online=?, last_synced_at=?, "
-                "expired_at=?, updated_at=? "
+                "expired_at=?, enforcement_pending=?, enforcement_error=?, "
+                "enforced_at=?, updated_at=? "
                 "WHERE id=? AND tenant_id=? AND status IN ('active','disabled')",
                 (
-                    usage_bytes,
+                    total_usage,
                     state,
                     last_online,
                     now,
                     expired_at,
+                    1 if enforcement_pending else 0,
+                    enforcement_error,
+                    now if due and not enforcement_pending else None,
                     now,
                     int(subscription_id),
                     self.tenant_id,
@@ -1425,13 +1563,15 @@ class TenantBusinessService:
                 raise TenantBusinessError(
                     "subscription state changed during synchronization"
                 )
+
         return {
             "id": int(subscription_id),
-            "usage_bytes": usage_bytes,
+            "usage_bytes": total_usage,
             "status": state,
             "last_online": last_online,
             "last_synced_at": now,
             "node_errors": node_errors,
+            "enforcement_pending": enforcement_pending,
         }
     def sync_all_subscriptions(self, actor_id: int, *, limit: int = 250) -> dict[str, int]:
         self._admin(actor_id)
