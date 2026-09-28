@@ -110,7 +110,8 @@ async def show_main(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.clear()
     await _render(
         update,
-        "🧭 مدیریت White-Label\n\nبخش موردنظر را انتخاب کنید:",
+        "🧭 پنل مدیریت سیستم فروش ربات\n\n"
+        "از این بخش کاربران، ربات‌ها، لایسنس‌ها، پرداخت‌ها و تنظیمات کل سیستم را مدیریت می‌کنید.",
         main_menu_keyboard(),
     )
 
