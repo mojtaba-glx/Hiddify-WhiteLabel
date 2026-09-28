@@ -99,3 +99,37 @@ def test_env_editor_rejects_invalid_smart_subscription_settings(tmp_path) -> Non
     assert _run(env_file, "SMART_SUB_PORT", "70000").returncode != 0
     assert env_file.read_text(encoding="utf-8") == original
 
+def test_env_editor_updates_enforcer_and_reminder_controls(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "RUNTIME_ENFORCER_SECONDS=20\n"
+        "RUNTIME_REMINDER_DAYS=3\n"
+        "RUNTIME_REMINDER_REMAINING_GB=3\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+
+    assert _run(env_file, "RUNTIME_ENFORCER_SECONDS", "25").returncode == 0
+    assert _run(env_file, "RUNTIME_REMINDER_DAYS", "5").returncode == 0
+    assert _run(env_file, "RUNTIME_REMINDER_REMAINING_GB", "4").returncode == 0
+    rendered = env_file.read_text(encoding="utf-8")
+    assert "RUNTIME_ENFORCER_SECONDS=25" in rendered
+    assert "RUNTIME_REMINDER_DAYS=5" in rendered
+    assert "RUNTIME_REMINDER_REMAINING_GB=4" in rendered
+
+
+def test_env_editor_rejects_invalid_enforcer_and_reminder_controls(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    original = (
+        "RUNTIME_ENFORCER_SECONDS=20\n"
+        "RUNTIME_REMINDER_DAYS=3\n"
+        "RUNTIME_REMINDER_REMAINING_GB=3\n"
+    )
+    env_file.write_text(original, encoding="utf-8")
+    env_file.chmod(0o600)
+
+    assert _run(env_file, "RUNTIME_ENFORCER_SECONDS", "9").returncode != 0
+    assert _run(env_file, "RUNTIME_REMINDER_DAYS", "31").returncode != 0
+    assert _run(env_file, "RUNTIME_REMINDER_REMAINING_GB", "0").returncode != 0
+    assert env_file.read_text(encoding="utf-8") == original
+
