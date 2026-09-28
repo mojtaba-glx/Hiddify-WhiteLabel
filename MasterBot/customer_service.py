@@ -1203,7 +1203,8 @@ class CustomerPortalService:
                 metadata={"approved": bool(approve), "order_kind": str(receipt["kind"])},
             )
         row = self.conn.execute(
-            "SELECT r.*, o.status AS order_status, c.telegram_user_id"
+            "SELECT r.*, o.status AS order_status, o.kind AS order_kind,"
+            " o.public_id, o.amount, o.currency, c.telegram_user_id"
             " FROM payment_receipts AS r JOIN customer_orders AS o ON o.id = r.order_id"
             " JOIN platform_customers AS c ON c.id = o.customer_id WHERE r.id = ?",
             (int(receipt_id),),
