@@ -95,7 +95,10 @@ def restore_snapshot(snapshot: Path) -> None:
     if not env_source.is_file() or not db_source.is_file():
         raise FileNotFoundError("update snapshot is incomplete")
 
-    # Services must already be stopped by the caller. Replace DB first, then env.
+    # Services must already be stopped by the caller. Remove any WAL/SHM
+    # produced by the failed candidate before replacing the main database.
+    for suffix in ("-wal", "-shm"):
+        Path(str(db_target) + suffix).unlink(missing_ok=True)
     _atomic_copy(db_source, db_target, 0o600)
     _atomic_copy(env_source, env_target, 0o600)
 
