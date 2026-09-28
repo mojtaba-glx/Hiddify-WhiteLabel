@@ -117,6 +117,15 @@ class RuntimeSettings:
     smart_sub_host: str = "127.0.0.1"
     smart_sub_port: int = 8091
     smart_sub_public_base_url: str = ""
+    enforcer_seconds: int = 20
+    enforcer_batch_size: int = 30
+    enforcer_hot_usage_ratio: float = 0.85
+    node_freeze_failures: int = 3
+    reminder_days: int = 3
+    reminder_remaining_gb: int = 3
+    reminder_lease_seconds: int = 120
+    reminder_max_retries: int = 5
+    reminder_retry_base_seconds: int = 30
 
     def __post_init__(self) -> None:
         if not str(self.token_encryption_key or "").strip():
@@ -146,6 +155,24 @@ class RuntimeSettings:
             public_base.startswith("http://") or public_base.startswith("https://")
         ):
             raise SettingsError("SMART_SUB_PUBLIC_BASE_URL must use http or https")
+        if not 10 <= int(self.enforcer_seconds) <= 3600:
+            raise SettingsError("RUNTIME_ENFORCER_SECONDS must be between 10 and 3600")
+        if not 1 <= int(self.enforcer_batch_size) <= 500:
+            raise SettingsError("RUNTIME_ENFORCER_BATCH_SIZE must be between 1 and 500")
+        if not 0.5 <= float(self.enforcer_hot_usage_ratio) <= 1.0:
+            raise SettingsError("RUNTIME_ENFORCER_HOT_USAGE_RATIO must be between 0.5 and 1.0")
+        if not 1 <= int(self.node_freeze_failures) <= 20:
+            raise SettingsError("RUNTIME_NODE_FREEZE_FAILURES must be between 1 and 20")
+        if not 1 <= int(self.reminder_days) <= 30:
+            raise SettingsError("RUNTIME_REMINDER_DAYS must be between 1 and 30")
+        if not 1 <= int(self.reminder_remaining_gb) <= 1000:
+            raise SettingsError("RUNTIME_REMINDER_REMAINING_GB must be between 1 and 1000")
+        if int(self.reminder_lease_seconds) < 10:
+            raise SettingsError("RUNTIME_REMINDER_LEASE_SECONDS must be at least 10")
+        if not 1 <= int(self.reminder_max_retries) <= 20:
+            raise SettingsError("RUNTIME_REMINDER_MAX_RETRIES must be between 1 and 20")
+        if not 1 <= int(self.reminder_retry_base_seconds) <= 3600:
+            raise SettingsError("RUNTIME_REMINDER_RETRY_BASE_SECONDS must be between 1 and 3600")
 
     def __repr__(self) -> str:
         return (
@@ -159,7 +186,16 @@ class RuntimeSettings:
             f"lifecycle_seconds={self.lifecycle_seconds}, "
             f"smart_sub_host={self.smart_sub_host!r}, "
             f"smart_sub_port={self.smart_sub_port}, "
-            f"smart_sub_public_base_url={self.smart_sub_public_base_url!r})"
+            f"smart_sub_public_base_url={self.smart_sub_public_base_url!r}, "
+            f"enforcer_seconds={self.enforcer_seconds}, "
+            f"enforcer_batch_size={self.enforcer_batch_size}, "
+            f"enforcer_hot_usage_ratio={self.enforcer_hot_usage_ratio}, "
+            f"node_freeze_failures={self.node_freeze_failures}, "
+            f"reminder_days={self.reminder_days}, "
+            f"reminder_remaining_gb={self.reminder_remaining_gb}, "
+            f"reminder_lease_seconds={self.reminder_lease_seconds}, "
+            f"reminder_max_retries={self.reminder_max_retries}, "
+            f"reminder_retry_base_seconds={self.reminder_retry_base_seconds})"
         )
 
 
@@ -268,4 +304,49 @@ def load_runtime_from_env(
         smart_sub_public_base_url=str(
             source.get("SMART_SUB_PUBLIC_BASE_URL", "") or ""
         ).strip().rstrip("/"),
+        enforcer_seconds=_parse_positive_int(
+            source.get("RUNTIME_ENFORCER_SECONDS"),
+            name="RUNTIME_ENFORCER_SECONDS",
+            default=20,
+            minimum=10,
+        ),
+        enforcer_batch_size=_parse_positive_int(
+            source.get("RUNTIME_ENFORCER_BATCH_SIZE"),
+            name="RUNTIME_ENFORCER_BATCH_SIZE",
+            default=30,
+        ),
+        enforcer_hot_usage_ratio=float(
+            str(source.get("RUNTIME_ENFORCER_HOT_USAGE_RATIO", "") or "0.85")
+        ),
+        node_freeze_failures=_parse_positive_int(
+            source.get("RUNTIME_NODE_FREEZE_FAILURES"),
+            name="RUNTIME_NODE_FREEZE_FAILURES",
+            default=3,
+        ),
+        reminder_days=_parse_positive_int(
+            source.get("RUNTIME_REMINDER_DAYS"),
+            name="RUNTIME_REMINDER_DAYS",
+            default=3,
+        ),
+        reminder_remaining_gb=_parse_positive_int(
+            source.get("RUNTIME_REMINDER_REMAINING_GB"),
+            name="RUNTIME_REMINDER_REMAINING_GB",
+            default=3,
+        ),
+        reminder_lease_seconds=_parse_positive_int(
+            source.get("RUNTIME_REMINDER_LEASE_SECONDS"),
+            name="RUNTIME_REMINDER_LEASE_SECONDS",
+            default=120,
+            minimum=10,
+        ),
+        reminder_max_retries=_parse_positive_int(
+            source.get("RUNTIME_REMINDER_MAX_RETRIES"),
+            name="RUNTIME_REMINDER_MAX_RETRIES",
+            default=5,
+        ),
+        reminder_retry_base_seconds=_parse_positive_int(
+            source.get("RUNTIME_REMINDER_RETRY_BASE_SECONDS"),
+            name="RUNTIME_REMINDER_RETRY_BASE_SECONDS",
+            default=30,
+        ),
     )
