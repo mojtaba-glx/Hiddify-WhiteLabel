@@ -48,6 +48,27 @@ def _parse_nonnegative_int(raw: object, *, name: str, default: int = 0) -> int:
         raise SettingsError(f"{name} must be non-negative")
     return value
 
+def _parse_float_range(
+    raw: object,
+    *,
+    name: str,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    text = str(raw or "").strip()
+    if not text:
+        return float(default)
+    try:
+        value = float(text)
+    except (TypeError, ValueError) as exc:
+        raise SettingsError(f"{name} must be a number") from exc
+    if not float(minimum) <= value <= float(maximum):
+        raise SettingsError(
+            f"{name} must be between {float(minimum)} and {float(maximum)}"
+        )
+    return value
+
 
 @dataclass
 class Settings:
@@ -315,8 +336,12 @@ def load_runtime_from_env(
             name="RUNTIME_ENFORCER_BATCH_SIZE",
             default=30,
         ),
-        enforcer_hot_usage_ratio=float(
-            str(source.get("RUNTIME_ENFORCER_HOT_USAGE_RATIO", "") or "0.85")
+        enforcer_hot_usage_ratio=_parse_float_range(
+            source.get("RUNTIME_ENFORCER_HOT_USAGE_RATIO"),
+            name="RUNTIME_ENFORCER_HOT_USAGE_RATIO",
+            default=0.85,
+            minimum=0.5,
+            maximum=1.0,
         ),
         node_freeze_failures=_parse_positive_int(
             source.get("RUNTIME_NODE_FREEZE_FAILURES"),
