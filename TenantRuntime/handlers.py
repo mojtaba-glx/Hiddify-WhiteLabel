@@ -168,20 +168,31 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     "فرمت X-UI:\n"
                     "نام | xui | آدرس پنل | sanaei/alireza | inboundها | آدرس عمومی اشتراک | مسیر اشتراک\n"
                     "inbound خالی = اولین inbound، عدد 0 = همه، یا مثل 1,2,3\n"
-                    "مسیر اشتراک در صورت خالی بودن /sub/ است.",
+                    "مسیر اشتراک در صورت خالی بودن /sub/ است.\n\n"
+                    "فرمت X-Net:\n"
+                    "نام | xnet | آدرس API/پنل | inboundها | دامنه عمومی اشتراک | پورت اشتراک | مسیر اشتراک\n"
+                    "شناسه inbound می‌تواند مثل in-9457dabf باشد؛ 0 = همه.\n"
+                    "پورت خالی/0 = 2096 و مسیر خالی = sub.",
                     reply_markup=_menu(spec),
                 ); return
             if data.startswith("biz:server:"):
                 server_id = int(data.rsplit(":", 1)[1])
                 server = business.server(server_id)
                 panel = business.panel_status(server_id)
-                xui_info = ""
+                provider_info = ""
                 if server["panel_kind"] == "xui":
-                    xui_info = (
+                    provider_info = (
                         f"\nنسخه X-UI: {server.get('xui_flavor') or '-'}"
                         f"\nInboundها: {server.get('xui_inbound_ids') or 'اولین فعال'}"
                         f"\nآدرس عمومی اشتراک: {server.get('xui_public_origin') or 'خود دامنه پنل'}"
                         f"\nمسیر اشتراک: {server.get('xui_sub_path') or '/sub/'}"
+                    )
+                elif server["panel_kind"] == "xnet":
+                    provider_info = (
+                        f"\nInboundها: {server.get('xnet_inbound_ids') or 'اولین فعال'}"
+                        f"\nآدرس عمومی اشتراک: {server.get('xnet_public_origin') or 'دامنه API/پنل'}"
+                        f"\nپورت اشتراک: {server.get('xnet_sub_port') or 2096}"
+                        f"\nمسیر اشتراک: {server.get('xnet_sub_path') or 'sub'}"
                     )
                 text = (
                     f"🖥 {server['label']}\n"
@@ -189,12 +200,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     f"آدرس: {server.get('endpoint') or 'ثبت نشده'}\n"
                     f"مسیر ادمین: {server.get('admin_path') or '-'}\n"
                     f"مسیر کاربر: {server.get('user_path') or '-'}"
-                    f"{xui_info}\n"
+                    f"{provider_info}\n"
                     f"کلید دسترسی: {'✅ ثبت شده' if panel['configured'] else '❌ ثبت نشده'}\n"
                     f"سرور پیش‌فرض فروش: {'⭐ بله' if int(server.get('is_default') or 0) else 'خیر'}"
                 )
                 rows = [[InlineKeyboardButton("🔐 ثبت یا تعویض دسترسی پنل", callback_data=f"biz:secret:{server_id}")]]
-                if server["panel_kind"] in ("hiddify", "xui") and panel["configured"] and not int(server.get("is_default") or 0):
+                if server["panel_kind"] in ("hiddify", "xui", "xnet") and panel["configured"] and not int(server.get("is_default") or 0):
                     rows.append([InlineKeyboardButton("⭐ انتخاب به عنوان سرور فروش", callback_data=f"biz:defaultserver:{server_id}")])
                 rows.append([InlineKeyboardButton("↩️ سرورها", callback_data="biz:servers")])
                 await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows)); return
@@ -213,6 +224,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                         if flavor == "sanaei"
                         else "نام کاربری | رمز عبور | Secret Header اختیاری\n"
                              "اگر Secret Header ندارید فقط نام کاربری | رمز عبور را بفرستید."
+                    )
+                elif server["panel_kind"] == "xnet":
+                    context.user_data["biz_flow"] = {
+                        "kind": "xnet_secret",
+                        "server_id": server_id,
+                    }
+                    prompt = (
+                        "دسترسی X-Net را بفرستید:\n"
+                        "فقط API Token\n"
+                        "یا API Token | نام کاربری | رمز عبور\n"
+                        "اگر API Token ندارید: | admin | رمز عبور\n"
+                        "اطلاعات ورود fallback فقط وقتی Token رد شود استفاده می‌شود."
                     )
                 else:
                     context.user_data["biz_flow"] = {
@@ -472,6 +495,27 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     await update.effective_message.delete()
                 except Exception:
                     pass
+            elif kind == "xnet_secret":
+                if len(fields) == 1 and fields[0]:
+                    business.set_xnet_credential(
+                        actor,
+                        server_id=int(flow["server_id"]),
+                        api_token=fields[0],
+                    )
+                elif len(fields) == 3:
+                    business.set_xnet_credential(
+                        actor,
+                        server_id=int(flow["server_id"]),
+                        api_token=fields[0],
+                        username=fields[1] or "admin",
+                        password=fields[2],
+                    )
+                else:
+                    raise ValueError("invalid X-NET credential")
+                try:
+                    await update.effective_message.delete()
+                except Exception:
+                    pass
             elif kind == "server" and 2 <= len(fields) <= 7:
                 panel_kind = fields[1].lower()
                 if panel_kind == "xui":
@@ -486,6 +530,19 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         xui_inbound_ids=fields[4] if len(fields) >= 5 else "",
                         xui_public_origin=fields[5] if len(fields) >= 6 else "",
                         xui_sub_path=fields[6] if len(fields) >= 7 else "",
+                    )
+                elif panel_kind == "xnet":
+                    if len(fields) < 3:
+                        raise ValueError("X-NET endpoint is required")
+                    business.add_server(
+                        actor,
+                        label=fields[0],
+                        panel_kind=panel_kind,
+                        endpoint=fields[2],
+                        xnet_inbound_ids=fields[3] if len(fields) >= 4 else "",
+                        xnet_public_origin=fields[4] if len(fields) >= 5 else "",
+                        xnet_sub_port=int(fields[5] or 0) if len(fields) >= 6 else 0,
+                        xnet_sub_path=fields[6] if len(fields) >= 7 else "",
                     )
                 else:
                     business.add_server(
