@@ -32,7 +32,7 @@ def test_order_receipt_review_creates_only_tenant_subscription(conn, factories) 
     assert order["amount"] == 500 and order["currency"] == "USD"
     receipt = service.submit_receipt(31, order_id=int(order["id"]), method_id=int(method["id"]), reference="tx-1")
     result = service.review_receipt(7001, int(receipt["id"]), approve=True)
-    assert result["status"] == "fulfilled"
+    assert result["status"] == "paid"\n    assert result["subscription_id"] is not None
     subscriptions = service.list_subscriptions(31)
     assert len(subscriptions) == 1
     assert subscriptions[0]["status"] == "pending_provisioning"
