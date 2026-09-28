@@ -1,107 +1,183 @@
 # Operations guide
 
-Version: 0.6.0
+Version: 0.9.2 installer track
 
-## Requirements
+## Supported host
 
-- Linux with systemd
-- Python 3.11 or newer and the `python3-venv` package
-- A dedicated project owner account
-- The project path must be absolute and contain no whitespace
+The one-line bootstrap currently targets Ubuntu/Debian servers with systemd
+and `apt`. It installs Git, curl, CA certificates, Python, venv support and
+pip automatically.
 
-Never place a real token in a command argument, shell history, ticket, or log.
-The installer reads the MasterBot token with hidden terminal input and creates
-`.env` with mode `0600`.
+The bootstrap creates a dedicated unprivileged system account named
+`whitelabel`, clones the project under `/opt/hiddify-whitelabel`, and runs
+all Telegram application services as that account. The service processes do
+not run as root.
 
-## Preview and install
+## One-line install
+
+For a fresh server:
 
 ```bash
-cd /home/mojte/Hiddify-WhiteLabel
-./install.sh --dry-run install
-sudo ./install.sh install
+curl -fsSL https://raw.githubusercontent.com/mojtaba-glx/Hiddify-WhiteLabel/main/bootstrap.sh | sudo bash
 ```
 
-The installer keeps existing `.env` values, installs pinned dependencies into
-`.venv`, applies migrations, renders systemd units and starts:
+The installer asks interactively for:
+
+- MasterBot token (hidden input)
+- Master admin numeric Telegram ID
+
+The encryption key is generated locally and never printed. Runtime data,
+database files, backups and logs are private on disk.
+
+After installation, open the operations manager with:
+
+```bash
+sudo whitelabel
+```
+
+The command points to the current project's `install.sh`, so installer/menu
+updates are picked up automatically when the application is updated.
+
+## Terminal manager
+
+The main menu provides:
+
+1. Install / Repair
+2. Update from GitHub
+3. Restart all bots
+4. Service status
+5. Logs
+6. Health check
+7. Settings
+8. Encrypted backup
+9. Encrypted restore
+10. Database migrations
+11. Start all bots
+12. Stop all bots
+13. Remove systemd services while preserving project/data
+14. Full uninstall
+
+The Settings submenu allows the operator to change the MasterBot token,
+Master admin Telegram ID, and runtime shard count. Secret token input is hidden
+and the helper updates `.env` atomically without printing the token.
+
+The Logs submenu provides recent and live journal output for MasterBot and
+TenantRuntime shards plus a combined warnings/errors view.
+
+## Direct commands
+
+Every important menu operation can also be called directly:
+
+```bash
+sudo whitelabel update
+sudo whitelabel restart
+sudo whitelabel status
+sudo whitelabel health
+sudo whitelabel logs
+sudo whitelabel settings
+sudo whitelabel backup
+sudo whitelabel restore
+sudo whitelabel migrate
+sudo whitelabel token
+sudo whitelabel admin-id
+sudo whitelabel shards
+sudo whitelabel version
+```
+
+## Safe update flow
+
+`sudo whitelabel update`:
+
+1. Refuses to overwrite tracked local source changes.
+2. Fetches `origin/main`.
+3. Updates the checkout.
+4. Installs pinned Python requirements.
+5. Runs the complete offline pytest suite **before downtime**.
+6. If tests fail, restores the previous source commit.
+7. Stops the running bots only after tests pass.
+8. Applies pending database migrations.
+9. Re-renders systemd units and shard instances.
+10. Starts services and runs health checks.
+
+The database, `.env`, runtime state and ignored data directories are not
+replaced by the Git update.
+
+## Service model
+
+The installer manages:
 
 - `hiddify-whitelabel-master.service`
-- `hiddify-whitelabel-runtime@0.service` through
-  `hiddify-whitelabel-runtime@N.service`
+- `hiddify-whitelabel-runtime@0.service` through the configured shard count
 
-`N` is `RUNTIME_SHARD_COUNT - 1`. License jobs run inside MasterBot and do not
-need a separate service.
+License jobs run inside MasterBot; there is no separate license daemon.
 
-If unit installation, startup, or health validation fails, the installer stops
-the new services and restores the previous unit files and their recorded
-enable/active state. Rollback snapshots are private under
-`runtime/install-rollback/`.
-
-## Routine commands
-
-```bash
-sudo ./install.sh start
-sudo ./install.sh stop
-sudo ./install.sh restart
-./install.sh status
-./install.sh health
-```
-
-The interactive menu exposes the same actions. `health` validates the local
-configuration/database and confirms every configured systemd instance is
-active.
+Changing the shard count from the menu re-renders units, disables obsolete
+instances, restarts the runtime set, and finishes with a health check.
 
 ## Encrypted backup
 
 ```bash
-./install.sh backup
+sudo whitelabel backup
 ```
 
-Enter a new passphrase twice. The resulting `backups/*.wlbak` file is mode
-`0600`; its database and `.env` are not readable without that passphrase. Keep
-the passphrase outside the server. A lost passphrase cannot be recovered.
+Enter a backup passphrase twice. The resulting `backups/*.wlbak` contains a
+consistent SQLite snapshot and the environment file, authenticated and
+encrypted by the existing backup subsystem.
 
-For automation, put only the passphrase in a mode-`0600` file and run:
-
-```bash
-.venv/bin/python scripts/backup.py --passphrase-file /secure/path/backup.pass
-```
-
-Do not store the passphrase file inside the project or backup directory.
+Keep the backup passphrase outside the server. It cannot be recovered if lost.
 
 ## Restore
 
 ```bash
-sudo ./install.sh restore
+sudo whitelabel restore
 ```
 
-The installer stops all WhiteLabel services before calling the restore tool.
-Restore rejects an unauthenticated, modified, publicly readable, structurally
-invalid, or migration-incompatible archive. Before replacement it writes the
-current database and `.env` to a private `runtime/rollback/` directory.
+Restore stops all bot services first, authenticates and validates the backup,
+checks SQLite/migrations, saves a private rollback snapshot, restores the
+database/environment atomically, starts all bots and runs health checks.
 
-If `.env` is missing or damaged, use the direct recovery command and explicitly
-provide the database destination when it differs from the default:
+## Token changes
 
 ```bash
-sudo .venv/bin/python scripts/restore.py /secure/backup.wlbak \
-  --database /home/mojte/Hiddify-WhiteLabel/data/whitelabel.db --yes
+sudo whitelabel token
 ```
 
-Then run `sudo ./install.sh start` and `./install.sh health`.
+The new token is hidden while typing. Before editing, the installer saves a
+private temporary copy of `.env`. If MasterBot does not remain active after
+restart, the old environment is restored automatically.
 
-## Manual rollback
+Tenant AdminBot/UserBot tokens are tenant-owned credentials and remain managed
+through the platform provisioning/runtime flows; this terminal action changes
+only the platform MasterBot token.
 
-If an application update fails but systemd rollback has already restored the
-old unit files:
+## Removal
 
-1. Stop services with `sudo ./install.sh stop`.
-2. Restore the last known-good encrypted backup.
-3. Check the project `.env` and `VERSION` without printing secret values.
-4. Start services with `sudo ./install.sh start`.
-5. Run `./install.sh health` and inspect `journalctl` for the affected unit.
-
-Removing units preserves all project data:
+To remove only systemd services and preserve data:
 
 ```bash
-sudo ./install.sh uninstall
+sudo whitelabel uninstall
 ```
+
+For a complete removal, including project files, SQLite database, `.env`,
+backups and logs:
+
+```bash
+sudo whitelabel uninstall-full
+```
+
+Full uninstall requires typing the exact phrase `DELETE ALL`. The installer
+also removes the dedicated `whitelabel` system account when that account owns
+the installation.
+
+## Dry-run checks
+
+The repository keeps safe non-destructive previews for installer development:
+
+```bash
+./install.sh --dry-run install
+./install.sh --dry-run update
+./install.sh --dry-run restart
+./install.sh --dry-run uninstall-full
+```
+
+Dry-run actions never require root and never print secret values.
