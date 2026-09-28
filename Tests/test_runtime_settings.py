@@ -20,6 +20,9 @@ def test_runtime_defaults_and_secret_repr() -> None:
     assert (settings.reconcile_seconds, settings.poll_timeout_seconds) == (15, 20)
     assert settings.start_concurrency == 8
     assert settings.lifecycle_seconds == 180
+    assert settings.smart_sub_host == "127.0.0.1"
+    assert settings.smart_sub_port == 8091
+    assert settings.smart_sub_public_base_url == ""
     assert settings.token_encryption_key not in repr(settings)
     assert not hasattr(settings, "master_bot_token")
 
@@ -34,6 +37,9 @@ def test_runtime_overrides() -> None:
             RUNTIME_POLL_TIMEOUT_SECONDS="25",
             RUNTIME_CACHE_TTL_SECONDS="3",
             RUNTIME_LIFECYCLE_SECONDS="240",
+            SMART_SUB_HOST="0.0.0.0",
+            SMART_SUB_PORT="18091",
+            SMART_SUB_PUBLIC_BASE_URL="https://sub.example.com",
         )
     )
     assert (settings.shard_count, settings.shard_index) == (8, 7)
@@ -42,6 +48,9 @@ def test_runtime_overrides() -> None:
     assert settings.poll_timeout_seconds == 25
     assert settings.license_cache_ttl_seconds == 3
     assert settings.lifecycle_seconds == 240
+    assert settings.smart_sub_host == "0.0.0.0"
+    assert settings.smart_sub_port == 18091
+    assert settings.smart_sub_public_base_url == "https://sub.example.com"
 
 
 @pytest.mark.parametrize(
@@ -58,6 +67,9 @@ def test_runtime_overrides() -> None:
         {"RUNTIME_POLL_TIMEOUT_SECONDS": "4"},
         {"RUNTIME_POLL_TIMEOUT_SECONDS": "51"},
         {"RUNTIME_LIFECYCLE_SECONDS": "59"},
+        {"SMART_SUB_PORT": "0"},
+        {"SMART_SUB_PORT": "65536"},
+        {"SMART_SUB_PUBLIC_BASE_URL": "ftp://invalid.example"},
     ],
 )
 def test_invalid_runtime_settings_fail_closed(change) -> None:
