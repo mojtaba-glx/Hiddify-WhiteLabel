@@ -931,7 +931,7 @@ class TenantBusinessService:
             if fulfillment_order_id is not None:
                 order_changed = self.conn.execute(
                     "UPDATE tenant_orders SET status='fulfilled', updated_at=? "
-                    "WHERE id=? AND tenant_id=? AND status='paid'",
+                    "WHERE id=? AND tenant_id=? AND status IN ('paid','fulfilled')",
                     (now, int(fulfillment_order_id), self.tenant_id),
                 )
                 if order_changed.rowcount != 1:
