@@ -74,6 +74,48 @@ def _display_name(update: Update) -> str:
     return str(getattr(user, "full_name", None) or getattr(user, "first_name", None) or "کاربر")[:120]
 
 
+async def _notify_master_new_receipt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    receipt: dict[str, Any],
+    order: dict[str, Any],
+    method: dict[str, Any],
+) -> None:
+    service = portal(context)
+    username = (
+        f"@{getattr(update.effective_user, 'username', '')}"
+        if update.effective_user and getattr(update.effective_user, "username", None)
+        else "—"
+    )
+    text = (
+        "🧾 رسید پرداخت جدید\n\n"
+        f"مشتری: {_display_name(update)}\n"
+        f"یوزرنیم: {username}\n"
+        f"شناسه تلگرام: {actor_id(update)}\n"
+        f"سفارش: {order['public_id']}\n"
+        f"مبلغ: {int(order['amount']):,} {order['currency']}\n"
+        f"روش: {method['title']}\n\n"
+        "برای بررسی، دکمه زیر را بزنید."
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=int(service.master_admin_id),
+            text=text,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    f"🔎 بررسی رسید #{int(receipt['id'])}",
+                    callback_data=f"payment:receipt:{int(receipt['id'])}",
+                )
+            ]]),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Master receipt notification could not be sent: %s",
+            safe_format_exception(exc),
+        )
+
+
 async def show_customer_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     service = portal(context)
@@ -385,15 +427,22 @@ async def handle_customer_text(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return True
         if kind == "receipt":
-            service.submit_receipt(
+            order_id = int(flow["order_id"])
+            method_id = int(flow["payment_method_id"])
+            receipt = service.submit_receipt(
                 actor,
-                order_id=int(flow["order_id"]),
-                payment_method_id=int(flow["payment_method_id"]),
+                order_id=order_id,
+                payment_method_id=method_id,
                 reference=text,
             )
+            order = service.get_order(actor, order_id)
+            method = service.get_payment_method(method_id, currency=str(order["currency"]))
             context.user_data.pop("customer_flow", None)
+            await _notify_master_new_receipt(
+                update, context, receipt=receipt, order=order, method=method
+            )
             await update.effective_message.reply_text(
-                "✅ رسید ثبت شد و پس از بررسی مدیر نتیجه برای شما ارسال می‌شود.",
+                f"✅ رسید #{int(receipt['id'])} ثبت شد و پس از بررسی مدیر نتیجه برای شما ارسال می‌شود.",
                 reply_markup=customer_main_keyboard(),
             )
             return True
@@ -484,16 +533,25 @@ async def handle_customer_photo(update: Update, context: ContextTypes.DEFAULT_TY
     if update.effective_message is None or not update.effective_message.photo:
         return False
     try:
-        portal(context).submit_receipt(
-            actor_id(update),
-            order_id=int(flow["order_id"]),
-            payment_method_id=int(flow["payment_method_id"]),
+        service = portal(context)
+        actor = actor_id(update)
+        order_id = int(flow["order_id"])
+        method_id = int(flow["payment_method_id"])
+        receipt = service.submit_receipt(
+            actor,
+            order_id=order_id,
+            payment_method_id=method_id,
             reference=str(update.effective_message.caption or "").strip() or None,
             telegram_file_id=str(update.effective_message.photo[-1].file_id),
         )
+        order = service.get_order(actor, order_id)
+        method = service.get_payment_method(method_id, currency=str(order["currency"]))
         context.user_data.pop("customer_flow", None)
+        await _notify_master_new_receipt(
+            update, context, receipt=receipt, order=order, method=method
+        )
         await update.effective_message.reply_text(
-            "✅ تصویر رسید ثبت شد و در صف بررسی مدیر قرار گرفت.",
+            f"✅ تصویر رسید #{int(receipt['id'])} ثبت شد و در صف بررسی مدیر قرار گرفت.",
             reply_markup=customer_main_keyboard(),
         )
     except CustomerPortalError as exc:
