@@ -1,0 +1,41 @@
+name: Publish v0.9.3
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 86cb23cdea047b962cd983b8acfb907e9d47fe85
+      - name: Verify version
+        run: test "$(cat VERSION)" = "0.9.3"
+      - name: Prepare release notes
+        run: |
+          awk '
+            /^## v0\.9\.3/ {found=1; next}
+            /^## / && found {exit}
+            found {print}
+          ' CHANGELOG.md > release-notes.md
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v0.9.3 >/dev/null 2>&1; then
+            gh release edit v0.9.3 \
+              --target 86cb23cdea047b962cd983b8acfb907e9d47fe85 \
+              --title "Hiddify-WhiteLabel v0.9.3" \
+              --notes-file release-notes.md
+          else
+            gh release create v0.9.3 \
+              --target 86cb23cdea047b962cd983b8acfb907e9d47fe85 \
+              --title "Hiddify-WhiteLabel v0.9.3" \
+              --notes-file release-notes.md
+          fi
