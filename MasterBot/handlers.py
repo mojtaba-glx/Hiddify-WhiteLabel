@@ -34,6 +34,8 @@ from MasterBot.views import (
     licenses_view,
     main_menu_keyboard,
     payment_method_detail,
+    platform_customer_detail,
+    platform_customers_view,
     platform_settings_view,
     plan_detail,
     plans_view,
@@ -125,6 +127,27 @@ def _parse_int(raw: str, label: str) -> int:
     if value < 0:
         raise ValueError(f"{label} must be non-negative")
     return value
+
+
+async def _show_platform_customers(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, page_number: int = 0
+) -> None:
+    actor = int(_actor_id(update) or 0)
+    query = str(context.user_data.get("platform_customer_query") or "")
+    page = _portal(context).list_platform_customers(
+        actor, page=page_number, query=query
+    )
+    text, keyboard = platform_customers_view(page, query=query)
+    await _render(update, text, keyboard)
+
+
+async def _show_platform_customer(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, customer_id: int
+) -> None:
+    actor = int(_actor_id(update) or 0)
+    customer = _portal(context).get_platform_customer_admin(actor, int(customer_id))
+    text, keyboard = platform_customer_detail(customer)
+    await _render(update, text, keyboard)
 
 
 async def _show_tenants(
@@ -343,6 +366,47 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 confirm_keyboard("payment_review", f"payment:receipt:{receipt_id}"),
             )
             return
+        if data == "menu:customers":
+            context.user_data.pop("platform_customer_query", None)
+            await _show_platform_customers(update, context)
+            return
+        if data.startswith("customeradmin:page:"):
+            await _show_platform_customers(
+                update, context, _parse_int(data.rsplit(":", 1)[1], "page")
+            )
+            return
+        if data == "customeradmin:search":
+            context.user_data["flow"] = {"kind": "platform_customer_search"}
+            await _render(
+                update,
+                "🔎 نام، یوزرنیم، شناسه تلگرام یا شناسه داخلی کاربر را بفرستید:",
+                back_keyboard("customeradmin:page:0"),
+            )
+            return
+        if data.startswith("customeradmin:view:"):
+            await _show_platform_customer(
+                update, context, _parse_int(data.rsplit(":", 1)[1], "customer id")
+            )
+            return
+        if data.startswith("customeradmin:status:"):
+            _, _, customer_raw, status = data.split(":", 3)
+            customer_id = _parse_int(customer_raw, "customer id")
+            if status not in ("active", "blocked"):
+                raise ValueError("invalid customer status")
+            context.user_data["confirm"] = {
+                "kind": "platform_customer_status",
+                "customer_id": customer_id,
+                "status": status,
+            }
+            await _render(
+                update,
+                "تغییر وضعیت این کاربر را تأیید می‌کنید؟",
+                confirm_keyboard(
+                    "platform_customer_status",
+                    f"customeradmin:view:{customer_id}",
+                ),
+            )
+            return
         if data == "menu:tenants":
             context.user_data.pop("tenant_query", None)
             await _show_tenants(update, context)
@@ -545,6 +609,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             pending = context.user_data.pop("confirm", None)
             if not isinstance(pending, dict) or pending.get("kind") != expected:
                 raise ValueError("confirmation expired")
+            if expected == "platform_customer_status":
+                row = _portal(context).set_platform_customer_status(
+                    actor, int(pending["customer_id"]), str(pending["status"])
+                )
+                await _show_platform_customer(update, context, int(row["id"]))
+                return
             if expected == "tenant_status":
                 row = service.set_tenant_status(
                     actor, int(pending["tenant_id"]), str(pending["status"])
@@ -796,6 +866,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             context.user_data.pop("flow", None)
             await _show_tenant(update, context, int(row["id"]))
+            return
+        if kind == "platform_customer_search":
+            context.user_data.pop("flow", None)
+            context.user_data["platform_customer_query"] = text[:100]
+            await _show_platform_customers(update, context)
             return
         if kind == "tenant_search":
             context.user_data.pop("flow", None)
