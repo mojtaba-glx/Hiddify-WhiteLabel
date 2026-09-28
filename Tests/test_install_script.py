@@ -156,7 +156,7 @@ def test_settings_include_timezone_and_nonsecret_summary() -> None:
 
 def test_admin_change_has_env_rollback() -> None:
     content = (ROOT / "install.sh").read_text(encoding="utf-8")
-    assert "env-before-admin-$$" in content
+    assert 'mktemp "$ROOT_DIR/runtime/env-before-admin.XXXXXX"' in content
     assert "failed after admin ID change; restoring previous .env" in content
 
 
