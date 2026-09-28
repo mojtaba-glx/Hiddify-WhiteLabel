@@ -557,18 +557,36 @@ change_admin_id() {
 
 change_shards() {
     require_root
-    local count
+    local count env_backup
     read_tty count -p "Runtime shard count (1-64): "
-    edit_env_value RUNTIME_SHARD_COUNT "$count"
-    install_units
-    systemctl daemon-reload
-    disable_obsolete_shards
-    enable_services
-    restart_services
-    printf '%s\n' "$(shard_count)" > "$ROOT_DIR/runtime/installed-shard-count"
-    chmod 600 "$ROOT_DIR/runtime/installed-shard-count"
-    health_services
-    echo "OK: runtime shard count updated."
+    env_backup="$ROOT_DIR/runtime/env-before-shards-$$"
+    cp -a "$ENV_FILE" "$env_backup"
+    chmod 600 "$env_backup"
+
+    if ! edit_env_value RUNTIME_SHARD_COUNT "$count"; then
+        rm -f "$env_backup"
+        return 1
+    fi
+
+    if install_units \
+        && systemctl daemon-reload \
+        && disable_obsolete_shards \
+        && enable_services \
+        && restart_services \
+        && health_services; then
+        printf '%s\n' "$(shard_count)" > "$ROOT_DIR/runtime/installed-shard-count"
+        chmod 600 "$ROOT_DIR/runtime/installed-shard-count"
+        rm -f "$env_backup"
+        echo "OK: runtime shard count updated."
+        return 0
+    fi
+
+    echo "ERROR: shard change failed; restoring previous configuration." >&2
+    cp -a "$env_backup" "$ENV_FILE"
+    rm -f "$env_backup"
+    rollback_units || true
+    systemctl daemon-reload || true
+    return 1
 }
 
 logs_menu() {
