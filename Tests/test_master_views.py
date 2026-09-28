@@ -21,6 +21,7 @@ from MasterBot.service import BotIdentity, MasterService, Page
 from MasterBot.views import (
     MAIN_MENU,
     audit_text,
+    warnings_text,
     license_detail,
     main_menu_keyboard,
     tenant_detail,
@@ -121,7 +122,7 @@ def test_access_gate_stops_normal_user_forging_admin_callback(conn) -> None:
     context = SimpleNamespace(application=SimpleNamespace(bot_data={"master_service": service}))
     with pytest.raises(ApplicationHandlerStop):
         asyncio.run(access_gate(update, context))
-    query.answer.assert_awaited_once_with("Access denied", show_alert=True)
+    query.answer.assert_awaited_once_with("دسترسی مجاز نیست.", show_alert=True)
 
 
 def test_access_gate_allows_only_owner(conn) -> None:
@@ -236,7 +237,7 @@ def test_access_gate_blocks_customer_forging_settings_callback(conn) -> None:
     )
     with pytest.raises(ApplicationHandlerStop):
         asyncio.run(access_gate(update, context))
-    query.answer.assert_awaited_once_with("Access denied", show_alert=True)
+    query.answer.assert_awaited_once_with("دسترسی مجاز نیست.", show_alert=True)
 
 
 def test_customer_order_and_service_statuses_are_localized() -> None:
@@ -263,3 +264,47 @@ def test_customer_order_and_service_statuses_are_localized() -> None:
     assert "My Shop" in service_text
     assert "مهلت تمدید" in service_text
     assert "internal-slug" not in service_text
+
+
+def test_master_operational_views_do_not_leak_raw_status_codes() -> None:
+    tenant = {
+        "id": 1,
+        "name": "Tenant",
+        "slug": "tenant-internal",
+        "owner_telegram_id": 5,
+        "status": "active",
+    }
+    text, _ = tenant_detail(
+        tenant,
+        {
+            "admin": True,
+            "user": True,
+            "ready": True,
+            "runtime_status": "ready",
+        },
+    )
+    assert "🟢 فعال" in text
+    assert "اجرای سیستم: 🟢 آماده" in text
+    assert "AdminBot" not in text
+    assert "UserBot" not in text
+    assert "Runtime:" not in text
+
+
+def test_warning_and_audit_views_use_friendly_labels() -> None:
+    warning = warnings_text([{
+        "id": 1,
+        "event_type": "license.expiring",
+        "status": "pending",
+    }])
+    assert "نزدیک‌شدن به انقضای لایسنس" in warning
+    assert "license.expiring" not in warning
+
+    audit = audit_text([{
+        "id": 2,
+        "action": "payment.receipt_review",
+        "entity_type": "payment_receipt",
+        "entity_id": "9",
+    }])
+    assert "بررسی رسید پرداخت" in audit
+    assert "رسید: 9" in audit
+    assert "payment.receipt_review" not in audit
