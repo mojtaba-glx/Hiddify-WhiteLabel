@@ -25,7 +25,7 @@ Hiddify-WhiteLabel/
 ├── Ops/                  # Phase 6 - health, encrypted backup, locks, systemd
 ├── Shared/               # settings, redacted logging, crypto, time, access
 ├── Database/             # connection, repositories, migration runner
-├── Migrations/           # versioned SQL (currently 0001 through 0012)
+├── Migrations/           # versioned SQL (currently 0001 through 0013)
 ├── Tests/                # offline pytest suite, fake tokens only
 ├── scripts/              # migrate helper
 ├── install.sh            # English operations menu and systemd installer
@@ -127,15 +127,17 @@ payment methods, orders, receipts, subscriptions, tickets and smart links.
 The TenantAdminBot manages these records. The TenantUserBot lets its users
 choose a plan, submit a text or photo receipt, view subscriptions, renew an
 existing service and create a support ticket. Live provisioning supports
-Hiddify Manager plus X-UI Sanaei and X-UI Alireza. Payment approval leaves an
+Hiddify Manager, X-UI Sanaei, X-UI Alireza and X-NET. Payment approval leaves an
 order `paid` until the remote operation succeeds, then the order becomes
 `fulfilled`. Failed purchase or renewal fulfillment is retryable. Panel
 credentials remain encrypted at rest and tenant scoped.
 
-X-UI servers store only non-secret routing metadata in `tenant_servers`:
-panel flavor, target inbound ids, public subscription origin and subscription
-path. Sanaei Bearer tokens and Alireza username/password plus optional Xray
-secret headers are encrypted in `tenant_panel_credentials`.
+X-UI/X-NET servers store only non-secret routing metadata in
+`tenant_servers`: provider/flavor, target inbound ids and public subscription
+routing. Sanaei Bearer tokens, Alireza username/password plus optional Xray
+secret headers, and X-NET API-token/fallback-login material are encrypted in
+`tenant_panel_credentials`. X-NET keeps its management API endpoint separate
+from the public subscription listener (default port 2096 + `/sub`).
 
 Subscription usage and last-online state are synchronized periodically. Time-
 or quota-expired users are verified disabled on their provider before the local
@@ -194,8 +196,8 @@ stop the other tenant bots in that shard.
 
 The tenant runtime includes tenant-scoped inventory, sale plans, payment
 instructions, receipts, subscriptions, tickets and smart-link flows. Hiddify,
-X-UI Sanaei and X-UI Alireza now implement the live provider boundary for
-provisioning, renewal, enable/disable, deletion, usage/last-online sync and
+X-UI Sanaei, X-UI Alireza and X-NET now implement the live provider boundary
+for provisioning, renewal, enable/disable, deletion, usage/last-online sync and
 native subscription links. Staged production drills with real test panels are
 kept separate from the offline CI suite.
 

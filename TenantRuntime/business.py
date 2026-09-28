@@ -99,19 +99,33 @@ class TenantBusinessService:
         xui_inbound_ids: str = "",
         xui_public_origin: str = "",
         xui_sub_path: str = "",
+        xnet_inbound_ids: str = "",
+        xnet_public_origin: str = "",
+        xnet_sub_port: int = 0,
+        xnet_sub_path: str = "",
     ) -> dict[str, Any]:
         self._admin(actor_id)
-        panel_kind = str(panel_kind or "").strip().lower()
-        if panel_kind not in ("manual", "hiddify", "xui"):
+        provider_kind = str(panel_kind or "").strip().lower()
+        if provider_kind not in ("manual", "hiddify", "xui", "xnet"):
             raise ValueError("invalid panel kind")
+        # The original tenant_servers CHECK predates X-NET. Keep the legacy
+        # value valid and route via provider_kind instead of rebuilding an FK
+        # parent table during a production upgrade.
+        legacy_kind = (
+            provider_kind
+            if provider_kind in ("manual", "hiddify", "xui")
+            else "manual"
+        )
+
         flavor = str(xui_flavor or "").strip().lower()
-        if panel_kind == "xui" and flavor not in ("sanaei", "alireza"):
+        if provider_kind == "xui" and flavor not in ("sanaei", "alireza"):
             raise ValueError("invalid X-UI flavor")
-        if panel_kind != "xui":
+        if provider_kind != "xui":
             flavor = ""
-        inbound_ids = str(xui_inbound_ids or "").strip().replace("،", ",")
-        if inbound_ids:
-            for part in inbound_ids.replace(" ", ",").split(","):
+
+        xui_ids = str(xui_inbound_ids or "").strip().replace("،", ",")
+        if xui_ids:
+            for part in xui_ids.replace(" ", ",").split(","):
                 if not part:
                     continue
                 try:
@@ -120,48 +134,93 @@ class TenantBusinessService:
                     raise ValueError("invalid X-UI inbound ids") from exc
                 if value < 0:
                     raise ValueError("invalid X-UI inbound ids")
-        sub_path = str(xui_sub_path or "").strip()
-        if panel_kind == "xui" and not sub_path:
-            sub_path = "/sub/"
+        xui_path = str(xui_sub_path or "").strip()
+        if provider_kind == "xui" and not xui_path:
+            xui_path = "/sub/"
+
+        xnet_ids = str(xnet_inbound_ids or "").strip().replace("،", ",")
+        if provider_kind == "xnet":
+            # X-NET inbound ids may be UUID-like strings (e.g. in-9457dabf),
+            # while "0" means all active inbounds.
+            if any(not part.strip() for part in xnet_ids.split(",")) and xnet_ids:
+                raise ValueError("invalid X-NET inbound ids")
+        else:
+            xnet_ids = ""
+        port = int(xnet_sub_port or 0)
+        if port < 0 or port > 65535:
+            raise ValueError("invalid X-NET subscription port")
+        xnet_path = str(xnet_sub_path or "").strip()
+        if provider_kind == "xnet" and not xnet_path:
+            xnet_path = "sub"
+
         now = iso_utc(utcnow())
         with transaction(self.conn):
             cursor = self.conn.execute(
                 "INSERT INTO tenant_servers "
-                "(tenant_id, label, panel_kind, endpoint, admin_path, user_path, "
-                "xui_flavor, xui_inbound_ids, xui_public_origin, xui_sub_path, "
+                "(tenant_id, label, panel_kind, provider_kind, endpoint, "
+                "admin_path, user_path, xui_flavor, xui_inbound_ids, "
+                "xui_public_origin, xui_sub_path, xnet_inbound_ids, "
+                "xnet_public_origin, xnet_sub_port, xnet_sub_path, "
                 "status, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "'active', ?, ?)",
                 (
                     self.tenant_id,
                     _text(label, 80),
-                    panel_kind,
+                    legacy_kind,
+                    provider_kind,
                     _text(endpoint, 250, required=False) or None,
                     _text(admin_path, 160, required=False) or None,
                     _text(user_path, 160, required=False) or None,
                     flavor or None,
-                    _text(inbound_ids, 160, required=False) or None,
+                    _text(xui_ids, 160, required=False) or None,
                     _text(xui_public_origin, 250, required=False) or None,
-                    _text(sub_path, 160, required=False) or None,
+                    _text(xui_path, 160, required=False) or None,
+                    _text(xnet_ids, 320, required=False) or None,
+                    _text(xnet_public_origin, 250, required=False) or None,
+                    port or None,
+                    _text(xnet_path, 160, required=False) or None,
                     now,
                     now,
                 ),
             )
         return self.server(int(cursor.lastrowid or 0))
+    @staticmethod
+    def _server_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        result = dict(row)
+        legacy = str(result.get("panel_kind") or "manual").strip().lower()
+        provider = str(result.get("provider_kind") or legacy).strip().lower()
+        result["legacy_panel_kind"] = legacy
+        result["panel_kind"] = provider
+        return result
+
     def server(self, server_id: int) -> dict[str, Any]:
-        row = self.conn.execute("SELECT * FROM tenant_servers WHERE id = ? AND tenant_id = ?", (int(server_id), self.tenant_id)).fetchone()
+        row = self.conn.execute(
+            "SELECT * FROM tenant_servers WHERE id = ? AND tenant_id = ?",
+            (int(server_id), self.tenant_id),
+        ).fetchone()
         if row is None:
             raise TenantBusinessError("server not found")
-        return dict(row)
-
+        return self._server_dict(row)
     def list_servers(self) -> list[dict[str, Any]]:
-        return [dict(row) for row in self.conn.execute("SELECT * FROM tenant_servers WHERE tenant_id = ? ORDER BY id DESC", (self.tenant_id,)).fetchall()]
-
+        return [
+            self._server_dict(row)
+            for row in self.conn.execute(
+                "SELECT * FROM tenant_servers "
+                "WHERE tenant_id = ? ORDER BY id DESC",
+                (self.tenant_id,),
+            ).fetchall()
+        ]
     def set_default_server(self, actor_id: int, *, server_id: int) -> dict[str, Any]:
         """Choose the only server automatic sales provisioning may target."""
         self._admin(actor_id)
         server = self.server(int(server_id))
         kind = str(server["panel_kind"])
-        if server["status"] != "active" or kind not in ("hiddify", "xui"):
+        if server["status"] != "active" or kind not in (
+            "hiddify",
+            "xui",
+            "xnet",
+        ):
             raise TenantBusinessError(
                 "default provisioning server must be an active supported panel"
             )
@@ -182,7 +241,8 @@ class TenantBusinessService:
             changed = self.conn.execute(
                 "UPDATE tenant_servers SET is_default=1, updated_at=? "
                 "WHERE id=? AND tenant_id=? AND status='active' "
-                "AND panel_kind IN ('hiddify','xui')",
+                "AND COALESCE(provider_kind, panel_kind) "
+                "IN ('hiddify','xui','xnet')",
                 (now, int(server_id), self.tenant_id),
             )
             if changed.rowcount != 1:
@@ -192,14 +252,16 @@ class TenantBusinessService:
         return self.server(int(server_id))
     def _provisioning_server(self) -> dict[str, Any]:
         rows = [
-            dict(row)
+            self._server_dict(row)
             for row in self.conn.execute(
                 "SELECT s.* FROM tenant_servers s "
                 "JOIN tenant_panel_credentials c "
                 "ON c.server_id=s.id AND c.tenant_id=s.tenant_id "
                 "WHERE s.tenant_id=? AND s.status='active' "
-                "AND (s.panel_kind='hiddify' OR "
-                "(s.panel_kind='xui' AND s.xui_flavor IN ('sanaei','alireza'))) "
+                "AND (COALESCE(s.provider_kind,s.panel_kind)='hiddify' OR "
+                "(COALESCE(s.provider_kind,s.panel_kind)='xui' "
+                "AND s.xui_flavor IN ('sanaei','alireza')) OR "
+                "COALESCE(s.provider_kind,s.panel_kind)='xnet') "
                 "ORDER BY s.is_default DESC, s.id ASC",
                 (self.tenant_id,),
             ).fetchall()
@@ -337,6 +399,47 @@ class TenantBusinessService:
         ).fetchone()
         return {"server_id": int(server_id), "configured": row is not None}
 
+    def set_xnet_credential(
+        self,
+        actor_id: int,
+        *,
+        server_id: int,
+        api_token: str = "",
+        username: str = "admin",
+        password: str = "",
+    ) -> dict[str, Any]:
+        """Store X-NET API token and optional JWT-fallback login encrypted."""
+        self._admin(actor_id)
+        server = self.server(server_id)
+        if str(server["panel_kind"]) != "xnet":
+            raise TenantBusinessError("server is not X-NET")
+        if not str(server.get("endpoint") or "").strip():
+            raise TenantBusinessError("server has no configured panel endpoint")
+        token = str(api_token or "").strip()
+        user = str(username or "admin").strip() or "admin"
+        passwd = str(password or "").strip()
+        if not token and not passwd:
+            raise TenantBusinessError(
+                "X-NET API token or fallback password is required"
+            )
+        material = {
+            "version": 1,
+            "provider": "xnet",
+            "api_token": token,
+            "username": user,
+            "password": passwd,
+        }
+        serialized = json.dumps(
+            material, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+        )
+        try:
+            return self._store_panel_secret(
+                server_id=int(server_id), secret=serialized
+            )
+        finally:
+            serialized = ""
+            material.clear()
+
     def _panel_target(self, server: dict[str, Any]) -> PanelTarget:
         return PanelTarget(
             kind=str(server.get("panel_kind") or "").strip().lower(),
@@ -347,22 +450,29 @@ class TenantBusinessService:
             xui_inbound_ids=str(server.get("xui_inbound_ids") or "").strip(),
             xui_public_origin=str(server.get("xui_public_origin") or "").strip(),
             xui_sub_path=str(server.get("xui_sub_path") or "").strip(),
+            xnet_inbound_ids=str(server.get("xnet_inbound_ids") or "").strip(),
+            xnet_public_origin=str(server.get("xnet_public_origin") or "").strip(),
+            xnet_sub_port=int(server.get("xnet_sub_port") or 0),
+            xnet_sub_path=str(server.get("xnet_sub_path") or "").strip(),
         )
     def _panel_material(
         self, server_id: int
     ) -> tuple[dict[str, Any], PanelTarget, str]:
         server = self.server(server_id)
         endpoint = str(server.get("endpoint") or "").strip()
+        kind = str(server["panel_kind"])
         if (
             str(server["status"]) != "active"
             or not endpoint
-            or str(server["panel_kind"]) == "manual"
+            or kind == "manual"
         ):
             raise TenantBusinessError("server is not ready for panel provisioning")
-        if str(server["panel_kind"]) == "xui" and str(
+        if kind == "xui" and str(
             server.get("xui_flavor") or ""
         ) not in ("sanaei", "alireza"):
             raise TenantBusinessError("X-UI flavor is not configured")
+        if kind not in ("hiddify", "xui", "xnet"):
+            raise TenantBusinessError("panel provider is not supported")
         if self.secret_cipher is None:
             raise TenantBusinessError("panel credential encryption is unavailable")
         row = self.conn.execute(
