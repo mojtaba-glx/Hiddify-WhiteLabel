@@ -1478,6 +1478,7 @@ class TenantBusinessService:
         enforcement_pending = False
         enforcement_error = None
 
+        disabled_server_ids: set[int] = set()
         if due:
             disable_failures = 0
             # Enforce every mapping, including those whose usage read failed.
@@ -1491,6 +1492,7 @@ class TenantBusinessService:
                         external_ref=str(mapping["external_ref"]),
                         enabled=False,
                     )
+                    disabled_server_ids.add(int(mapping["server_id"]))
                 except (PanelError, TenantBusinessError):
                     disable_failures += 1
                     with transaction(self.conn):
@@ -1519,6 +1521,21 @@ class TenantBusinessService:
         expired_at = now if state == "expired" else None
 
         with transaction(self.conn):
+            if due and disabled_server_ids:
+                placeholders = ",".join("?" for _ in disabled_server_ids)
+                node_state = "expired" if state == "expired" else "disabled"
+                self.conn.execute(
+                    "UPDATE tenant_subscription_nodes "
+                    f"SET status=?, updated_at=? WHERE tenant_id=? "
+                    f"AND subscription_id=? AND server_id IN ({placeholders})",
+                    (
+                        node_state,
+                        now,
+                        self.tenant_id,
+                        int(subscription_id),
+                        *sorted(disabled_server_ids),
+                    ),
+                )
             for mapping, usage in snapshots:
                 self.conn.execute(
                     "UPDATE tenant_subscription_nodes "
@@ -1529,7 +1546,11 @@ class TenantBusinessService:
                         (
                             "expired"
                             if state == "expired"
-                            else ("active" if bool(usage.active) else "disabled")
+                            else (
+                                "disabled"
+                                if due and int(mapping["server_id"]) in disabled_server_ids
+                                else ("active" if bool(usage.active) else "disabled")
+                            )
                         ),
                         max(0, int(usage.usage_bytes)),
                         usage.last_online,
