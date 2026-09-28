@@ -503,12 +503,14 @@ update_action() {
     if [[ "$update_failed" -ne 0 ]]; then
         echo "ERROR: update failed after snapshot; restoring v$old_version." >&2
         stop_services || true
-        as_service_user git -C "$ROOT_DIR" reset --hard "$old_sha" || true
-        ensure_venv || true
+        # Restore data before resetting source: update_snapshot.py belongs to
+        # the candidate version and may not exist in the previous release.
         as_service_user "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/update_snapshot.py" restore "$snapshot_dir" || {
             echo "CRITICAL: automatic database/environment rollback failed." >&2
             return 1
         }
+        as_service_user git -C "$ROOT_DIR" reset --hard "$old_sha" || true
+        ensure_venv || true
         install_units || true
         systemctl daemon-reload || true
         disable_obsolete_shards || true
