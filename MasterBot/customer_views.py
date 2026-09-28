@@ -179,6 +179,18 @@ def orders_text(orders: Iterable[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def orders_keyboard(orders: Iterable[dict[str, Any]]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in orders:
+        if item["status"] == "pending_payment":
+            rows.append([InlineKeyboardButton(
+                f"❌ لغو {item['public_id']}",
+                callback_data=f"customer:cancelorder:{int(item['id'])}",
+            )])
+    rows.append([InlineKeyboardButton("🏠 منوی مشتری", callback_data="customer:home")])
+    return InlineKeyboardMarkup(rows)
+
+
 def features_text(plans: Iterable[dict[str, Any]]) -> str:
     rows = list(plans)
     lines = [
