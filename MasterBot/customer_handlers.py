@@ -113,10 +113,26 @@ async def _show_plans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
     plans = service.list_public_plans()
-    text = "🛒 خرید ربات\n\nپلن موردنظر را انتخاب کنید:"
     if not plans:
-        text = "🛒 خرید ربات\n\nدر حال حاضر پلن فعالی برای فروش ثبت نشده است."
-    await render(update, text, plans_keyboard(plans))
+        await render(
+            update,
+            "🛒 خرید ربات\n\nدر حال حاضر پلن فعالی برای فروش ثبت نشده است.",
+            plans_keyboard([]),
+        )
+        return
+    if len(plans) == 1:
+        plan = plans[0]
+        await render(
+            update,
+            plan_text(plan),
+            plan_keyboard(int(plan["id"])),
+        )
+        return
+    await render(
+        update,
+        "🛒 خرید ربات\n\nپلن موردنظر را انتخاب کنید:",
+        plans_keyboard(plans),
+    )
 
 
 async def _show_services(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
