@@ -389,3 +389,67 @@ def test_customer_cannot_adjust_any_wallet(portal) -> None:
         portal.adjust_customer_wallet(
             101, int(customer["id"]), currency="USD", amount=10
         )
+
+
+def test_owner_can_select_specific_trial_plan(portal, factories) -> None:
+    first = factories.plan(name="Trial A", price=100)
+    second = factories.plan(name="Trial B", price=200)
+    portal.configure_plan_commerce(
+        9001, int(first["id"]), currency="USD", is_public=True, trial_days=3
+    )
+    portal.configure_plan_commerce(
+        9001, int(second["id"]), currency="USD", is_public=True, trial_days=7
+    )
+
+    settings = portal.set_trial_plan(9001, int(second["id"]))
+    assert settings["trial_plan_id"] == int(second["id"])
+    assert settings["trial_plan_name"] == "Trial B"
+
+    portal.register_customer(101, display_name="Trial User")
+    order = portal.claim_trial(101)
+    assert int(order["plan_id"]) == int(second["id"])
+    assert int(order["trial_days"]) == 7
+
+
+def test_trial_plan_must_be_public_active_and_have_trial_days(portal, factories) -> None:
+    plan = factories.plan(name="Not Eligible", price=10)
+    portal.configure_plan_commerce(
+        9001, int(plan["id"]), currency="USD", is_public=False, trial_days=3
+    )
+    with pytest.raises(ValueError):
+        portal.set_trial_plan(9001, int(plan["id"]))
+
+    portal.configure_plan_commerce(
+        9001, int(plan["id"]), currency="USD", is_public=True, trial_days=0
+    )
+    with pytest.raises(ValueError):
+        portal.set_trial_plan(9001, int(plan["id"]))
+
+
+def test_selected_trial_plan_fails_closed_when_it_becomes_ineligible(portal, factories) -> None:
+    plan = factories.plan(name="Selected Trial", price=10)
+    portal.configure_plan_commerce(
+        9001, int(plan["id"]), currency="USD", is_public=True, trial_days=2
+    )
+    portal.set_trial_plan(9001, int(plan["id"]))
+    portal.configure_plan_commerce(
+        9001, int(plan["id"]), currency="USD", is_public=False, trial_days=2
+    )
+    portal.register_customer(101, display_name="Trial User")
+
+    with pytest.raises(CustomerPortalError):
+        portal.claim_trial(101)
+
+
+def test_trial_plan_can_return_to_automatic_selection(portal, factories) -> None:
+    plan = factories.plan(name="Auto Trial", price=25)
+    portal.configure_plan_commerce(
+        9001, int(plan["id"]), currency="USD", is_public=True, trial_days=4
+    )
+    portal.set_trial_plan(9001, int(plan["id"]))
+    settings = portal.set_trial_plan(9001, None)
+
+    assert settings["trial_plan_id"] is None
+    portal.register_customer(101, display_name="Auto User")
+    order = portal.claim_trial(101)
+    assert int(order["plan_id"]) == int(plan["id"])
