@@ -1,0 +1,211 @@
+# Hiddify-WhiteLabel
+
+White-Label SaaS for selling VPN subscriptions: each customer (tenant) gets
+two dedicated bots (`TenantAdminBot` + `TenantUserBot`). The platform owner
+operates the same `MasterBot` as a role-based PlatformBot: the owner gets
+the management panel and normal Telegram users get the customer portal.
+
+> Scope status: **Phases 0–9 foundation done** (design, independent infrastructure,
+> owner-only MasterBot, automated license jobs, atomic tenant provisioning,
+> shared sharded TenantRuntime, and production installation/operations).
+
+## Layout
+
+```text
+Hiddify-WhiteLabel/
+├── MasterBot/            # owner UI + customer storefront
+├── TenantRuntime/        # Phase 5 - shared sharded AdminBot/UserBot runtime
+│   ├── AdminBot/
+│   └── UserBot/
+├── Gateway/              # Phase 5 - secure bot catalog and update policy
+├── LicenseService/       # Phase 3 - evaluator, notifications and runtime gate
+├── Provisioning/         # Phase 4 - atomic tenant/bot setup and handoff
+├── Ops/                  # Phase 6 - health, encrypted backup, locks, systemd
+├── Shared/               # settings, redacted logging, crypto, time, access
+├── Database/             # connection, repositories, migration runner
+├── Migrations/           # versioned SQL (currently 0001 through 0006)
+├── Tests/                # offline pytest suite, fake tokens only
+├── scripts/              # migrate helper
+├── install.sh            # English operations menu and systemd installer
+├── docs/                 # ARCHITECTURE, THREAT_MODEL, ROADMAP, decisions/
+├── .env.example          # empty template, no secrets
+├── requirements.txt      # pinned deps
+└── VERSION               # 0.9.0
+```
+
+Reference project `Hiddify-SellBot` was used **read-only** to understand
+Hiddify/X-UI, sales, payment, ticket and service logic. Nothing was copied;
+this repo is independent. No `AgentBot` exists here by design.
+
+## Security rules (enforced)
+
+- Bot tokens are **never** stored/logged in plain text. Only Fernet
+  ciphertext (`encrypted_token`) + SHA-256 `token_fingerprint` + a safe
+  `token_tail` (last 4 chars) live in DB.
+- Webhook secrets are stored only as a SHA-256 hash (`webhook_secret_hash`)
+  and compared in constant time.
+- All timestamps stored in **UTC**; display may use `Asia/Tehran`.
+- All SQL is parameterized; renew/suspend run in explicit transactions
+  (autocommit connections + `BEGIN IMMEDIATE`), with CAS for concurrent renew.
+- Logs and exceptions are redacted at the formatter level (tokens, `gAAAA…`
+  payloads, `token=/secret=` assignments and JSON/dict reprs, including
+  tracebacks from `logger.exception`).
+- The DB file and its WAL/SHM sidecars are `0600`; the data dir is `0700`.
+- Test tokens are fake and offline; no real Telegram calls.
+
+## Storage engine
+
+The current implementation is **SQLite only**. The schema and repository
+layer use broadly portable SQL, so a future PostgreSQL adapter is feasible,
+but it is *not* included: a Postgres driver adapter and a separate
+PostgreSQL migration set are required and tracked as future work
+(see `docs/decisions/ADR-0002-sqlite-postgres.md`). Do not treat this
+snapshot as production-PostgreSQL-ready.
+
+## Run tests (offline, no token, no network)
+
+```bash
+cd /home/mojte/Hiddify-WhiteLabel
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+pytest -q
+```
+
+## Configure and run MasterBot
+
+```bash
+cp .env.example .env
+chmod 600 .env
+# fill MASTER_BOT_TOKEN, MASTER_ADMIN_ID, TOKEN_ENCRYPTION_KEY
+python3 scripts/migrate.py --db data/whitelabel.db
+python3 -m MasterBot
+```
+
+MasterBot verifies tenant tokens with Telegram `getMe` before encrypting and
+storing them. The platform-owner menu manages tenants, plans, licenses,
+payments, statistics, warnings and audit history. Destructive state changes
+use a confirmation step and data is disabled/archived rather than physically
+deleted.
+
+## Customer portal and payments
+
+Any ordinary Telegram user sees a Persian customer menu with `خرید ربات`,
+`سرویس‌های من`, `راه‌اندازی ربات`, `کیف پول`, `راهنمای استفاده`, `ویژگی‌ها`
+and `لایسنس تست`. The owner sees only the administration menu. Customer
+callbacks are namespaced and the global access gate rejects copied owner
+callbacks before they reach a handler.
+
+The owner configures card-to-card and cryptocurrency payment destinations
+from `💳 پرداخت‌ها`. A customer chooses a public plan, receives the selected
+payment destination, then submits a tracking code or a photo receipt. The
+owner must make a live final approval; a receipt cannot be approved twice.
+Card numbers and crypto addresses are public payment instructions, while no
+payment-provider API credential is stored in this project.
+
+Wallet deposits are credited only after a reviewed receipt. Wallet spending,
+payment approval, renewal and order completion are explicit SQLite
+transactions. The price, currency and duration are always read from the plan
+in the database, never from a Telegram callback. A plan can be configured as
+public/private, assigned a currency and given a one-time trial duration from
+its `🛍 فروش و لایسنس تست` action.
+
+After a purchase is paid, the customer submits a shop name/slug and two
+BotFather tokens. Each token is verified, its message is deleted immediately,
+and the tenant, two encrypted bot credentials, runtime namespace and active
+license are provisioned together. The customer receives each webhook secret
+only once in protected Telegram content.
+
+## Tenant AdminBot and UserBot
+
+Each provisioned tenant now has its own business records in the shared
+database, always scoped by `tenant_id`: servers, nodes, sale plans, end users,
+payment methods, orders, receipts, subscriptions, tickets and smart links.
+The TenantAdminBot manages these records. The TenantUserBot lets its users
+choose a plan, submit a text or photo receipt, view subscriptions and create a
+support ticket. A reviewed receipt produces a subscription in
+`pending_provisioning`; the actual Hiddify/X-UI adapter remains a separate
+future integration, so no panel credential is accepted or stored yet.
+
+The MasterBot JobQueue runs the Phase-3 evaluator at the configured interval.
+It advances expiry/grace states, suspends expired licenses, persists 7/3/1-day
+warnings, retries failed sends and recovers abandoned worker leases. Runtime
+license checks do not depend on the MasterBot being online: they read the same
+SQLite state through a fail-closed, short-lived cache. The gate also requires
+the tenant runtime namespace to be `ready`.
+
+## Provision a complete tenant
+
+Use the `🚀 راه‌اندازی کامل` flow in MasterBot, or run the English-terminal
+helper below. Both Telegram bot tokens are read as hidden input by the CLI and
+are never accepted as command-line arguments:
+
+```bash
+./scripts/create-tenant.sh
+```
+
+Provisioning verifies both bots with Telegram first. Tenant, namespace, both
+encrypted bot rows, two distinct webhook-secret hashes and the audit record are
+then committed together. The CLI stores the two raw webhook secrets once in a
+new `0600` handoff file under a `0700` ignored runtime directory and prints only
+its path. Configure the webhooks and securely delete that file afterward.
+
+Disabling a tenant preserves its namespace, bot rows, licenses and future
+tenant-owned data. Re-enabling requires both bots to be active and never
+bypasses license expiry.
+
+## Run the shared tenant bots
+
+Tenant bots use a fixed number of runtime processes. A shard loads only its
+assigned bot ids, validates each encrypted token fingerprint, and runs those
+Telegram Applications in one asyncio process. A periodic reconciler starts new
+bots and restarts changed tokens without creating tenant folders or processes.
+
+Set the same `RUNTIME_SHARD_COUNT` for every process and use one unique index
+from zero through `count - 1`:
+
+```bash
+RUNTIME_SHARD_COUNT=4 RUNTIME_SHARD_INDEX=0 python3 -m TenantRuntime
+```
+
+Run the equivalent command for indexes 1, 2 and 3. The Phase-6 installer
+creates and manages those instances automatically.
+
+Before every update, the runtime revalidates the bot route and applies the
+tenant, owner, runtime-readiness and license gates. State is durable and keyed
+by `(tenant_id, bot_role, telegram_user_id)`. Database or credential errors
+fail closed for the affected update, while failure to start one bot does not
+stop the other tenant bots in that shard.
+
+The wired AdminBot/UserBot currently provide the isolated licensed runtime
+shell, menu and status flow. VPN panel, sales, payment and ticket business
+modules remain separate product integration work; they have not been copied
+from `Hiddify-SellBot`.
+
+## Install and operate
+
+The terminal interface is English-only. Review `docs/OPERATIONS.md`, then run:
+
+```bash
+sudo ./install.sh
+```
+
+The menu installs/updates dependencies, creates a private `.env`, applies
+migrations, installs one MasterBot service plus the configured runtime shard
+instances, and verifies database/service health. It also provides start, stop,
+restart, status, encrypted backup, validated restore and unit removal actions.
+
+For an offline preview which changes neither systemd nor project data:
+
+```bash
+./install.sh --dry-run install
+```
+
+Backups contain a consistent SQLite snapshot and `.env`, authenticated and
+encrypted under an operator passphrase. Restore requires stopped services,
+checks archive authentication, file hashes, SQLite integrity, foreign keys,
+environment validity and migration checksums, and saves the current files in a
+private rollback directory before atomic replacement.
+
+No commit/tag/push, live systemd installation or live Telegram polling was
+performed while building this phase.

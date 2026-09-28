@@ -1,0 +1,221 @@
+"""Pure text and keyboard rendering for the MasterBot UI."""
+
+from __future__ import annotations
+
+from typing import Any, Iterable
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+from MasterBot.service import Page
+from Shared.timeutils import format_tehran, parse_utc
+
+
+MAIN_MENU = (
+    ("👥 مشتریان", "menu:tenants"),
+    ("🔐 لایسنس‌ها", "menu:licenses"),
+    ("📦 پلن‌ها", "menu:plans"),
+    ("📊 آمار", "menu:stats"),
+    ("💳 پرداخت‌ها", "menu:payments"),
+    ("⚠️ هشدارها", "menu:warnings"),
+    ("🧾 تاریخچه", "menu:audit"),
+    ("⚙️ تنظیمات", "menu:settings"),
+)
+
+
+def main_menu_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(MAIN_MENU[i][0], callback_data=MAIN_MENU[i][1])]
+        for i in range(len(MAIN_MENU))
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def back_keyboard(callback: str = "menu:main") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("↩️ بازگشت", callback_data=callback)]])
+
+
+def _pager(prefix: str, page: Page) -> list[InlineKeyboardButton]:
+    buttons: list[InlineKeyboardButton] = []
+    if page.has_previous:
+        buttons.append(
+            InlineKeyboardButton("⬅️", callback_data=f"{prefix}:{page.page - 1}")
+        )
+    buttons.append(InlineKeyboardButton(f"{page.page + 1}", callback_data="noop"))
+    if page.has_next:
+        buttons.append(
+            InlineKeyboardButton("➡️", callback_data=f"{prefix}:{page.page + 1}")
+        )
+    return buttons
+
+
+def tenants_view(page: Page, *, query: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    title = "👥 مدیریت مشتریان"
+    if query:
+        title += f"\n🔎 نتیجه جست‌وجو: {query[:40]}"
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in page.items:
+        icon = "🟢" if item["status"] == "active" else "🔴"
+        rows.append(
+            [InlineKeyboardButton(
+                f"{icon} {item['name']} · {item['slug']}",
+                callback_data=f"tenant:view:{int(item['id'])}",
+            )]
+        )
+    if not rows:
+        title += "\n\nمشتری‌ای پیدا نشد."
+    rows.append(_pager("tenant:page", page))
+    rows.append([
+        InlineKeyboardButton("🚀 راه‌اندازی کامل", callback_data="tenant:provision"),
+    ])
+    rows.append([
+        InlineKeyboardButton("➕ مشتری جدید", callback_data="tenant:new"),
+        InlineKeyboardButton("🔎 جست‌وجو", callback_data="tenant:search"),
+    ])
+    rows.append([InlineKeyboardButton("↩️ منوی اصلی", callback_data="menu:main")])
+    return title, InlineKeyboardMarkup(rows)
+
+
+def tenant_detail(row: dict[str, Any], readiness: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        f"👤 مشتری #{int(row['id'])}\n\n"
+        f"نام: {row['name']}\n"
+        f"شناسه: {row['slug']}\n"
+        f"مالک تلگرام: {int(row['owner_telegram_id'])}\n"
+        f"وضعیت: {row['status']}\n"
+        f"AdminBot: {'✅' if readiness['admin'] else '❌'}\n"
+        f"UserBot: {'✅' if readiness['user'] else '❌'}\n"
+        f"Runtime: {readiness.get('runtime_status', 'missing')}\n"
+        f"آماده اجرا: {'✅' if readiness.get('ready') else '❌'}"
+    )
+    tenant_id = int(row["id"])
+    next_status = "suspended" if row["status"] == "active" else "active"
+    status_label = "⛔ تعلیق" if next_status == "suspended" else "✅ فعال‌سازی"
+    rows = [
+        [
+            InlineKeyboardButton("🤖 ثبت AdminBot", callback_data=f"tenant:bot:{tenant_id}:admin"),
+            InlineKeyboardButton("🛍 ثبت UserBot", callback_data=f"tenant:bot:{tenant_id}:user"),
+        ],
+    ]
+    secret_buttons: list[InlineKeyboardButton] = []
+    if readiness["admin"]:
+        secret_buttons.append(
+            InlineKeyboardButton("🔑 Secret Admin", callback_data=f"tenant:webhook:{tenant_id}:admin")
+        )
+    if readiness["user"]:
+        secret_buttons.append(
+            InlineKeyboardButton("🔑 Secret User", callback_data=f"tenant:webhook:{tenant_id}:user")
+        )
+    if secret_buttons:
+        rows.append(secret_buttons)
+    rows.extend([
+        [InlineKeyboardButton("✏️ ویرایش", callback_data=f"tenant:edit:{tenant_id}")],
+        [InlineKeyboardButton(status_label, callback_data=f"tenant:status:{tenant_id}:{next_status}")],
+        [InlineKeyboardButton("↩️ مشتریان", callback_data="tenant:page:0")],
+    ])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def plans_view(page: Page, *, query: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in page.items:
+        rows.append([InlineKeyboardButton(
+            f"📦 {item['name']} · {int(item['duration_days'])} روز · {item['status']}",
+            callback_data=f"plan:view:{int(item['id'])}",
+        )])
+    text = "📦 مدیریت پلن‌ها"
+    if query:
+        text += f"\n🔎 نتیجه جست‌وجو: {query[:40]}"
+    text += "" if rows else "\n\nپلنی ثبت نشده است."
+    rows.append(_pager("plan:page", page))
+    rows.append([
+        InlineKeyboardButton("➕ پلن جدید", callback_data="plan:new"),
+        InlineKeyboardButton("🔎 جست‌وجو", callback_data="plan:search"),
+    ])
+    rows.append([InlineKeyboardButton("↩️ منوی اصلی", callback_data="menu:main")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def plan_detail(row: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        f"📦 پلن #{int(row['id'])}\n\n"
+        f"نام: {row['name']}\n"
+        f"مدت: {int(row['duration_days'])} روز\n"
+        f"قیمت: {int(row['price']):,}\n"
+        f"حداکثر سرور: {int(row['max_servers'])}\n"
+        f"حداکثر کاربر: {int(row['max_users'])}\n"
+        f"ارز: {row.get('currency', 'USD')}\n"
+        f"فروش عمومی: {'بله' if int(row.get('is_public', 1)) else 'خیر'}\n"
+        f"تست: {int(row.get('trial_days', 0))} روز\n"
+        f"وضعیت: {row['status']}"
+    )
+    plan_id = int(row["id"])
+    target = "archived" if row["status"] == "active" else "active"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ ویرایش", callback_data=f"plan:edit:{plan_id}")],
+        [InlineKeyboardButton("🛍 فروش و لایسنس تست", callback_data=f"plan:commerce:{plan_id}")],
+        [InlineKeyboardButton(
+            "🗄 آرشیو" if target == "archived" else "✅ فعال‌سازی",
+            callback_data=f"plan:status:{plan_id}:{target}",
+        )],
+        [InlineKeyboardButton("↩️ پلن‌ها", callback_data="plan:page:0")],
+    ])
+    return text, keyboard
+
+
+def licenses_view(page: Page, *, query: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in page.items:
+        rows.append([InlineKeyboardButton(
+            f"🔐 #{int(item['id'])} · مشتری {int(item['tenant_id'])} · {item['status']}",
+            callback_data=f"license:view:{int(item['id'])}",
+        )])
+    text = "🔐 مدیریت لایسنس‌ها"
+    if query:
+        text += f"\n🔎 نتیجه جست‌وجو: {query[:40]}"
+    text += "" if rows else "\n\nلایسنسی ثبت نشده است."
+    rows.append(_pager("license:page", page))
+    rows.append([
+        InlineKeyboardButton("➕ لایسنس جدید", callback_data="license:new"),
+        InlineKeyboardButton("🔎 جست‌وجو", callback_data="license:search"),
+    ])
+    rows.append([InlineKeyboardButton("↩️ منوی اصلی", callback_data="menu:main")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def license_detail(row: dict[str, Any], *, timezone_name: str) -> tuple[str, InlineKeyboardMarkup]:
+    expires = format_tehran(parse_utc(str(row["expires_at"])), timezone_name)
+    text = (
+        f"🔐 لایسنس #{int(row['id'])}\n\n"
+        f"مشتری: {row['tenant_name']} (#{int(row['tenant_id'])})\n"
+        f"پلن: {row['plan_name']}\n"
+        f"وضعیت: {row['status']}\n"
+        f"انقضا: {expires}"
+    )
+    license_id = int(row["id"])
+    rows = [
+        [InlineKeyboardButton("♻️ تمدید", callback_data=f"license:renew:{license_id}")]
+    ]
+    if row["status"] == "suspended":
+        rows.append([InlineKeyboardButton("✅ فعال‌سازی", callback_data=f"license:reactivate:{license_id}")])
+    elif row["status"] not in ("cancelled", "expired"):
+        rows.append([InlineKeyboardButton("⛔ تعلیق", callback_data=f"license:suspend:{license_id}")])
+    rows.append([InlineKeyboardButton("↩️ لایسنس‌ها", callback_data="license:page:0")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def confirm_keyboard(action: str, cancel_callback: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ تأیید نهایی", callback_data=f"confirm:{action}")],
+        [InlineKeyboardButton("❌ لغو", callback_data=cancel_callback)],
+    ])
+
+
+def audit_text(items: Iterable[dict[str, Any]]) -> str:
+    lines = ["🧾 آخرین رویدادها"]
+    for item in items:
+        lines.append(
+            f"#{int(item['id'])} · {item['action']} · {item['entity_type']}:{item['entity_id']}"
+        )
+    if len(lines) == 1:
+        lines.append("رویدادی ثبت نشده است.")
+    return "\n".join(lines)
