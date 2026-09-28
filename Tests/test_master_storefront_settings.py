@@ -289,3 +289,50 @@ def test_payment_history_lists_filters_searches_and_details(portal, factories) -
     portal.review_receipt(9001, int(receipt["id"]), approve=True)
     approved = portal.list_receipts_admin(9001, status="approved")
     assert [int(item["id"]) for item in approved.items] == [int(receipt["id"])]
+
+
+def test_approved_order_records_paid_at_and_finance_uses_it(portal, factories) -> None:
+    plan = factories.plan(price=75)
+    portal.configure_plan_commerce(
+        9001, int(plan["id"]), currency="USD", is_public=True, trial_days=0
+    )
+    portal.register_customer(101, display_name="Paid At User")
+    method = portal.add_payment_method(
+        9001, kind="card", title="Card", currency="USD",
+        destination="1111", recipient="Owner"
+    )
+    order = portal.create_purchase_order(101, int(plan["id"]))
+    assert portal.get_order(101, int(order["id"]))["paid_at"] is None
+
+    receipt = portal.submit_receipt(
+        101, order_id=int(order["id"]),
+        payment_method_id=int(method["id"]), reference="PAID-AT"
+    )
+    portal.review_receipt(9001, int(receipt["id"]), approve=True)
+
+    paid = portal.get_order(101, int(order["id"]))
+    assert paid["paid_at"] is not None
+    summary = portal.financial_summary(9001)
+    assert summary["service_sales_24h"]["USD"] == 75
+
+
+def test_rejected_order_does_not_receive_paid_at(portal, factories) -> None:
+    plan = factories.plan(price=50)
+    portal.configure_plan_commerce(
+        9001, int(plan["id"]), currency="USD", is_public=True, trial_days=0
+    )
+    portal.register_customer(101, display_name="Rejected User")
+    method = portal.add_payment_method(
+        9001, kind="card", title="Card", currency="USD",
+        destination="1111", recipient="Owner"
+    )
+    order = portal.create_purchase_order(101, int(plan["id"]))
+    receipt = portal.submit_receipt(
+        101, order_id=int(order["id"]),
+        payment_method_id=int(method["id"]), reference="REJECT-ME"
+    )
+    portal.review_receipt(9001, int(receipt["id"]), approve=False)
+
+    rejected = portal.get_order(101, int(order["id"]))
+    assert rejected["status"] == "rejected"
+    assert rejected["paid_at"] is None
