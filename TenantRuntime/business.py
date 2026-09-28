@@ -1288,13 +1288,23 @@ class TenantBusinessService:
             raise TenantBusinessError("subscription cannot be synchronized")
         subscription = dict(row)
         self._ensure_primary_subscription_node(subscription)
-        mappings = self.conn.execute(
-            "SELECT * FROM tenant_subscription_nodes "
-            "WHERE tenant_id=? AND subscription_id=? "
-            "AND external_ref IS NOT NULL "
-            "ORDER BY is_primary DESC, id",
-            (self.tenant_id, int(subscription_id)),
-        ).fetchall()
+        desired_ids = {
+            int(server["id"])
+            for server in self._desired_subscription_servers(
+                int(subscription["server_id"])
+            )
+        }
+        mappings = [
+            row
+            for row in self.conn.execute(
+                "SELECT * FROM tenant_subscription_nodes "
+                "WHERE tenant_id=? AND subscription_id=? "
+                "AND external_ref IS NOT NULL "
+                "ORDER BY is_primary DESC, id",
+                (self.tenant_id, int(subscription_id)),
+            ).fetchall()
+            if int(row["server_id"]) in desired_ids
+        ]
         if not mappings:
             raise TenantBusinessError("subscription has no panel targets")
 
@@ -1670,7 +1680,8 @@ class TenantBusinessService:
         rows = self.conn.execute(
             "SELECT * FROM tenant_subscription_nodes "
             "WHERE tenant_id=? AND subscription_id=? AND is_primary=0 "
-            "AND external_ref IS NOT NULL AND status IN ('active','disabled','error')",
+            "AND external_ref IS NOT NULL "
+            "AND status IN ('active','disabled','expired','error')",
             (self.tenant_id, int(subscription_id)),
         ).fetchall()
         for row in rows:
