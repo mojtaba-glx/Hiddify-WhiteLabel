@@ -256,3 +256,36 @@ def test_owner_order_admin_supports_filter_search_and_detail(portal, factories) 
     assert detail["plan_name"] == plan["name"]
     assert detail["receipts"][0]["id"] == receipt["id"]
     assert detail["receipts"][0]["status"] == "pending"
+
+
+def test_payment_history_lists_filters_searches_and_details(portal, factories) -> None:
+    plan = factories.plan(price=90)
+    portal.configure_plan_commerce(
+        9001, int(plan["id"]), currency="USD", is_public=True, trial_days=0
+    )
+    portal.register_customer(101, display_name="Receipt User", username="receipt_user")
+    method = portal.add_payment_method(
+        9001, kind="card", title="Primary", currency="USD",
+        destination="1111", recipient="Owner"
+    )
+    order = portal.create_purchase_order(101, int(plan["id"]))
+    receipt = portal.submit_receipt(
+        101, order_id=int(order["id"]),
+        payment_method_id=int(method["id"]), reference="TRACK-123"
+    )
+
+    pending = portal.list_receipts_admin(9001, status="pending")
+    assert [int(item["id"]) for item in pending.items] == [int(receipt["id"])]
+
+    searched = portal.list_receipts_admin(9001, query="TRACK-123")
+    assert len(searched.items) == 1
+    assert searched.items[0]["display_name"] == "Receipt User"
+
+    detail = portal.get_receipt_admin(9001, int(receipt["id"]))
+    assert detail["order_id"] == order["id"]
+    assert detail["method_title"] == "Primary"
+    assert detail["status"] == "pending"
+
+    portal.review_receipt(9001, int(receipt["id"]), approve=True)
+    approved = portal.list_receipts_admin(9001, status="approved")
+    assert [int(item["id"]) for item in approved.items] == [int(receipt["id"])]
