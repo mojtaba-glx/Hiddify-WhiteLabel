@@ -336,10 +336,18 @@ class CustomerPortalService:
         customer = self._customer(actor_id)
         if not self.settings.get_bool("trial_enabled"):
             raise CustomerPortalError("🎁 لایسنس تست در حال حاضر غیرفعال است.")
-        plan_row = self.conn.execute(
-            "SELECT * FROM license_plans WHERE status = 'active' AND is_public = 1"
-            " AND trial_days > 0 ORDER BY id LIMIT 1"
-        ).fetchone()
+        selected_plan_id = self.settings.all().get("trial_plan_id")
+        if selected_plan_id is not None:
+            plan_row = self.conn.execute(
+                "SELECT * FROM license_plans WHERE id = ? AND status = 'active'"
+                " AND is_public = 1 AND trial_days > 0",
+                (int(selected_plan_id),),
+            ).fetchone()
+        else:
+            plan_row = self.conn.execute(
+                "SELECT * FROM license_plans WHERE status = 'active' AND is_public = 1"
+                " AND trial_days > 0 ORDER BY price ASC, id ASC LIMIT 1"
+            ).fetchone()
         if plan_row is None:
             raise CustomerPortalError("🎁 در حال حاضر پلن تست فعالی وجود ندارد.")
         plan = dict(plan_row)
@@ -876,7 +884,49 @@ class CustomerPortalService:
 
     def get_platform_settings(self, actor_id: int) -> dict[str, Any]:
         require_master_admin(actor_id, self.master_admin_id)
-        return self.settings.all()
+        result = self.settings.all()
+        plan_id = result.get("trial_plan_id")
+        result["trial_plan_name"] = None
+        if plan_id is not None:
+            plan = PlanRepository(self.conn).get_by_id(int(plan_id))
+            if plan is not None:
+                result["trial_plan_name"] = str(plan["name"])
+        return result
+
+    def set_trial_plan(self, actor_id: int, plan_id: Optional[int]) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        selected: Optional[dict[str, Any]] = None
+        if plan_id is not None:
+            selected = PlanRepository(self.conn).get_by_id(int(plan_id))
+            if selected is None:
+                raise NotFoundError("plan not found")
+            if selected["status"] != "active":
+                raise ValueError("trial plan must be active")
+            if not int(selected.get("is_public", 1)):
+                raise ValueError("trial plan must be public")
+            if int(selected.get("trial_days", 0)) <= 0:
+                raise ValueError("trial plan must have trial days")
+        value = "" if selected is None else str(int(selected["id"]))
+        with transaction(self.conn):
+            self.settings.set_text("trial_plan_id", value, maximum=20)
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id),
+                tenant_id=None,
+                action="platform_setting.trial_plan",
+                entity_type="license_plan",
+                entity_id=value or "auto",
+                metadata={"plan_name": selected["name"] if selected else None},
+            )
+        return self.get_platform_settings(actor_id)
+
+    def list_trial_plan_candidates(self, actor_id: int) -> list[dict[str, Any]]:
+        require_master_admin(actor_id, self.master_admin_id)
+        rows = self.conn.execute(
+            "SELECT * FROM license_plans"
+            " WHERE status = 'active' AND is_public = 1 AND trial_days > 0"
+            " ORDER BY price ASC, id ASC"
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def set_platform_text_setting(
         self, actor_id: int, key: str, value: str
