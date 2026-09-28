@@ -15,7 +15,8 @@ MAIN_MENU = (
     ("🤖 ربات‌های مشتریان", "menu:tenants"),
     ("🔐 لایسنس‌ها", "menu:licenses"),
     ("📦 پلن‌ها", "menu:plans"),
-    ("📊 آمار", "menu:stats"),
+    ("🧾 سفارش‌ها", "menu:orders"),
+    ("📊 آمار و فروش", "menu:stats"),
     ("💳 پرداخت‌ها", "menu:payments"),
     ("⚠️ هشدارها", "menu:warnings"),
     ("🧾 تاریخچه", "menu:audit"),
@@ -35,13 +36,14 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(by_callback["menu:plans"], callback_data="menu:plans"),
         ],
         [
+            InlineKeyboardButton(by_callback["menu:orders"], callback_data="menu:orders"),
             InlineKeyboardButton(by_callback["menu:payments"], callback_data="menu:payments"),
-            InlineKeyboardButton(by_callback["menu:stats"], callback_data="menu:stats"),
         ],
         [
+            InlineKeyboardButton(by_callback["menu:stats"], callback_data="menu:stats"),
             InlineKeyboardButton(by_callback["menu:warnings"], callback_data="menu:warnings"),
-            InlineKeyboardButton(by_callback["menu:audit"], callback_data="menu:audit"),
         ],
+        [InlineKeyboardButton(by_callback["menu:audit"], callback_data="menu:audit")],
         [InlineKeyboardButton(by_callback["menu:settings"], callback_data="menu:settings")],
     ])
 
@@ -282,6 +284,176 @@ def license_detail(row: dict[str, Any], *, timezone_name: str) -> tuple[str, Inl
     rows.append([InlineKeyboardButton("↩️ لایسنس‌ها", callback_data="license:page:0")])
     return text, InlineKeyboardMarkup(rows)
 
+
+
+
+_ORDER_STATUS_FA = {
+    "pending_payment": "در انتظار پرداخت",
+    "payment_review": "در انتظار بررسی",
+    "paid": "پرداخت‌شده",
+    "fulfilled": "تکمیل‌شده",
+    "rejected": "ردشده",
+    "cancelled": "لغوشده",
+}
+
+_ORDER_KIND_FA = {
+    "purchase": "خرید ربات",
+    "renewal": "تمدید",
+    "wallet_topup": "شارژ کیف پول",
+    "trial": "لایسنس تست",
+}
+
+
+def _money_lines(values: dict[str, int], *, empty: str = "۰") -> str:
+    if not values:
+        return empty
+    return " | ".join(f"{int(amount):,} {currency}" for currency, amount in sorted(values.items()))
+
+
+def financial_dashboard_view(
+    system: dict[str, Any], finance: dict[str, Any]
+) -> tuple[str, InlineKeyboardMarkup]:
+    statuses = finance.get("orders_by_status") or {}
+    kinds = finance.get("orders_by_kind") or {}
+    lines = [
+        "📊 آمار و فروش",
+        "",
+        "💰 فروش سرویس",
+        f"• کل: {_money_lines(finance.get('service_sales') or {})}",
+        f"• ۲۴ ساعت اخیر: {_money_lines(finance.get('service_sales_24h') or {})}",
+        "",
+        "💳 جریان پرداخت",
+        f"• رسیدهای تأییدشده: {_money_lines(finance.get('approved_receipts') or {})}",
+        f"• شارژ کیف پول: {_money_lines(finance.get('wallet_topups') or {})}",
+        f"• موجودی فعلی کیف پول‌ها: {_money_lines(finance.get('wallet_balances') or {})}",
+        f"• رسید در انتظار: {int(finance.get('pending_receipts') or 0)}",
+        "",
+        "🧾 سفارش‌ها",
+        f"• کل: {int(finance.get('orders_total') or 0)}",
+        f"• خرید: {int(kinds.get('purchase') or 0)}",
+        f"• تمدید: {int(kinds.get('renewal') or 0)}",
+        f"• شارژ کیف پول: {int(kinds.get('wallet_topup') or 0)}",
+        f"• تست: {int(kinds.get('trial') or 0)}",
+        f"• در انتظار پرداخت: {int(statuses.get('pending_payment') or 0)}",
+        f"• در انتظار بررسی: {int(statuses.get('payment_review') or 0)}",
+        "",
+        "👥 سامانه",
+        f"• کاربران فروشگاه: {int(finance.get('customers_total') or 0)}"
+        f" (فعال: {int(finance.get('customers_active') or 0)})",
+        f"• ربات‌های مشتریان: {int(system.get('tenants_total') or 0)}"
+        f" (فعال: {int(system.get('tenants_active') or 0)})",
+        f"• ربات‌های تلگرام فعال: {int(system.get('bots_active') or 0)}",
+        f"• لایسنس‌های فعال: {int(system.get('licenses_active') or 0)}",
+        f"• لایسنس‌های معلق: {int(system.get('licenses_suspended') or 0)}",
+        f"• هشدارهای باز: {int(system.get('warnings_open') or 0)}",
+    ]
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🧾 سفارش‌ها", callback_data="menu:orders"),
+            InlineKeyboardButton("💳 پرداخت‌ها", callback_data="menu:payments"),
+        ],
+        [InlineKeyboardButton("↩️ منوی اصلی", callback_data="menu:main")],
+    ])
+    return "\n".join(lines), keyboard
+
+
+def orders_view(
+    page: Page, *, status: str = "all", query: str = ""
+) -> tuple[str, InlineKeyboardMarkup]:
+    labels = {
+        "all": "همه",
+        "pending_payment": "در انتظار پرداخت",
+        "payment_review": "بررسی رسید",
+        "paid": "پرداخت‌شده",
+        "fulfilled": "تکمیل‌شده",
+        "rejected": "ردشده",
+        "cancelled": "لغوشده",
+    }
+    text = f"🧾 سفارش‌ها · {labels.get(status, status)}"
+    if query:
+        text += f"\n🔎 {query[:40]}"
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in page.items:
+        kind = _ORDER_KIND_FA.get(str(item["kind"]), str(item["kind"]))
+        state = _ORDER_STATUS_FA.get(str(item["status"]), str(item["status"]))
+        rows.append([InlineKeyboardButton(
+            f"#{int(item['id'])} · {kind} · {int(item['amount']):,} {item['currency']} · {state}",
+            callback_data=f"orderadmin:view:{int(item['id'])}",
+        )])
+    if not page.items:
+        text += "\n\nسفارشی در این بخش وجود ندارد."
+    rows.append(_pager(f"orderadmin:page:{status}", page))
+    rows.extend([
+        [
+            InlineKeyboardButton("همه", callback_data="orderadmin:filter:all"),
+            InlineKeyboardButton("⏳ پرداخت", callback_data="orderadmin:filter:pending_payment"),
+        ],
+        [
+            InlineKeyboardButton("🧾 بررسی", callback_data="orderadmin:filter:payment_review"),
+            InlineKeyboardButton("✅ تکمیل", callback_data="orderadmin:filter:fulfilled"),
+        ],
+        [
+            InlineKeyboardButton("💵 پرداخت‌شده", callback_data="orderadmin:filter:paid"),
+            InlineKeyboardButton("❌ ردشده", callback_data="orderadmin:filter:rejected"),
+        ],
+        [InlineKeyboardButton("🔎 جست‌وجو", callback_data="orderadmin:search")],
+        [InlineKeyboardButton("↩️ منوی اصلی", callback_data="menu:main")],
+    ])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def order_detail_view(order: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+    kind = _ORDER_KIND_FA.get(str(order["kind"]), str(order["kind"]))
+    status = _ORDER_STATUS_FA.get(str(order["status"]), str(order["status"]))
+    username = f"@{order['username']}" if order.get("username") else "—"
+    lines = [
+        f"🧾 سفارش #{int(order['id'])}",
+        "",
+        f"شناسه: {order['public_id']}",
+        f"نوع: {kind}",
+        f"وضعیت: {status}",
+        f"مبلغ: {int(order['amount']):,} {order['currency']}",
+        f"مشتری: {order['display_name']}",
+        f"یوزرنیم: {username}",
+        f"شناسه تلگرام: {int(order['telegram_user_id'])}",
+    ]
+    if order.get("plan_name"):
+        lines.append(f"پلن: {order['plan_name']}")
+    if order.get("tenant_name"):
+        lines.append(f"ربات: {order['tenant_name']}")
+    lines.extend([
+        f"ثبت: {str(order['created_at']).replace('T', ' ')[:19]}",
+        f"آخرین تغییر: {str(order['updated_at']).replace('T', ' ')[:19]}",
+    ])
+
+    receipts = order.get("receipts") or []
+    wallet_txs = order.get("wallet_transactions") or []
+    if wallet_txs:
+        lines.extend(["", "👛 پرداخت از کیف پول:"])
+        for tx in wallet_txs[:3]:
+            lines.append(
+                f"• {int(tx['amount']):,} · مانده {int(tx['resulting_balance']):,}"
+            )
+    if receipts:
+        lines.extend(["", "💳 رسیدها:"])
+        for receipt in receipts[:5]:
+            lines.append(
+                f"• #{int(receipt['id'])} · {receipt['method_title']} · "
+                f"{receipt['status']}"
+            )
+
+    buttons: list[list[InlineKeyboardButton]] = []
+    pending = next((r for r in receipts if r["status"] == "pending"), None)
+    if pending is not None:
+        buttons.append([InlineKeyboardButton(
+            f"🧾 بررسی رسید #{int(pending['id'])}",
+            callback_data=f"payment:receipt:{int(pending['id'])}",
+        )])
+    buttons.extend([
+        [InlineKeyboardButton("👤 پروفایل مشتری", callback_data=f"customeradmin:view:{int(order['customer_id'])}")],
+        [InlineKeyboardButton("↩️ سفارش‌ها", callback_data="menu:orders")],
+    ])
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
 def platform_settings_view(settings: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
