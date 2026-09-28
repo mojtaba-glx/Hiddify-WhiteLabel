@@ -188,3 +188,71 @@ def test_storefront_customer_detail_includes_wallet_orders_and_tenants(portal, f
     assert int(detail["order_count"]) == 1
     assert int(detail["tenant_count"]) == 1
     assert detail["recent_orders"][0]["kind"] == "purchase"
+
+
+def test_financial_summary_separates_sales_cash_inflow_and_wallet(portal, factories) -> None:
+    plan = factories.plan(price=100, duration_days=30)
+    portal.configure_plan_commerce(
+        9001, int(plan["id"]), currency="USD", is_public=True, trial_days=0
+    )
+    portal.register_customer(101, display_name="Buyer", username="buyer")
+    method = portal.add_payment_method(
+        9001, kind="card", title="Main Card", currency="USD",
+        destination="1111", recipient="Owner"
+    )
+
+    purchase = portal.create_purchase_order(101, int(plan["id"]))
+    purchase_receipt = portal.submit_receipt(
+        101, order_id=int(purchase["id"]),
+        payment_method_id=int(method["id"]), reference="BUY-1"
+    )
+    portal.review_receipt(9001, int(purchase_receipt["id"]), approve=True)
+
+    topup = portal.create_wallet_topup(101, currency="USD", amount=300)
+    topup_receipt = portal.submit_receipt(
+        101, order_id=int(topup["id"]),
+        payment_method_id=int(method["id"]), reference="TOP-1"
+    )
+    portal.review_receipt(9001, int(topup_receipt["id"]), approve=True)
+
+    portal.create_purchase_order(101, int(plan["id"]))
+
+    summary = portal.financial_summary(9001)
+    assert summary["service_sales"]["USD"] == 100
+    assert summary["approved_receipts"]["USD"] == 400
+    assert summary["wallet_topups"]["USD"] == 300
+    assert summary["wallet_balances"]["USD"] == 300
+    assert summary["orders_total"] == 3
+    assert summary["orders_by_status"]["pending_payment"] == 1
+    assert summary["pending_receipts"] == 0
+
+
+def test_owner_order_admin_supports_filter_search_and_detail(portal, factories) -> None:
+    plan = factories.plan(price=120)
+    portal.configure_plan_commerce(
+        9001, int(plan["id"]), currency="USD", is_public=True, trial_days=0
+    )
+    portal.register_customer(101, display_name="Ali Buyer", username="ali_buyer")
+    method = portal.add_payment_method(
+        9001, kind="card", title="Card", currency="USD",
+        destination="1111", recipient="Owner"
+    )
+    order = portal.create_purchase_order(101, int(plan["id"]))
+    receipt = portal.submit_receipt(
+        101, order_id=int(order["id"]),
+        payment_method_id=int(method["id"]), reference="REF-ORDER"
+    )
+
+    review_page = portal.list_all_orders(9001, status="payment_review")
+    assert [int(item["id"]) for item in review_page.items] == [int(order["id"])]
+
+    searched = portal.list_all_orders(9001, query=str(order["public_id"]))
+    assert len(searched.items) == 1
+    assert searched.items[0]["display_name"] == "Ali Buyer"
+
+    detail = portal.get_order_admin(9001, int(order["id"]))
+    assert detail["public_id"] == order["public_id"]
+    assert detail["username"] == "ali_buyer"
+    assert detail["plan_name"] == plan["name"]
+    assert detail["receipts"][0]["id"] == receipt["id"]
+    assert detail["receipts"][0]["status"] == "pending"
