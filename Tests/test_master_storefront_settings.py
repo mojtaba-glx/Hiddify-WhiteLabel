@@ -488,3 +488,30 @@ def test_customer_cannot_cancel_order_after_receipt_submission(portal, factories
 
     with pytest.raises(PaymentStateError):
         portal.cancel_order(101, int(order["id"]))
+
+
+def test_rejected_receipt_persists_review_note(portal, factories) -> None:
+    plan = factories.plan(price=100)
+    portal.configure_plan_commerce(
+        9001, int(plan["id"]), currency="USD", is_public=True, trial_days=0
+    )
+    portal.register_customer(101, display_name="Rejected With Note")
+    method = portal.add_payment_method(
+        9001, kind="card", title="Card", currency="USD",
+        destination="1111", recipient="Owner"
+    )
+    order = portal.create_purchase_order(101, int(plan["id"]))
+    receipt = portal.submit_receipt(
+        101, order_id=int(order["id"]),
+        payment_method_id=int(method["id"]), reference="BAD-RECEIPT"
+    )
+
+    reviewed = portal.review_receipt(
+        9001,
+        int(receipt["id"]),
+        approve=False,
+        review_note="مبلغ واریزی با سفارش مطابقت ندارد",
+    )
+    assert reviewed["status"] == "rejected"
+    assert reviewed["review_note"] == "مبلغ واریزی با سفارش مطابقت ندارد"
+    assert reviewed["order_status"] == "rejected"
