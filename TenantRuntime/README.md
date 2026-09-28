@@ -29,12 +29,16 @@ the same first/all/explicit selection model, and creates one UUID across the
 primary and extra inbound set in one management request. Its public
 subscription listener is configured independently from the management API.
 
-A shard-safe lifecycle coordinator runs every
-`RUNTIME_LIFECYCLE_SECONDS` (default 180). Tenant ownership for maintenance
-uses `tenant_id % RUNTIME_SHARD_COUNT`, so only one shard synchronizes each
-tenant. It refreshes usage and last-online state, disables time/quota-expired
-accounts before marking them expired locally, and never reactivates an expired
-subscription without renewal.
+A shard-safe Global Enforcer is owned by
+`tenant_id % RUNTIME_SHARD_COUNT`, so only one shard maintains each tenant.
+The dedicated cadence is `RUNTIME_ENFORCER_SECONDS` (default 20 seconds).
+Each pass processes a bounded hot-first/round-robin batch, refreshes aggregate
+usage and last-online state, and never reactivates an expired subscription
+without renewal. A node read failure preserves that node's last usage snapshot;
+after repeated failures it is marked frozen for diagnostics. If a subscription
+is due, every mapped node must be successfully disabled before the local service
+is committed as `expired`; otherwise `enforcement_pending=1` is persisted
+and the next pass retries the incomplete enforcement.
 
 Active `tenant_nodes` define the Multi-node topology for new and repaired
 subscriptions. A primary mapping is mandatory; child mappings are best-effort
@@ -55,6 +59,13 @@ The public URL delivered to UserBot is
 opaque code resolves only to the tenant-scoped subscription recorded in
 `tenant_smart_links`; panel credentials are decrypted only inside the server
 while fetching each provider's native subscription.
+
+Renewal reminders are durable and tenant-scoped. The default thresholds are
+`RUNTIME_REMINDER_DAYS=3` and `RUNTIME_REMINDER_REMAINING_GB=3`. The
+current UserBot sends one message for each newly crossed day/GB bucket and one
+expiry message only after enforcement is verified. The reminder queue has
+lease recovery, bounded exponential retry and period fingerprints, so stale
+warnings from a previous renewal are skipped rather than delivered.
 
 Run one process for each shard index:
 
