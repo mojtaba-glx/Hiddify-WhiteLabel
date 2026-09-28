@@ -116,6 +116,45 @@ async def _notify_master_new_receipt(
         )
 
 
+async def _notify_master_provisioned(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    tenant_id: int,
+    tenant_name: str,
+    admin_username: str | None,
+    user_username: str | None,
+    plan_name: str,
+) -> None:
+    service = portal(context)
+    lines = [
+        "✅ ربات مشتری راه‌اندازی شد",
+        "",
+        f"مشتری: {_display_name(update)}",
+        f"شناسه تلگرام: {actor_id(update)}",
+        f"نام فروشگاه: {tenant_name}",
+        f"پلن: {plan_name}",
+        f"ربات مدیریت: @{admin_username}" if admin_username else "ربات مدیریت: آماده",
+        f"ربات کاربران: @{user_username}" if user_username else "ربات کاربران: آماده",
+    ]
+    try:
+        await context.bot.send_message(
+            chat_id=int(service.master_admin_id),
+            text="\n".join(lines),
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "🤖 مشاهده ربات مشتری",
+                    callback_data=f"tenant:view:{int(tenant_id)}",
+                )
+            ]]),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Master provisioning notification could not be sent: %s",
+            safe_format_exception(exc),
+        )
+
+
 async def show_customer_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     service = portal(context)
@@ -496,6 +535,16 @@ async def handle_customer_text(update: Update, context: ContextTypes.DEFAULT_TYP
             context.user_data.pop("customer_flow", None)
             admin_name = result.provisioning.admin_bot.telegram_username
             user_name = result.provisioning.user_bot.telegram_username
+            current_order = service.get_order(actor, int(flow["order_id"]))
+            await _notify_master_provisioned(
+                update,
+                context,
+                tenant_id=int(result.provisioning.tenant_id),
+                tenant_name=str(flow["name"]),
+                admin_username=admin_name,
+                user_username=user_name,
+                plan_name=str(current_order.get("plan_name") or "—"),
+            )
             lines = [
                 "✅ ربات اختصاصی شما با موفقیت راه‌اندازی شد.",
                 "",
