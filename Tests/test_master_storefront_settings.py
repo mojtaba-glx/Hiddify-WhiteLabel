@@ -453,3 +453,38 @@ def test_trial_plan_can_return_to_automatic_selection(portal, factories) -> None
     portal.register_customer(101, display_name="Auto User")
     order = portal.claim_trial(101)
     assert int(order["plan_id"]) == int(plan["id"])
+
+
+def test_customer_can_cancel_only_unpaid_order(portal, factories) -> None:
+    plan = factories.plan(price=100)
+    portal.configure_plan_commerce(
+        9001, int(plan["id"]), currency="USD", is_public=True, trial_days=0
+    )
+    portal.register_customer(101, display_name="Cancel User")
+    order = portal.create_purchase_order(101, int(plan["id"]))
+
+    cancelled = portal.cancel_order(101, int(order["id"]))
+    assert cancelled["status"] == "cancelled"
+
+    with pytest.raises(PaymentStateError):
+        portal.cancel_order(101, int(order["id"]))
+
+
+def test_customer_cannot_cancel_order_after_receipt_submission(portal, factories) -> None:
+    plan = factories.plan(price=100)
+    portal.configure_plan_commerce(
+        9001, int(plan["id"]), currency="USD", is_public=True, trial_days=0
+    )
+    portal.register_customer(101, display_name="Review User")
+    method = portal.add_payment_method(
+        9001, kind="card", title="Card", currency="USD",
+        destination="1111", recipient="Owner"
+    )
+    order = portal.create_purchase_order(101, int(plan["id"]))
+    portal.submit_receipt(
+        101, order_id=int(order["id"]),
+        payment_method_id=int(method["id"]), reference="NO-CANCEL"
+    )
+
+    with pytest.raises(PaymentStateError):
+        portal.cancel_order(101, int(order["id"]))
