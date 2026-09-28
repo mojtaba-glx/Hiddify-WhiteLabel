@@ -270,8 +270,15 @@ def test_quota_enforcement_stays_pending_until_every_node_is_disabled(
     sub_id = int(state["subscription"]["id"])
     tr = state["nodes"]["https://tr.example"]
     de = state["nodes"]["https://de.example"]
-    state["panel"].users[("https://tr.example", str(tr["external_ref"]))]["usage"] = 17 * 1024**3
+    # Establish a real last-known snapshot before the child becomes unreachable.
+    state["panel"].users[("https://tr.example", str(tr["external_ref"]))]["usage"] = 5 * 1024**3
     state["panel"].users[("https://de.example", str(de["external_ref"]))]["usage"] = 4 * 1024**3
+    baseline = state["service"].sync_subscription_usage(
+        state["owner"], subscription_id=sub_id
+    )
+    assert baseline["usage_bytes"] == 9 * 1024**3
+
+    state["panel"].users[("https://tr.example", str(tr["external_ref"]))]["usage"] = 17 * 1024**3
     state["panel"].fail_usage_endpoints.add("https://de.example")
     state["panel"].fail_disable_endpoints.add("https://de.example")
 
