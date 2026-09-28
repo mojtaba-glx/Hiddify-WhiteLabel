@@ -644,8 +644,8 @@ class CustomerPortalService:
         if key not in limits:
             raise ValueError("invalid text setting")
         clean_value = "" if key == "support_contact" and str(value).strip() == "-" else value
-        result = self.settings.set_text(key, clean_value, maximum=limits[key])
         with transaction(self.conn):
+            result = self.settings.set_text(key, clean_value, maximum=limits[key])
             AuditRepository(self.conn).append(
                 actor_id=int(actor_id), tenant_id=None,
                 action="platform_setting.update", entity_type="platform_setting",
@@ -657,8 +657,8 @@ class CustomerPortalService:
         self, actor_id: int, key: str, enabled: bool
     ) -> dict[str, Any]:
         require_master_admin(actor_id, self.master_admin_id)
-        self.settings.set_bool(key, bool(enabled))
         with transaction(self.conn):
+            self.settings.set_bool(key, bool(enabled))
             AuditRepository(self.conn).append(
                 actor_id=int(actor_id), tenant_id=None,
                 action="platform_setting.update", entity_type="platform_setting",
