@@ -8,6 +8,7 @@ from MasterBot.customer_service import CustomerPortalError, CustomerPortalServic
 from MasterBot.service import MasterService
 from Shared.access import AccessDenied
 from Shared.crypto import FernetTokenCipher, generate_key
+from Shared.timeutils import parse_utc
 
 
 @pytest.fixture()
@@ -113,3 +114,42 @@ def test_support_contact_can_be_cleared_with_dash(portal) -> None:
     portal.set_platform_text_setting(9001, "support_contact", "@support")
     portal.set_platform_text_setting(9001, "support_contact", "-")
     assert portal.get_platform_settings(9001)["support_contact"] == ""
+
+
+def test_wallet_paid_renewal_extends_license_atomically(portal, factories) -> None:
+    plan = factories.plan(price=100, duration_days=30)
+    portal.configure_plan_commerce(
+        9001, int(plan["id"]), currency="USD", is_public=True, trial_days=0
+    )
+    portal.register_customer(101, display_name="Customer")
+    tenant = factories.tenant(owner_telegram_id=101)
+    license_row = factories.license(
+        int(tenant["id"]), int(plan["id"]), duration_days=5, grace_days=0
+    )
+    before_expiry = parse_utc(str(license_row["expires_at"]))
+
+    method = portal.add_payment_method(
+        9001, kind="card", title="Card", currency="USD", destination="1111"
+    )
+    topup = portal.create_wallet_topup(101, currency="USD", amount=300)
+    receipt = portal.submit_receipt(
+        101,
+        order_id=int(topup["id"]),
+        payment_method_id=int(method["id"]),
+        reference="TOP-UP",
+    )
+    portal.review_receipt(9001, int(receipt["id"]), approve=True)
+    assert portal.wallet_balance(101, "USD") == 300
+
+    renewal = portal.create_renewal_order(
+        101, tenant_id=int(tenant["id"]), plan_id=int(plan["id"])
+    )
+    paid = portal.pay_order_from_wallet(101, int(renewal["id"]))
+
+    assert paid["status"] == "fulfilled"
+    assert portal.wallet_balance(101, "USD") == 200
+    refreshed = portal.conn.execute(
+        "SELECT * FROM licenses WHERE id = ?", (int(license_row["id"]),)
+    ).fetchone()
+    assert refreshed is not None
+    assert parse_utc(str(refreshed["expires_at"])) > before_expiry
