@@ -25,6 +25,10 @@ class PanelTarget:
     xui_inbound_ids: str = ""
     xui_public_origin: str = ""
     xui_sub_path: str = ""
+    xnet_inbound_ids: str = ""
+    xnet_public_origin: str = ""
+    xnet_sub_port: int = 0
+    xnet_sub_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -214,11 +218,13 @@ def build_default_panel_adapter() -> PanelAdapter:
     """Build the production router without importing optional providers at module load."""
 
     from TenantRuntime.hiddify import HiddifyPanelAdapter
+    from TenantRuntime.xnet import XnetPanelAdapter
     from TenantRuntime.xui import XuiPanelAdapter
 
     return RoutedPanelAdapter(
         {
             "hiddify": HiddifyPanelAdapter(),
             "xui": XuiPanelAdapter(),
+            "xnet": XnetPanelAdapter(),
         }
     )
