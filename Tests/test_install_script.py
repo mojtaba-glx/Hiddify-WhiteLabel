@@ -104,3 +104,21 @@ def test_bootstrap_uses_dedicated_service_account_and_opt_path() -> None:
     assert "--user-group" in content
     assert "git clone" in content
     assert "install.sh\" update" in content or "install.sh\" install" in content
+
+
+def test_bootstrap_dry_run_is_safe_and_describes_full_install() -> None:
+    result = subprocess.run(
+        ["bash", str(ROOT / "bootstrap.sh"), "--dry-run"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    output = result.stdout + result.stderr
+    assert "DRY-RUN" in output
+    assert "apt prerequisites" in output
+    assert "dedicated service account" in output
+    assert "git" in output.lower()
+    assert "install.sh install" in output
+    assert "/usr/local/bin/whitelabel" in output
