@@ -33,6 +33,8 @@ from MasterBot.views import (
     license_detail,
     licenses_view,
     main_menu_keyboard,
+    payment_method_detail,
+    platform_settings_view,
     plan_detail,
     plans_view,
     tenant_detail,
@@ -182,6 +184,22 @@ async def _show_license(
     await _render(update, text, keyboard)
 
 
+async def _show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    actor = int(_actor_id(update) or 0)
+    settings = _portal(context).get_platform_settings(actor)
+    text, keyboard = platform_settings_view(settings)
+    await _render(update, text, keyboard)
+
+
+async def _show_payment_method(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, method_id: int
+) -> None:
+    actor = int(_actor_id(update) or 0)
+    method = _portal(context).get_payment_method_admin(actor, int(method_id))
+    text, keyboard = payment_method_detail(method)
+    await _render(update, text, keyboard)
+
+
 async def _show_payments(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     actor = int(_actor_id(update) or 0)
     portal = _portal(context)
@@ -205,10 +223,9 @@ async def _show_payments(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     for method in methods:
         state = "🟢" if method["status"] == "active" else "⚫"
         lines.append(f"{state} #{int(method['id'])} · {method['kind']} · {method['title']} · {method['currency']}")
-        next_state = "disabled" if method["status"] == "active" else "active"
         rows.append([InlineKeyboardButton(
-            f"{'⛔' if next_state == 'disabled' else '✅'} {method['title']}",
-            callback_data=f"payment:method:{int(method['id'])}:{next_state}",
+            f"{state} {method['title']} · {method['currency']}",
+            callback_data=f"payment:view:{int(method['id'])}",
         )])
     rows.extend([
         [
@@ -240,6 +257,30 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data == "menu:payments":
             await _show_payments(update, context)
             return
+        if data.startswith("payment:view:"):
+            await _show_payment_method(
+                update, context, _parse_int(data.rsplit(":", 1)[1], "method id")
+            )
+            return
+        if data.startswith("payment:edit:"):
+            method_id = _parse_int(data.rsplit(":", 1)[1], "method id")
+            method = _portal(context).get_payment_method_admin(actor, method_id)
+            context.user_data["flow"] = {
+                "kind": "payment_method_edit",
+                "method_id": method_id,
+                "payment_kind": str(method["kind"]),
+            }
+            instructions = (
+                "عنوان | ارز | شماره کارت | نام صاحب کارت | توضیح اختیاری"
+                if method["kind"] == "card" else
+                "عنوان | ارز | آدرس کیف پول | شبکه | توضیح اختیاری"
+            )
+            await _render(
+                update,
+                f"✏️ ویرایش روش پرداخت #{method_id}\n\n{instructions}",
+                back_keyboard(f"payment:view:{method_id}"),
+            )
+            return
         if data.startswith("payment:add:"):
             kind = data.rsplit(":", 1)[1]
             if kind not in ("card", "crypto"):
@@ -254,8 +295,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         if data.startswith("payment:method:"):
             _, _, method_raw, status = data.split(":", 3)
-            _portal(context).set_payment_method_status(actor, _parse_int(method_raw, "method id"), status)
-            await _show_payments(update, context)
+            method_id = _parse_int(method_raw, "method id")
+            _portal(context).set_payment_method_status(actor, method_id, status)
+            await _show_payment_method(update, context, method_id)
             return
         if data.startswith("payment:receipt:"):
             receipt_id = _parse_int(data.rsplit(":", 1)[1], "receipt id")
@@ -607,12 +649,33 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await _render(update, audit_text(page.items), InlineKeyboardMarkup(rows))
             return
         if data == "menu:settings":
-            timezone_name = str(context.application.bot_data.get("display_timezone") or "Asia/Tehran")
-            await _render(
-                update,
-                f"⚙️ تنظیمات امن\n\nمنطقه زمانی: {timezone_name}\nمدیر اصلی: {service.master_admin_id}\nموتور داده: SQLite",
-                back_keyboard(),
+            await _show_settings(update, context)
+            return
+        if data.startswith("settings:edit:"):
+            key = data.rsplit(":", 1)[1]
+            prompts = {
+                "store_name": "🏷 نام جدید فروشگاه را بفرستید:",
+                "support_contact": "☎️ آیدی یا راه ارتباطی پشتیبانی را بفرستید. برای حذف، - ارسال کنید.",
+                "maintenance_message": "📝 پیام زمان توقف فروش را بفرستید:",
+            }
+            if key not in prompts:
+                raise ValueError("invalid setting key")
+            context.user_data["flow"] = {"kind": "platform_setting_text", "setting_key": key}
+            await _render(update, prompts[key], back_keyboard("menu:settings"))
+            return
+        if data == "settings:toggle:sales":
+            current = _portal(context).get_platform_settings(actor)
+            _portal(context).set_platform_bool_setting(
+                actor, "sales_enabled", not bool(current["sales_enabled"])
             )
+            await _show_settings(update, context)
+            return
+        if data == "settings:toggle:trial":
+            current = _portal(context).get_platform_settings(actor)
+            _portal(context).set_platform_bool_setting(
+                actor, "trial_enabled", not bool(current["trial_enabled"])
+            )
+            await _show_settings(update, context)
             return
         raise ValueError("unknown callback")
     except (
@@ -779,7 +842,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             detail, keyboard = plan_detail(row)
             await _render(update, detail, keyboard)
             return
-        if kind == "payment_method_new":
+        if kind in ("payment_method_new", "payment_method_edit"):
             fields = _split_fields(text, 4, 5)
             payment_kind = str(flow.get("payment_kind") or "")
             if payment_kind not in ("card", "crypto"):
@@ -791,13 +854,26 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 title, currency, destination, network = fields[:4]
                 recipient = None
             instructions = fields[4] if len(fields) == 5 else ""
-            _portal(context).add_payment_method(
-                actor, kind=payment_kind, title=title, currency=currency,
-                destination=destination, recipient=recipient, network=network,
-                instructions=instructions,
-            )
+            if kind == "payment_method_new":
+                row = _portal(context).add_payment_method(
+                    actor, kind=payment_kind, title=title, currency=currency,
+                    destination=destination, recipient=recipient, network=network,
+                    instructions=instructions,
+                )
+            else:
+                row = _portal(context).update_payment_method(
+                    actor, int(flow["method_id"]), title=title, currency=currency,
+                    destination=destination, recipient=recipient, network=network,
+                    instructions=instructions,
+                )
             context.user_data.pop("flow", None)
-            await _show_payments(update, context)
+            await _show_payment_method(update, context, int(row["id"]))
+            return
+        if kind == "platform_setting_text":
+            key = str(flow.get("setting_key") or "")
+            _portal(context).set_platform_text_setting(actor, key, text)
+            context.user_data.pop("flow", None)
+            await _show_settings(update, context)
             return
         if kind == "license_new":
             fields = _split_fields(text, 2, 3)
