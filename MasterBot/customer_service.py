@@ -554,6 +554,176 @@ class CustomerPortalService:
             )
         return self.get_platform_customer_admin(actor_id, customer_id)
 
+    # ---- owner sales / finance administration ----
+
+    def financial_summary(self, actor_id: int) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        since_24h = iso_utc(utcnow() - timedelta(hours=24))
+
+        def grouped(sql: str, params: tuple[Any, ...] = ()) -> dict[str, int]:
+            rows = self.conn.execute(sql, params).fetchall()
+            return {str(row["currency"]): int(row["amount"] or 0) for row in rows}
+
+        service_sales = grouped(
+            "SELECT currency, COALESCE(SUM(amount), 0) AS amount"
+            " FROM customer_orders"
+            " WHERE kind IN ('purchase', 'renewal')"
+            " AND status IN ('paid', 'fulfilled') GROUP BY currency"
+        )
+        service_sales_24h = grouped(
+            "SELECT currency, COALESCE(SUM(amount), 0) AS amount"
+            " FROM customer_orders"
+            " WHERE kind IN ('purchase', 'renewal')"
+            " AND status IN ('paid', 'fulfilled') AND updated_at >= ?"
+            " GROUP BY currency",
+            (since_24h,),
+        )
+        approved_receipts = grouped(
+            "SELECT o.currency, COALESCE(SUM(o.amount), 0) AS amount"
+            " FROM payment_receipts AS r"
+            " JOIN customer_orders AS o ON o.id = r.order_id"
+            " WHERE r.status = 'approved' GROUP BY o.currency"
+        )
+        wallet_topups = grouped(
+            "SELECT currency, COALESCE(SUM(amount), 0) AS amount"
+            " FROM customer_orders"
+            " WHERE kind = 'wallet_topup' AND status = 'fulfilled'"
+            " GROUP BY currency"
+        )
+        wallet_balances = grouped(
+            "SELECT currency, COALESCE(SUM(balance), 0) AS amount"
+            " FROM wallet_accounts GROUP BY currency"
+        )
+
+        status_rows = self.conn.execute(
+            "SELECT status, COUNT(*) AS total FROM customer_orders GROUP BY status"
+        ).fetchall()
+        kind_rows = self.conn.execute(
+            "SELECT kind, COUNT(*) AS total FROM customer_orders GROUP BY kind"
+        ).fetchall()
+        return {
+            "customers_total": int(
+                self.conn.execute("SELECT COUNT(*) FROM platform_customers").fetchone()[0]
+            ),
+            "customers_active": int(
+                self.conn.execute(
+                    "SELECT COUNT(*) FROM platform_customers WHERE status = 'active'"
+                ).fetchone()[0]
+            ),
+            "orders_total": int(
+                self.conn.execute("SELECT COUNT(*) FROM customer_orders").fetchone()[0]
+            ),
+            "pending_receipts": int(
+                self.conn.execute(
+                    "SELECT COUNT(*) FROM payment_receipts WHERE status = 'pending'"
+                ).fetchone()[0]
+            ),
+            "service_sales": service_sales,
+            "service_sales_24h": service_sales_24h,
+            "approved_receipts": approved_receipts,
+            "wallet_topups": wallet_topups,
+            "wallet_balances": wallet_balances,
+            "orders_by_status": {
+                str(row["status"]): int(row["total"]) for row in status_rows
+            },
+            "orders_by_kind": {
+                str(row["kind"]): int(row["total"]) for row in kind_rows
+            },
+        }
+
+    def list_all_orders(
+        self,
+        actor_id: int,
+        *,
+        page: int = 0,
+        page_size: int = 8,
+        status: str = "all",
+        query: str = "",
+    ) -> Page:
+        require_master_admin(actor_id, self.master_admin_id)
+        allowed = {
+            "all", "pending_payment", "payment_review", "paid",
+            "fulfilled", "rejected", "cancelled",
+        }
+        state = str(status or "all").strip()
+        if state not in allowed:
+            raise ValueError("invalid order status filter")
+        safe_page = max(0, int(page))
+        safe_size = max(1, min(int(page_size), 20))
+        offset = safe_page * safe_size
+        clauses: list[str] = []
+        params: list[Any] = []
+        if state != "all":
+            clauses.append("o.status = ?")
+            params.append(state)
+        text = str(query or "").strip()
+        if text:
+            like = f"%{text}%"
+            search_parts = [
+                "o.public_id LIKE ?",
+                "c.display_name LIKE ?",
+                "c.username LIKE ?",
+            ]
+            params.extend([like, like, like])
+            if text.isdigit():
+                search_parts.extend([
+                    "c.telegram_user_id = ?",
+                    "o.id = ?",
+                ])
+                params.extend([int(text), int(text)])
+            clauses.append("(" + " OR ".join(search_parts) + ")")
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = self.conn.execute(
+            "SELECT o.*, c.telegram_user_id, c.display_name, c.username,"
+            " p.name AS plan_name, t.name AS tenant_name"
+            " FROM customer_orders AS o"
+            " JOIN platform_customers AS c ON c.id = o.customer_id"
+            " LEFT JOIN license_plans AS p ON p.id = o.plan_id"
+            " LEFT JOIN tenants AS t ON t.id = o.tenant_id"
+            + where
+            + " ORDER BY o.id DESC LIMIT ? OFFSET ?",
+            tuple(params + [safe_size + 1, offset]),
+        ).fetchall()
+        items = [dict(row) for row in rows]
+        return Page(
+            items=items[:safe_size],
+            page=safe_page,
+            page_size=safe_size,
+            has_previous=safe_page > 0,
+            has_next=len(items) > safe_size,
+        )
+
+    def get_order_admin(self, actor_id: int, order_id: int) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        row = self.conn.execute(
+            "SELECT o.*, c.telegram_user_id, c.display_name, c.username,"
+            " p.name AS plan_name, p.duration_days, t.name AS tenant_name"
+            " FROM customer_orders AS o"
+            " JOIN platform_customers AS c ON c.id = o.customer_id"
+            " LEFT JOIN license_plans AS p ON p.id = o.plan_id"
+            " LEFT JOIN tenants AS t ON t.id = o.tenant_id"
+            " WHERE o.id = ?",
+            (int(order_id),),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("order not found")
+        result = dict(row)
+        receipts = self.conn.execute(
+            "SELECT r.*, m.title AS method_title, m.kind AS method_kind"
+            " FROM payment_receipts AS r"
+            " JOIN payment_methods AS m ON m.id = r.payment_method_id"
+            " WHERE r.order_id = ? ORDER BY r.id DESC",
+            (int(order_id),),
+        ).fetchall()
+        result["receipts"] = [dict(item) for item in receipts]
+        wallet_tx = self.conn.execute(
+            "SELECT id, amount, kind, resulting_balance, created_at"
+            " FROM wallet_transactions WHERE order_id = ? ORDER BY id DESC",
+            (int(order_id),),
+        ).fetchall()
+        result["wallet_transactions"] = [dict(item) for item in wallet_tx]
+        return result
+
     # ---- owner-only commerce administration ----
 
     def add_payment_method(
