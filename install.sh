@@ -210,13 +210,11 @@ EOF
 
 edit_env_value() {
     local key="$1" value="$2" result
-    export WL_ENV_VALUE="$value"
-    if as_service_user "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/env_edit.py" --env-file "$ENV_FILE" --key "$key"; then
+    if printf '%s' "$value" | as_service_user "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/env_edit.py" --env-file "$ENV_FILE" --key "$key"; then
         result=0
     else
         result=$?
     fi
-    unset WL_ENV_VALUE
     chmod 600 "$ENV_FILE"
     chown "$(service_user)":"$(service_group)" "$ENV_FILE"
     return "$result"
@@ -224,13 +222,11 @@ edit_env_value() {
 
 verify_master_token_value() {
     local token="$1" result
-    export WL_BOT_TOKEN="$token"
-    if as_service_user "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/verify_bot_token.py"; then
+    if printf '%s' "$token" | as_service_user "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/verify_bot_token.py"; then
         result=0
     else
         result=$?
     fi
-    unset WL_BOT_TOKEN
     return "$result"
 }
 
