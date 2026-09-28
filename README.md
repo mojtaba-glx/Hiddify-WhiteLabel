@@ -25,7 +25,7 @@ Hiddify-WhiteLabel/
 ├── Ops/                  # Phase 6 - health, encrypted backup, locks, systemd
 ├── Shared/               # settings, redacted logging, crypto, time, access
 ├── Database/             # connection, repositories, migration runner
-├── Migrations/           # versioned SQL (currently 0001 through 0013)
+├── Migrations/           # versioned SQL (currently 0001 through 0014)
 ├── Tests/                # offline pytest suite, fake tokens only
 ├── scripts/              # migrate helper
 ├── install.sh            # English operations menu and systemd installer
@@ -143,6 +143,22 @@ Subscription usage and last-online state are synchronized periodically. Time-
 or quota-expired users are verified disabled on their provider before the local
 service is marked `expired`; an expired service cannot be re-enabled without
 renewal.
+
+Multi-node subscriptions are now first-class. The default sales server remains
+the required primary; every active `tenant_nodes` entry that points at a
+configured Hiddify/X-UI/X-NET server is provisioned as a child mapping. Child
+failures are recorded per node and can be retried without duplicating the
+primary service. Renewal, enable/disable, expiry, deletion and usage sync follow
+all current mappings; usage is summed across the active topology before global
+quota enforcement.
+
+Each activated subscription receives a high-entropy managed smart-link token.
+Shard 0 serves the shared HTTP endpoint on `SMART_SUB_HOST:SMART_SUB_PORT`
+(default `127.0.0.1:8091`). Set `SMART_SUB_PUBLIC_BASE_URL` to the TLS
+reverse-proxy/domain exposed to customers. The endpoint fetches native
+subscriptions from all active provider mappings, accepts plain or base64 input,
+filters config lines, deduplicates them and serves `all.txt` or `all.b64`
+with standard subscription metadata headers.
 
 The MasterBot JobQueue runs the Phase-3 evaluator at the configured interval.
 It advances expiry/grace states, suspends expired licenses, persists 7/3/1-day
