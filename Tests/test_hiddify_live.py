@@ -251,7 +251,7 @@ def test_hiddify_native_subscription_content_is_fetched() -> None:
     body = "vless://user@h.example:443?type=tcp#H"
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path.endswith("/user/u-content/all.txt")
+        assert request.url.path.endswith("/user-secret/u-content/all.txt")
         return httpx.Response(200, request=request, text=body)
 
     adapter = HiddifyPanelAdapter(transport=httpx.MockTransport(handler))
