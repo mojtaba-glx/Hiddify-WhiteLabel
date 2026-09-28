@@ -82,7 +82,7 @@ class CustomerPortalService:
             raise NotFoundError("customer is not registered")
         result = dict(row)
         if active and result["status"] != "active":
-            raise CustomerBlockedError("customer account is blocked")
+            raise CustomerBlockedError("⛔ حساب شما غیرفعال است.")
         return result
 
     def register_customer(
@@ -259,7 +259,7 @@ class CustomerPortalService:
                 (now, int(order_id), int(order["customer_id"])),
             )
             if changed.rowcount != 1:
-                raise PaymentStateError("order state changed")
+                raise PaymentStateError("وضعیت سفارش تغییر کرده است؛ دوباره بررسی کنید.")
             cursor = self.conn.execute(
                 "INSERT INTO payment_receipts"
                 " (order_id, payment_method_id, reference, telegram_file_id, status, created_at)"
@@ -329,7 +329,7 @@ class CustomerPortalService:
                 (final_status, now, int(order_id), customer_id),
             )
             if changed.rowcount != 1:
-                raise PaymentStateError("order state changed")
+                raise PaymentStateError("وضعیت سفارش تغییر کرده است؛ دوباره بررسی کنید.")
         return self.get_order(actor_id, order_id)
 
     def claim_trial(self, actor_id: int) -> dict[str, Any]:
@@ -411,7 +411,7 @@ class CustomerPortalService:
         with transaction(self.conn):
             fresh = self.get_order(actor_id, order_id)
             if fresh["status"] != "paid" or fresh["tenant_id"] is not None:
-                raise PaymentStateError("order state changed")
+                raise PaymentStateError("وضعیت سفارش تغییر کرده است؛ دوباره بررسی کنید.")
             result = self.master.provision_tenant_prepared(
                 self.master_admin_id,
                 name=_clean_text(name, maximum=120),
@@ -433,7 +433,7 @@ class CustomerPortalService:
                 (int(result.tenant_id), iso_utc(utcnow()), int(order_id), int(order["customer_id"])),
             )
             if changed.rowcount != 1:
-                raise PaymentStateError("order state changed")
+                raise PaymentStateError("وضعیت سفارش تغییر کرده است؛ دوباره بررسی کنید.")
             if order["kind"] == "trial":
                 self.conn.execute(
                     "UPDATE trial_claims SET tenant_id = ?, status = 'issued', updated_at = ?"
@@ -778,7 +778,7 @@ class CustomerPortalService:
                 raise NotFoundError("receipt not found")
             receipt = dict(receipt_row)
             if receipt["status"] != "pending" or receipt["order_status"] != "payment_review":
-                raise PaymentStateError("receipt was already reviewed")
+                raise PaymentStateError("این رسید قبلاً بررسی شده است.")
             receipt_status = "approved" if approve else "rejected"
             order_status = "paid" if approve else "rejected"
             changed = self.conn.execute(
@@ -787,7 +787,7 @@ class CustomerPortalService:
                 (receipt_status, int(actor_id), now, int(receipt_id)),
             )
             if changed.rowcount != 1:
-                raise PaymentStateError("receipt state changed")
+                raise PaymentStateError("وضعیت رسید تغییر کرده است؛ دوباره بررسی کنید.")
             if approve and receipt["kind"] == "wallet_topup":
                 self._credit_wallet(
                     int(receipt["customer_id"]), str(receipt["currency"]),
@@ -811,7 +811,7 @@ class CustomerPortalService:
                 (order_status, now, int(receipt["order_id"])),
             )
             if changed.rowcount != 1:
-                raise PaymentStateError("order state changed")
+                raise PaymentStateError("وضعیت سفارش تغییر کرده است؛ دوباره بررسی کنید.")
             AuditRepository(self.conn).append(
                 actor_id=int(actor_id),
                 tenant_id=(int(receipt["tenant_id"]) if receipt["tenant_id"] is not None else None),
