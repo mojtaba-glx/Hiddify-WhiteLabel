@@ -16,9 +16,13 @@ the management panel and normal Telegram users get the customer portal.
 ```text
 Hiddify-WhiteLabel/
 ├── MasterBot/            # owner UI + customer storefront
-├── TenantRuntime/        # Phase 5 - shared sharded AdminBot/UserBot runtime
-│   ├── AdminBot/
-│   └── UserBot/
+├── TenantRuntime/        # shared sharded tenant runtime
+│   ├── AdminBot/         # tenant-admin menus/callbacks/text flows
+│   │   └── handlers.py
+│   ├── UserBot/          # end-user shop/receipt/support flows
+│   │   └── handlers.py
+│   ├── common.py         # shared access gate/service lookup/error handling
+│   └── handlers.py       # small role dispatcher only
 ├── Gateway/              # Phase 5 - secure bot catalog and update policy
 ├── LicenseService/       # Phase 3 - evaluator, notifications and runtime gate
 ├── Provisioning/         # Phase 4 - atomic tenant/bot setup and handoff
