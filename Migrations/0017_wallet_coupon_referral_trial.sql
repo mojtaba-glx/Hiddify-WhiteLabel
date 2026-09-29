@@ -151,3 +151,37 @@ CREATE TABLE IF NOT EXISTS tenant_trial_claims (
     updated_at TEXT NOT NULL,
     UNIQUE (tenant_id, customer_id)
 );
+
+CREATE TABLE IF NOT EXISTS tenant_wallet_topups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+    customer_id INTEGER NOT NULL REFERENCES tenant_customers(id) ON DELETE RESTRICT,
+    amount INTEGER NOT NULL CHECK (amount > 0),
+    currency TEXT NOT NULL CHECK (length(currency) BETWEEN 3 AND 8),
+    status TEXT NOT NULL DEFAULT 'pending_payment'
+        CHECK (status IN ('pending_payment','payment_review','paid','rejected')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    paid_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS tenant_wallet_topup_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+    topup_id INTEGER NOT NULL REFERENCES tenant_wallet_topups(id) ON DELETE RESTRICT,
+    payment_method_id INTEGER NOT NULL REFERENCES tenant_payment_methods(id) ON DELETE RESTRICT,
+    reference TEXT,
+    telegram_file_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','approved','rejected')),
+    reviewed_by INTEGER,
+    created_at TEXT NOT NULL,
+    reviewed_at TEXT,
+    CHECK (reference IS NOT NULL OR telegram_file_id IS NOT NULL)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tenant_wallet_topup_pending_receipt
+    ON tenant_wallet_topup_receipts (topup_id) WHERE status='pending';
+CREATE INDEX IF NOT EXISTS idx_tenant_wallet_topups_admin
+    ON tenant_wallet_topups (tenant_id, status, id DESC);
+
