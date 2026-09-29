@@ -434,3 +434,53 @@ def test_zero_amount_coupon_can_finalize_without_receipt_via_wallet_checkout(
     assert result["status"] == "active"
     wallet = service.wallet_summary(7101)
     assert [x for x in wallet["history"] if x["kind"] == "purchase"] == []
+
+def test_wallet_topup_receipt_credits_once_and_reject_path_does_not_credit(
+    conn, factories, cipher
+) -> None:
+    _tenant, service, _panel, _plan, method, _user = _setup(
+        conn, factories, cipher
+    )
+    topup = service.create_wallet_topup(
+        7101, amount=75000, currency="IRR"
+    )
+    receipt = service.submit_wallet_topup_receipt(
+        7101,
+        topup_id=int(topup["id"]),
+        method_id=int(method["id"]),
+        reference="topup-paid",
+    )
+    reviewed = service.review_wallet_topup_receipt(
+        7001, receipt_id=int(receipt["id"]), approve=True
+    )
+    assert reviewed["status"] == "paid"
+    wallet = service.wallet_summary(7101)
+    assert next(x for x in wallet["accounts"] if x["currency"] == "IRR")["balance"] == 75000
+    topup_txs = [x for x in wallet["history"] if x["kind"] == "topup"]
+    assert len(topup_txs) == 1
+    with pytest.raises(TenantBusinessError):
+        service.review_wallet_topup_receipt(
+            7001, receipt_id=int(receipt["id"]), approve=True
+        )
+    assert next(
+        x for x in service.wallet_summary(7101)["accounts"]
+        if x["currency"] == "IRR"
+    )["balance"] == 75000
+
+    rejected = service.create_wallet_topup(
+        7101, amount=25000, currency="IRR"
+    )
+    rejected_receipt = service.submit_wallet_topup_receipt(
+        7101,
+        topup_id=int(rejected["id"]),
+        method_id=int(method["id"]),
+        reference="topup-reject",
+    )
+    service.review_wallet_topup_receipt(
+        7001, receipt_id=int(rejected_receipt["id"]), approve=False
+    )
+    assert next(
+        x for x in service.wallet_summary(7101)["accounts"]
+        if x["currency"] == "IRR"
+    )["balance"] == 75000
+
