@@ -12,8 +12,9 @@ import json
 import os
 import secrets
 import sqlite3
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from Database.connection import transaction
 from Shared.crypto import TokenCipher, TokenCipherError, fingerprint_token
@@ -1098,9 +1099,18 @@ class TenantBusinessService:
                     subscription_id = int(cursor.lastrowid or 0)
 
             changed = self.conn.execute(
-                "UPDATE tenant_orders SET status=?, updated_at=? "
+                "UPDATE tenant_orders "
+                "SET status=?, paid_at=CASE WHEN ?='paid' "
+                "THEN COALESCE(paid_at, ?) ELSE paid_at END, updated_at=? "
                 "WHERE id=? AND tenant_id=? AND status='payment_review'",
-                (target, now, int(receipt["order_id"]), self.tenant_id),
+                (
+                    target,
+                    target,
+                    now,
+                    now,
+                    int(receipt["order_id"]),
+                    self.tenant_id,
+                ),
             )
             if changed.rowcount != 1:
                 raise TenantBusinessError("order state changed")
@@ -2083,6 +2093,450 @@ class TenantBusinessService:
             raise TenantBusinessError(
                 "subscription link is unavailable"
             ) from exc
+    @staticmethod
+    def _report_period(
+        days: int,
+        *,
+        now: datetime | None = None,
+        tz_name: str | None = None,
+    ) -> tuple[str | None, str | None, str]:
+        span = int(days)
+        if span < 0:
+            raise ValueError("invalid report period")
+        timezone_name = str(
+            tz_name or os.getenv("DISPLAY_TIMEZONE", "Asia/Tehran") or "Asia/Tehran"
+        ).strip()
+        try:
+            zone = ZoneInfo(timezone_name)
+        except Exception:
+            zone = ZoneInfo("Asia/Tehran")
+            timezone_name = "Asia/Tehran"
+        moment = now or utcnow()
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        local_now = moment.astimezone(zone)
+        if span == 0:
+            return None, None, f"همه زمان‌ها · {timezone_name}"
+        start_local = datetime.combine(
+            local_now.date() - timedelta(days=span - 1),
+            datetime.min.time(),
+            tzinfo=zone,
+        )
+        end_local = datetime.combine(
+            local_now.date() + timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=zone,
+        )
+        return (
+            iso_utc(start_local.astimezone(timezone.utc)),
+            iso_utc(end_local.astimezone(timezone.utc)),
+            (
+                "امروز"
+                if span == 1
+                else f"{span} روز اخیر"
+            )
+            + f" · {timezone_name}",
+        )
+
+    @staticmethod
+    def _money_totals(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+        return [
+            {
+                "currency": str(row["currency"]),
+                "count": int(row["count"] or 0),
+                "amount": int(row["amount"] or 0),
+            }
+            for row in rows
+        ]
+
+    def sales_report(
+        self,
+        actor_id: int,
+        *,
+        days: int = 1,
+        now: datetime | None = None,
+        tz_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Tenant-scoped financial + operational report using immutable paid_at."""
+        self._admin(actor_id)
+        start, end, label = self._report_period(
+            int(days), now=now, tz_name=tz_name
+        )
+        paid_where = (
+            "o.tenant_id=? AND o.status IN ('paid','fulfilled') "
+            "AND o.paid_at IS NOT NULL"
+        )
+        paid_args: list[Any] = [self.tenant_id]
+        reviewed_where = "r.tenant_id=?"
+        reviewed_args: list[Any] = [self.tenant_id]
+        customer_where = "tenant_id=?"
+        customer_args: list[Any] = [self.tenant_id]
+        if start is not None and end is not None:
+            paid_where += " AND o.paid_at>=? AND o.paid_at<?"
+            paid_args.extend([start, end])
+            reviewed_where += " AND r.reviewed_at>=? AND r.reviewed_at<?"
+            reviewed_args.extend([start, end])
+            customer_where += " AND created_at>=? AND created_at<?"
+            customer_args.extend([start, end])
+
+        totals = self._money_totals(
+            self.conn.execute(
+                "SELECT o.currency, COUNT(*) AS count, "
+                "COALESCE(SUM(o.amount),0) AS amount "
+                "FROM tenant_orders o "
+                f"WHERE {paid_where} GROUP BY o.currency ORDER BY o.currency",
+                tuple(paid_args),
+            ).fetchall()
+        )
+        operation_rows = self.conn.execute(
+            "SELECT o.currency, "
+            "SUM(CASE WHEN ro.order_id IS NULL THEN 1 ELSE 0 END) AS purchase_count, "
+            "COALESCE(SUM(CASE WHEN ro.order_id IS NULL THEN o.amount ELSE 0 END),0) "
+            "AS purchase_amount, "
+            "SUM(CASE WHEN ro.order_id IS NOT NULL THEN 1 ELSE 0 END) AS renewal_count, "
+            "COALESCE(SUM(CASE WHEN ro.order_id IS NOT NULL THEN o.amount ELSE 0 END),0) "
+            "AS renewal_amount, "
+            "COALESCE(SUM(p.traffic_gb),0) AS traffic_gb "
+            "FROM tenant_orders o "
+            "JOIN tenant_sale_plans p ON p.id=o.plan_id AND p.tenant_id=o.tenant_id "
+            "LEFT JOIN tenant_renewal_orders ro "
+            "ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
+            f"WHERE {paid_where} GROUP BY o.currency ORDER BY o.currency",
+            tuple(paid_args),
+        ).fetchall()
+        operations = [
+            {
+                "currency": str(row["currency"]),
+                "purchase_count": int(row["purchase_count"] or 0),
+                "purchase_amount": int(row["purchase_amount"] or 0),
+                "renewal_count": int(row["renewal_count"] or 0),
+                "renewal_amount": int(row["renewal_amount"] or 0),
+                "traffic_gb": int(row["traffic_gb"] or 0),
+            }
+            for row in operation_rows
+        ]
+        unique_customers = self.conn.execute(
+            "SELECT COUNT(DISTINCT o.customer_id) "
+            "FROM tenant_orders o "
+            f"WHERE {paid_where}",
+            tuple(paid_args),
+        ).fetchone()
+        payment_counts = self.conn.execute(
+            "SELECT "
+            "SUM(CASE WHEN r.status='approved' THEN 1 ELSE 0 END) AS approved, "
+            "SUM(CASE WHEN r.status='rejected' THEN 1 ELSE 0 END) AS rejected "
+            "FROM tenant_receipts r "
+            f"WHERE {reviewed_where}",
+            tuple(reviewed_args),
+        ).fetchone()
+        new_customers = self.conn.execute(
+            f"SELECT COUNT(*) FROM tenant_customers WHERE {customer_where}",
+            tuple(customer_args),
+        ).fetchone()
+
+        current = self.conn.execute(
+            "SELECT "
+            "(SELECT COUNT(*) FROM tenant_customers c "
+            " WHERE c.tenant_id=? AND c.status='active') AS customers_active, "
+            "(SELECT COUNT(*) FROM tenant_customers c "
+            " WHERE c.tenant_id=?) AS customers_total, "
+            "(SELECT COUNT(*) FROM tenant_receipts r "
+            " WHERE r.tenant_id=? AND r.status='pending') AS receipts_pending, "
+            "(SELECT COUNT(*) FROM tenant_orders o "
+            " WHERE o.tenant_id=? AND o.status='paid') AS fulfillment_pending, "
+            "(SELECT COUNT(*) FROM tenant_subscriptions s "
+            " WHERE s.tenant_id=? AND s.status='active') AS subs_active, "
+            "(SELECT COUNT(*) FROM tenant_subscriptions s "
+            " WHERE s.tenant_id=? AND s.status='disabled') AS subs_disabled, "
+            "(SELECT COUNT(*) FROM tenant_subscriptions s "
+            " WHERE s.tenant_id=? AND s.status='expired') AS subs_expired, "
+            "(SELECT COUNT(*) FROM tenant_subscriptions s "
+            " WHERE s.tenant_id=? AND s.status='pending_provisioning') AS subs_pending, "
+            "(SELECT COUNT(*) FROM tenant_subscriptions s "
+            " WHERE s.tenant_id=? AND s.enforcement_pending=1) AS enforcement_pending, "
+            "(SELECT COUNT(*) FROM tenant_subscription_nodes n "
+            " WHERE n.tenant_id=? AND "
+            " (n.status='error' OR n.fail_count>0 OR n.frozen_at IS NOT NULL)) AS node_attention, "
+            "(SELECT COUNT(*) FROM tenant_tickets t "
+            " WHERE t.tenant_id=? AND t.status='open') AS tickets_open",
+            (self.tenant_id,) * 11,
+        ).fetchone()
+
+        return {
+            "period_days": int(days),
+            "period_label": label,
+            "start": start,
+            "end": end,
+            "totals": totals,
+            "operations": operations,
+            "paid_orders": sum(item["count"] for item in totals),
+            "unique_customers": int(unique_customers[0] or 0),
+            "approved_receipts": int(payment_counts["approved"] or 0),
+            "rejected_receipts": int(payment_counts["rejected"] or 0),
+            "new_customers": int(new_customers[0] or 0),
+            "current": dict(current),
+        }
+
+    def dashboard_summary(
+        self,
+        actor_id: int,
+        *,
+        now: datetime | None = None,
+        tz_name: str | None = None,
+    ) -> dict[str, Any]:
+        return self.sales_report(
+            actor_id, days=1, now=now, tz_name=tz_name
+        )
+
+    def search_customers_admin(
+        self,
+        actor_id: int,
+        query: str,
+        *,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        term = _text(query, 120)
+        like = f"%{term.lstrip('@')}%"
+        args: list[Any] = [
+            self.tenant_id,
+            like,
+            like,
+        ]
+        id_clause = ""
+        numeric = 0
+        try:
+            numeric = int(term)
+        except (TypeError, ValueError):
+            numeric = 0
+        if numeric > 0:
+            id_clause = " OR c.telegram_user_id=? OR c.id=?"
+            args.extend([numeric, numeric])
+        args.append(max(1, min(int(limit), 50)))
+        rows = self.conn.execute(
+            "SELECT c.*, "
+            "(SELECT COUNT(*) FROM tenant_subscriptions s "
+            " WHERE s.tenant_id=c.tenant_id AND s.customer_id=c.id "
+            " AND s.status='active') AS active_subscriptions, "
+            "(SELECT COUNT(*) FROM tenant_subscriptions s "
+            " WHERE s.tenant_id=c.tenant_id AND s.customer_id=c.id "
+            " AND s.status='expired') AS expired_subscriptions, "
+            "(SELECT MAX(o.paid_at) FROM tenant_orders o "
+            " WHERE o.tenant_id=c.tenant_id AND o.customer_id=c.id "
+            " AND o.status IN ('paid','fulfilled')) AS last_paid_at "
+            "FROM tenant_customers c "
+            "WHERE c.tenant_id=? AND "
+            "(c.display_name LIKE ? COLLATE NOCASE "
+            "OR COALESCE(c.username,'') LIKE ? COLLATE NOCASE"
+            + id_clause
+            + ") ORDER BY active_subscriptions DESC, c.id DESC LIMIT ?",
+            tuple(args),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def customer_profile_admin(
+        self,
+        actor_id: int,
+        *,
+        customer_id: int,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        row = self.conn.execute(
+            "SELECT c.*, "
+            "(SELECT COUNT(*) FROM tenant_subscriptions s "
+            " WHERE s.tenant_id=c.tenant_id AND s.customer_id=c.id) AS subscriptions_total, "
+            "(SELECT COUNT(*) FROM tenant_subscriptions s "
+            " WHERE s.tenant_id=c.tenant_id AND s.customer_id=c.id "
+            " AND s.status='active') AS subscriptions_active, "
+            "(SELECT COUNT(*) FROM tenant_subscriptions s "
+            " WHERE s.tenant_id=c.tenant_id AND s.customer_id=c.id "
+            " AND s.status='disabled') AS subscriptions_disabled, "
+            "(SELECT COUNT(*) FROM tenant_subscriptions s "
+            " WHERE s.tenant_id=c.tenant_id AND s.customer_id=c.id "
+            " AND s.status='expired') AS subscriptions_expired, "
+            "(SELECT COUNT(*) FROM tenant_subscriptions s "
+            " WHERE s.tenant_id=c.tenant_id AND s.customer_id=c.id "
+            " AND s.status='pending_provisioning') AS subscriptions_pending, "
+            "(SELECT COUNT(*) FROM tenant_tickets t "
+            " WHERE t.tenant_id=c.tenant_id AND t.customer_id=c.id "
+            " AND t.status='open') AS tickets_open "
+            "FROM tenant_customers c WHERE c.id=? AND c.tenant_id=?",
+            (int(customer_id), self.tenant_id),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("customer not found")
+        result = dict(row)
+        result["paid_totals"] = self._money_totals(
+            self.conn.execute(
+                "SELECT currency, COUNT(*) AS count, "
+                "COALESCE(SUM(amount),0) AS amount "
+                "FROM tenant_orders WHERE tenant_id=? AND customer_id=? "
+                "AND status IN ('paid','fulfilled') AND paid_at IS NOT NULL "
+                "GROUP BY currency ORDER BY currency",
+                (self.tenant_id, int(customer_id)),
+            ).fetchall()
+        )
+        result["recent_orders"] = [
+            dict(item)
+            for item in self.conn.execute(
+                "SELECT o.*, p.name AS plan_name, "
+                "CASE WHEN ro.order_id IS NULL THEN 'purchase' ELSE 'renewal' END "
+                "AS operation "
+                "FROM tenant_orders o "
+                "JOIN tenant_sale_plans p ON p.id=o.plan_id AND p.tenant_id=o.tenant_id "
+                "LEFT JOIN tenant_renewal_orders ro "
+                "ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
+                "WHERE o.tenant_id=? AND o.customer_id=? "
+                "ORDER BY o.id DESC LIMIT 5",
+                (self.tenant_id, int(customer_id)),
+            ).fetchall()
+        ]
+        return result
+
+    def set_customer_status_admin(
+        self,
+        actor_id: int,
+        *,
+        customer_id: int,
+        status: str,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        normalized = str(status or "").strip().lower()
+        if normalized not in ("active", "blocked"):
+            raise ValueError("invalid customer status")
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_customers SET status=?, updated_at=? "
+                "WHERE id=? AND tenant_id=?",
+                (
+                    normalized,
+                    now,
+                    int(customer_id),
+                    self.tenant_id,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("customer not found")
+        return self.customer_profile_admin(actor_id, customer_id=int(customer_id))
+
+    def subscriptions_for_customer_admin(
+        self,
+        actor_id: int,
+        *,
+        customer_id: int,
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        owned = self.conn.execute(
+            "SELECT 1 FROM tenant_customers WHERE id=? AND tenant_id=?",
+            (int(customer_id), self.tenant_id),
+        ).fetchone()
+        if owned is None:
+            raise TenantBusinessError("customer not found")
+        rows = self.conn.execute(
+            "SELECT s.*, p.name AS plan_name, srv.label AS server_label "
+            "FROM tenant_subscriptions s "
+            "JOIN tenant_sale_plans p ON p.id=s.plan_id AND p.tenant_id=s.tenant_id "
+            "LEFT JOIN tenant_servers srv ON srv.id=s.server_id AND srv.tenant_id=s.tenant_id "
+            "WHERE s.tenant_id=? AND s.customer_id=? ORDER BY s.id DESC",
+            (self.tenant_id, int(customer_id)),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def service_attention_admin(
+        self,
+        actor_id: int,
+        *,
+        limit: int = 30,
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        rows = self.conn.execute(
+            "SELECT s.*, c.display_name, c.telegram_user_id, p.name AS plan_name, "
+            "srv.label AS server_label, "
+            "(SELECT COUNT(*) FROM tenant_subscription_nodes n "
+            " WHERE n.tenant_id=s.tenant_id AND n.subscription_id=s.id "
+            " AND (n.status='error' OR n.fail_count>0 OR n.frozen_at IS NOT NULL)) "
+            "AS node_errors "
+            "FROM tenant_subscriptions s "
+            "JOIN tenant_customers c ON c.id=s.customer_id AND c.tenant_id=s.tenant_id "
+            "JOIN tenant_sale_plans p ON p.id=s.plan_id AND p.tenant_id=s.tenant_id "
+            "LEFT JOIN tenant_servers srv ON srv.id=s.server_id AND srv.tenant_id=s.tenant_id "
+            "WHERE s.tenant_id=? AND "
+            "(s.status IN ('pending_provisioning','expired','disabled') "
+            " OR s.enforcement_pending=1 "
+            " OR EXISTS (SELECT 1 FROM tenant_subscription_nodes n2 "
+            "   WHERE n2.tenant_id=s.tenant_id AND n2.subscription_id=s.id "
+            "   AND (n2.status='error' OR n2.fail_count>0 OR n2.frozen_at IS NOT NULL))) "
+            "ORDER BY s.enforcement_pending DESC, "
+            "CASE s.status WHEN 'pending_provisioning' THEN 0 WHEN 'disabled' THEN 1 "
+            "WHEN 'expired' THEN 2 ELSE 3 END, s.id DESC LIMIT ?",
+            (self.tenant_id, max(1, min(int(limit), 100))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def customer_account_summary(self, actor_id: int) -> dict[str, Any]:
+        customer = self._customer(actor_id, active=False)
+        counts = self.conn.execute(
+            "SELECT "
+            "SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active, "
+            "SUM(CASE WHEN status='disabled' THEN 1 ELSE 0 END) AS disabled, "
+            "SUM(CASE WHEN status='expired' THEN 1 ELSE 0 END) AS expired, "
+            "SUM(CASE WHEN status='pending_provisioning' THEN 1 ELSE 0 END) AS pending "
+            "FROM tenant_subscriptions WHERE tenant_id=? AND customer_id=?",
+            (self.tenant_id, int(customer["id"])),
+        ).fetchone()
+        paid_totals = self._money_totals(
+            self.conn.execute(
+                "SELECT currency, COUNT(*) AS count, COALESCE(SUM(amount),0) AS amount "
+                "FROM tenant_orders WHERE tenant_id=? AND customer_id=? "
+                "AND status IN ('paid','fulfilled') AND paid_at IS NOT NULL "
+                "GROUP BY currency ORDER BY currency",
+                (self.tenant_id, int(customer["id"])),
+            ).fetchall()
+        )
+        pending_orders = self.conn.execute(
+            "SELECT COUNT(*) FROM tenant_orders "
+            "WHERE tenant_id=? AND customer_id=? "
+            "AND status IN ('pending_payment','payment_review','paid')",
+            (self.tenant_id, int(customer["id"])),
+        ).fetchone()
+        return {
+            "customer": dict(customer),
+            "subscriptions": {
+                "active": int(counts["active"] or 0),
+                "disabled": int(counts["disabled"] or 0),
+                "expired": int(counts["expired"] or 0),
+                "pending": int(counts["pending"] or 0),
+            },
+            "paid_totals": paid_totals,
+            "pending_orders": int(pending_orders[0] or 0),
+        }
+
+    def list_customer_orders(
+        self,
+        actor_id: int,
+        *,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        customer = self._customer(actor_id, active=False)
+        rows = self.conn.execute(
+            "SELECT o.*, p.name AS plan_name, "
+            "CASE WHEN ro.order_id IS NULL THEN 'purchase' ELSE 'renewal' END "
+            "AS operation "
+            "FROM tenant_orders o "
+            "JOIN tenant_sale_plans p ON p.id=o.plan_id AND p.tenant_id=o.tenant_id "
+            "LEFT JOIN tenant_renewal_orders ro "
+            "ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
+            "WHERE o.tenant_id=? AND o.customer_id=? "
+            "ORDER BY o.id DESC LIMIT ?",
+            (
+                self.tenant_id,
+                int(customer["id"]),
+                max(1, min(int(limit), 50)),
+            ),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def create_ticket(self, actor_id: int, *, subject: str, body: str) -> dict[str, Any]:
         customer = self._customer(actor_id); now = iso_utc(utcnow())
         with transaction(self.conn):
