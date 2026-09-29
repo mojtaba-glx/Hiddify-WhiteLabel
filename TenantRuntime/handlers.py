@@ -122,7 +122,10 @@ def _customer_profile_text(profile: dict) -> str:
     if recent:
         lines.extend(["", "🧾 آخرین سفارش‌ها"])
         for order in recent[:5]:
-            op = "تمدید" if order.get("operation") == "renewal" else "خرید"
+            op = {
+                "renewal": "تمدید",
+                "trial": "تست رایگان",
+            }.get(str(order.get("operation") or ""), "خرید")
             lines.append(
                 f"• #{order['id']} · {op} · {order.get('plan_name') or '-'} · "
                 f"{order.get('status')} · {int(order.get('amount') or 0):,} "
