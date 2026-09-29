@@ -244,7 +244,7 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    spec, policy, state_store, _ = _services(context)
+    spec, policy, state_store, business = _services(context)
     user_id = int(update.effective_user.id) if update.effective_user else 0
     decision = policy.check(spec, telegram_user_id=user_id)
     if not decision.allowed:
@@ -253,13 +253,38 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     state = state_store.load(user_id)
     state_store.save(user_id, {**state, "screen": "status"})
     role_label = "AdminBot" if spec.role == "admin" else "UserBot"
-    text = (
+    base = (
         f"📊 وضعیت ربات\n\n"
         f"مجموعه: {spec.tenant_name}\n"
         f"نوع: {role_label}\n"
         f"لایسنس: {decision.license_status}\n"
         "Runtime: ready"
     )
+    try:
+        if spec.role == "admin":
+            report = business.dashboard_summary(user_id)
+            current = dict(report.get("current") or {})
+            text = (
+                base
+                + "\n\n📡 وضعیت کسب‌وکار"
+                + f"\nسرویس فعال: {int(current.get('subs_active') or 0)}"
+                + f"\nمنقضی: {int(current.get('subs_expired') or 0)}"
+                + f"\nدر انتظار تحویل: {int(current.get('fulfillment_pending') or 0)}"
+                + f"\nرسید در انتظار: {int(current.get('receipts_pending') or 0)}"
+                + f"\nنیازمند Enforcer: {int(current.get('enforcement_pending') or 0)}"
+            )
+        else:
+            summary = business.customer_account_summary(user_id)
+            subs = dict(summary.get("subscriptions") or {})
+            text = (
+                base
+                + "\n\n📦 وضعیت حساب"
+                + f"\nاشتراک فعال: {int(subs.get('active') or 0)}"
+                + f"\nمنقضی: {int(subs.get('expired') or 0)}"
+                + f"\nسفارش باز: {int(summary.get('pending_orders') or 0)}"
+            )
+    except (TenantBusinessError, ValueError, sqlite3.Error):
+        text = base
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(text, reply_markup=_menu(spec))
