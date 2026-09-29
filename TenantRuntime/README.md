@@ -80,6 +80,23 @@ states, and block/unblock only within the bound tenant. UserBot exposes
 `حساب من`, order history, subscription management and ticket history.
 Ticket replies/closure are handled inside Tenant AdminBot and users can read the
 latest admin response from their own UserBot.
+The UserBot checkout now has three settlement paths: apply one tenant coupon,
+pay the final amount entirely from the tenant wallet, or continue to the
+existing card/crypto receipt flow. Wallet top-ups have their own receipt table
+and admin-review flow so they are not confused with subscription revenue.
+Ledger rows use deterministic keys for automated credits/debits such as order
+payments, referral rewards and wallet top-ups.
+
+AdminBot `فروش پیشرفته` controls Referral and Free Trial settings, coupon
+creation/status, pending wallet top-up receipts and manual wallet adjustments.
+Referral registration is persisted from the UserBot `/start ref_<code>` payload
+after the tenant customer is registered. A valid trial can award
+`referral_trial`; the first qualifying real purchase can award
+`referral_purchase`. Trial orders are explicitly marked `order_kind='trial'`
+and excluded from confirmed sales reporting.
+
+Unpaid orders can be cancelled by their owner. If a coupon was reserved on that
+order, cancellation releases its redemption and global use count.
 
 Run one process for each shard index:
 

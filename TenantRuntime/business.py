@@ -86,7 +86,10 @@ class TenantBusinessService:
                 " display_name = excluded.display_name, username = excluded.username, updated_at = excluded.updated_at",
                 (self.tenant_id, int(actor_id), _text(display_name, 120), _text(username, 64, required=False) or None, now, now),
             )
-        return self._customer(actor_id, active=False)
+        customer = self._customer(actor_id, active=False)
+        if not str(customer.get("referral_code") or "").strip():
+            customer = self._ensure_referral_code(int(customer["id"]))
+        return customer
 
     def add_server(
         self,
@@ -841,6 +844,1238 @@ class TenantBusinessService:
             "errors": errors,
         }
 
+    def _ensure_growth_settings(self) -> dict[str, Any]:
+        row = self.conn.execute(
+            "SELECT * FROM tenant_sales_growth_settings WHERE tenant_id=?",
+            (self.tenant_id,),
+        ).fetchone()
+        if row is not None:
+            return dict(row)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            self.conn.execute(
+                "INSERT OR IGNORE INTO tenant_sales_growth_settings "
+                "(tenant_id, updated_at) VALUES (?, ?)",
+                (self.tenant_id, now),
+            )
+        row = self.conn.execute(
+            "SELECT * FROM tenant_sales_growth_settings WHERE tenant_id=?",
+            (self.tenant_id,),
+        ).fetchone()
+        assert row is not None
+        return dict(row)
+
+    def growth_settings(self, actor_id: int) -> dict[str, Any]:
+        self._admin(actor_id)
+        return self._ensure_growth_settings()
+
+    def update_growth_settings(
+        self,
+        actor_id: int,
+        *,
+        referral_enabled: bool | None = None,
+        referral_trial_reward: int | None = None,
+        referral_purchase_reward: int | None = None,
+        referral_min_purchase: int | None = None,
+        referral_max_rewards: int | None = None,
+        referral_currency: str | None = None,
+        trial_enabled: bool | None = None,
+        trial_traffic_gb: int | None = None,
+        trial_duration_days: int | None = None,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        current = self._ensure_growth_settings()
+        values = {
+            "referral_enabled": int(
+                bool(current["referral_enabled"])
+                if referral_enabled is None
+                else bool(referral_enabled)
+            ),
+            "referral_trial_reward": int(
+                current["referral_trial_reward"]
+                if referral_trial_reward is None
+                else referral_trial_reward
+            ),
+            "referral_purchase_reward": int(
+                current["referral_purchase_reward"]
+                if referral_purchase_reward is None
+                else referral_purchase_reward
+            ),
+            "referral_min_purchase": int(
+                current["referral_min_purchase"]
+                if referral_min_purchase is None
+                else referral_min_purchase
+            ),
+            "referral_max_rewards": int(
+                current["referral_max_rewards"]
+                if referral_max_rewards is None
+                else referral_max_rewards
+            ),
+            "referral_currency": str(
+                current["referral_currency"]
+                if referral_currency is None
+                else referral_currency
+            ).strip().upper(),
+            "trial_enabled": int(
+                bool(current["trial_enabled"])
+                if trial_enabled is None
+                else bool(trial_enabled)
+            ),
+            "trial_traffic_gb": int(
+                current["trial_traffic_gb"]
+                if trial_traffic_gb is None
+                else trial_traffic_gb
+            ),
+            "trial_duration_days": int(
+                current["trial_duration_days"]
+                if trial_duration_days is None
+                else trial_duration_days
+            ),
+        }
+        if (
+            min(
+                values["referral_trial_reward"],
+                values["referral_purchase_reward"],
+                values["referral_min_purchase"],
+                values["referral_max_rewards"],
+            )
+            < 0
+            or values["trial_traffic_gb"] <= 0
+            or values["trial_duration_days"] <= 0
+            or not 3 <= len(values["referral_currency"]) <= 8
+        ):
+            raise ValueError("invalid sales growth settings")
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            self.conn.execute(
+                "UPDATE tenant_sales_growth_settings SET "
+                "referral_enabled=?, referral_trial_reward=?, "
+                "referral_purchase_reward=?, referral_min_purchase=?, "
+                "referral_max_rewards=?, referral_currency=?, trial_enabled=?, "
+                "trial_traffic_gb=?, trial_duration_days=?, updated_at=? "
+                "WHERE tenant_id=?",
+                (
+                    values["referral_enabled"],
+                    values["referral_trial_reward"],
+                    values["referral_purchase_reward"],
+                    values["referral_min_purchase"],
+                    values["referral_max_rewards"],
+                    values["referral_currency"],
+                    values["trial_enabled"],
+                    values["trial_traffic_gb"],
+                    values["trial_duration_days"],
+                    now,
+                    self.tenant_id,
+                ),
+            )
+        return self._ensure_growth_settings()
+
+    def _ensure_referral_code(self, customer_id: int) -> dict[str, Any]:
+        row = self.conn.execute(
+            "SELECT * FROM tenant_customers WHERE id=? AND tenant_id=?",
+            (int(customer_id), self.tenant_id),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("customer not found")
+        if str(row["referral_code"] or "").strip():
+            return dict(row)
+        for _ in range(12):
+            code = secrets.token_hex(5)
+            try:
+                with transaction(self.conn):
+                    changed = self.conn.execute(
+                        "UPDATE tenant_customers SET referral_code=?, updated_at=? "
+                        "WHERE id=? AND tenant_id=? "
+                        "AND (referral_code IS NULL OR referral_code='')",
+                        (
+                            code,
+                            iso_utc(utcnow()),
+                            int(customer_id),
+                            self.tenant_id,
+                        ),
+                    )
+                if changed.rowcount == 1:
+                    break
+            except sqlite3.IntegrityError:
+                continue
+        row = self.conn.execute(
+            "SELECT * FROM tenant_customers WHERE id=? AND tenant_id=?",
+            (int(customer_id), self.tenant_id),
+        ).fetchone()
+        if row is None or not str(row["referral_code"] or "").strip():
+            raise TenantBusinessError("referral code could not be created")
+        return dict(row)
+
+    def referral_summary(self, actor_id: int) -> dict[str, Any]:
+        customer = self._customer(actor_id, active=False)
+        customer = self._ensure_referral_code(int(customer["id"]))
+        settings = self._ensure_growth_settings()
+        referred = self.conn.execute(
+            "SELECT COUNT(*) FROM tenant_referrals "
+            "WHERE tenant_id=? AND inviter_customer_id=? AND status='active'",
+            (self.tenant_id, int(customer["id"])),
+        ).fetchone()
+        rewards = self.conn.execute(
+            "SELECT reward_type, currency, COUNT(*) AS count, "
+            "COALESCE(SUM(amount),0) AS amount "
+            "FROM tenant_referral_rewards "
+            "WHERE tenant_id=? AND inviter_customer_id=? AND status='paid' "
+            "GROUP BY reward_type, currency ORDER BY reward_type, currency",
+            (self.tenant_id, int(customer["id"])),
+        ).fetchall()
+        return {
+            "referral_code": str(customer["referral_code"]),
+            "referred_count": int(referred[0] or 0),
+            "rewards": [dict(row) for row in rewards],
+            "settings": settings,
+        }
+
+    def register_referral(
+        self,
+        actor_id: int,
+        *,
+        referral_code: str,
+    ) -> dict[str, Any]:
+        invitee = self._customer(actor_id)
+        code = str(referral_code or "").strip().lower()
+        if not code or len(code) > 40:
+            raise TenantBusinessError("invalid referral code")
+        settings = self._ensure_growth_settings()
+        if not bool(settings["referral_enabled"]):
+            raise TenantBusinessError("referral program is disabled")
+        existing = self.conn.execute(
+            "SELECT * FROM tenant_referrals "
+            "WHERE tenant_id=? AND invitee_customer_id=?",
+            (self.tenant_id, int(invitee["id"])),
+        ).fetchone()
+        if existing is not None:
+            return dict(existing)
+        inviter = self.conn.execute(
+            "SELECT * FROM tenant_customers "
+            "WHERE tenant_id=? AND referral_code=? AND status='active'",
+            (self.tenant_id, code),
+        ).fetchone()
+        if inviter is None:
+            raise TenantBusinessError("referral code not found")
+        if int(inviter["id"]) == int(invitee["id"]):
+            raise TenantBusinessError("self referral is not allowed")
+        paid_before = self.conn.execute(
+            "SELECT 1 FROM tenant_orders "
+            "WHERE tenant_id=? AND customer_id=? "
+            "AND order_kind IN ('purchase','renewal') "
+            "AND status IN ('paid','fulfilled') LIMIT 1",
+            (self.tenant_id, int(invitee["id"])),
+        ).fetchone()
+        qualified = 0 if paid_before is not None else 1
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            cursor = self.conn.execute(
+                "INSERT INTO tenant_referrals "
+                "(tenant_id, inviter_customer_id, invitee_customer_id, "
+                "invited_by_code, qualified, fraud_flag, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 0, 'active', ?, ?)",
+                (
+                    self.tenant_id,
+                    int(inviter["id"]),
+                    int(invitee["id"]),
+                    code,
+                    qualified,
+                    now,
+                    now,
+                ),
+            )
+            self.conn.execute(
+                "UPDATE tenant_customers SET invited_by_customer_id=?, updated_at=? "
+                "WHERE id=? AND tenant_id=?",
+                (
+                    int(inviter["id"]),
+                    now,
+                    int(invitee["id"]),
+                    self.tenant_id,
+                ),
+            )
+        row = self.conn.execute(
+            "SELECT * FROM tenant_referrals WHERE id=? AND tenant_id=?",
+            (int(cursor.lastrowid or 0), self.tenant_id),
+        ).fetchone()
+        assert row is not None
+        return dict(row)
+
+    def _wallet_change_tx(
+        self,
+        *,
+        customer_id: int,
+        currency: str,
+        amount: int,
+        kind: str,
+        idempotency_key: str,
+        order_id: int | None = None,
+        note: str = "",
+    ) -> dict[str, Any]:
+        currency_code = _text(currency, 8).upper()
+        delta = int(amount)
+        if delta == 0:
+            raise ValueError("wallet amount must be non-zero")
+        existing = self.conn.execute(
+            "SELECT * FROM tenant_wallet_transactions WHERE idempotency_key=?",
+            (str(idempotency_key),),
+        ).fetchone()
+        if existing is not None:
+            return dict(existing)
+        row = self.conn.execute(
+            "SELECT balance FROM tenant_wallet_accounts "
+            "WHERE tenant_id=? AND customer_id=? AND currency=?",
+            (self.tenant_id, int(customer_id), currency_code),
+        ).fetchone()
+        balance = int(row["balance"] or 0) if row is not None else 0
+        resulting = balance + delta
+        if resulting < 0:
+            raise TenantBusinessError("insufficient wallet balance")
+        now = iso_utc(utcnow())
+        self.conn.execute(
+            "INSERT INTO tenant_wallet_accounts "
+            "(tenant_id, customer_id, currency, balance, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(tenant_id, customer_id, currency) DO UPDATE SET "
+            "balance=excluded.balance, updated_at=excluded.updated_at",
+            (
+                self.tenant_id,
+                int(customer_id),
+                currency_code,
+                resulting,
+                now,
+            ),
+        )
+        cursor = self.conn.execute(
+            "INSERT INTO tenant_wallet_transactions "
+            "(tenant_id, customer_id, currency, amount, kind, order_id, "
+            "idempotency_key, note, resulting_balance, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                self.tenant_id,
+                int(customer_id),
+                currency_code,
+                delta,
+                str(kind),
+                int(order_id) if order_id is not None else None,
+                str(idempotency_key),
+                _text(note, 240, required=False) or None,
+                resulting,
+                now,
+            ),
+        )
+        tx = self.conn.execute(
+            "SELECT * FROM tenant_wallet_transactions WHERE id=?",
+            (int(cursor.lastrowid or 0),),
+        ).fetchone()
+        assert tx is not None
+        return dict(tx)
+
+    def wallet_summary(self, actor_id: int) -> dict[str, Any]:
+        customer = self._customer(actor_id, active=False)
+        accounts = [
+            dict(row)
+            for row in self.conn.execute(
+                "SELECT * FROM tenant_wallet_accounts "
+                "WHERE tenant_id=? AND customer_id=? ORDER BY currency",
+                (self.tenant_id, int(customer["id"])),
+            ).fetchall()
+        ]
+        history = [
+            dict(row)
+            for row in self.conn.execute(
+                "SELECT * FROM tenant_wallet_transactions "
+                "WHERE tenant_id=? AND customer_id=? ORDER BY id DESC LIMIT 15",
+                (self.tenant_id, int(customer["id"])),
+            ).fetchall()
+        ]
+        return {"accounts": accounts, "history": history}
+
+    def create_wallet_topup(
+        self,
+        actor_id: int,
+        *,
+        amount: int,
+        currency: str,
+    ) -> dict[str, Any]:
+        customer = self._customer(actor_id)
+        value = int(amount)
+        currency_code = _text(currency, 8).upper()
+        if value <= 0:
+            raise ValueError("invalid wallet topup amount")
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            cursor = self.conn.execute(
+                "INSERT INTO tenant_wallet_topups "
+                "(tenant_id, customer_id, amount, currency, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'pending_payment', ?, ?)",
+                (
+                    self.tenant_id,
+                    int(customer["id"]),
+                    value,
+                    currency_code,
+                    now,
+                    now,
+                ),
+            )
+        row = self.conn.execute(
+            "SELECT * FROM tenant_wallet_topups WHERE id=? AND tenant_id=?",
+            (int(cursor.lastrowid or 0), self.tenant_id),
+        ).fetchone()
+        assert row is not None
+        return dict(row)
+
+    def wallet_topup(self, actor_id: int, topup_id: int) -> dict[str, Any]:
+        customer = self._customer(actor_id, active=False)
+        row = self.conn.execute(
+            "SELECT * FROM tenant_wallet_topups "
+            "WHERE id=? AND tenant_id=? AND customer_id=?",
+            (int(topup_id), self.tenant_id, int(customer["id"])),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("wallet topup not found")
+        return dict(row)
+
+    def submit_wallet_topup_receipt(
+        self,
+        actor_id: int,
+        *,
+        topup_id: int,
+        method_id: int,
+        reference: str | None = None,
+        telegram_file_id: str | None = None,
+    ) -> dict[str, Any]:
+        topup = self.wallet_topup(actor_id, int(topup_id))
+        if topup["status"] != "pending_payment":
+            raise TenantBusinessError("wallet topup is not awaiting payment")
+        method = self.method(int(method_id), currency=str(topup["currency"]))
+        ref = _text(reference, 160, required=False) or None
+        file_id = _text(telegram_file_id, 256, required=False) or None
+        if not ref and not file_id:
+            raise ValueError("receipt is required")
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_wallet_topups SET status='payment_review', updated_at=? "
+                "WHERE id=? AND tenant_id=? AND status='pending_payment'",
+                (now, int(topup_id), self.tenant_id),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("wallet topup state changed")
+            cursor = self.conn.execute(
+                "INSERT INTO tenant_wallet_topup_receipts "
+                "(tenant_id, topup_id, payment_method_id, reference, telegram_file_id, "
+                "status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+                (
+                    self.tenant_id,
+                    int(topup_id),
+                    int(method["id"]),
+                    ref,
+                    file_id,
+                    now,
+                ),
+            )
+        return {"id": int(cursor.lastrowid or 0), "topup_id": int(topup_id)}
+
+    def list_wallet_topups_admin(self, actor_id: int) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        rows = self.conn.execute(
+            "SELECT w.*, c.display_name, c.telegram_user_id "
+            "FROM tenant_wallet_topups w "
+            "JOIN tenant_customers c "
+            "ON c.id=w.customer_id AND c.tenant_id=w.tenant_id "
+            "WHERE w.tenant_id=? ORDER BY w.id DESC LIMIT 100",
+            (self.tenant_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_wallet_topup_receipts_admin(
+        self, actor_id: int
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        rows = self.conn.execute(
+            "SELECT r.*, w.customer_id, w.amount, w.currency, "
+            "w.status AS topup_status, c.display_name, c.telegram_user_id "
+            "FROM tenant_wallet_topup_receipts r "
+            "JOIN tenant_wallet_topups w "
+            "ON w.id=r.topup_id AND w.tenant_id=r.tenant_id "
+            "JOIN tenant_customers c "
+            "ON c.id=w.customer_id AND c.tenant_id=w.tenant_id "
+            "WHERE r.tenant_id=? AND r.status='pending' "
+            "ORDER BY r.id",
+            (self.tenant_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def review_wallet_topup_receipt(
+        self,
+        actor_id: int,
+        *,
+        receipt_id: int,
+        approve: bool,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            row = self.conn.execute(
+                "SELECT r.*, w.customer_id, w.amount, w.currency, "
+                "w.status AS topup_status "
+                "FROM tenant_wallet_topup_receipts r "
+                "JOIN tenant_wallet_topups w "
+                "ON w.id=r.topup_id AND w.tenant_id=r.tenant_id "
+                "WHERE r.id=? AND r.tenant_id=?",
+                (int(receipt_id), self.tenant_id),
+            ).fetchone()
+            if row is None:
+                raise TenantBusinessError("wallet topup receipt not found")
+            receipt = dict(row)
+            if receipt["status"] != "pending" or receipt["topup_status"] != "payment_review":
+                raise TenantBusinessError("wallet topup receipt was already reviewed")
+            changed = self.conn.execute(
+                "UPDATE tenant_wallet_topup_receipts "
+                "SET status=?, reviewed_by=?, reviewed_at=? "
+                "WHERE id=? AND tenant_id=? AND status='pending'",
+                (
+                    "approved" if approve else "rejected",
+                    int(actor_id),
+                    now,
+                    int(receipt_id),
+                    self.tenant_id,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("wallet topup receipt state changed")
+            target = "paid" if approve else "rejected"
+            changed = self.conn.execute(
+                "UPDATE tenant_wallet_topups SET status=?, "
+                "paid_at=CASE WHEN ?='paid' THEN COALESCE(paid_at, ?) ELSE paid_at END, "
+                "updated_at=? WHERE id=? AND tenant_id=? AND status='payment_review'",
+                (
+                    target,
+                    target,
+                    now,
+                    now,
+                    int(receipt["topup_id"]),
+                    self.tenant_id,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("wallet topup state changed")
+            wallet_tx = None
+            if approve:
+                wallet_tx = self._wallet_change_tx(
+                    customer_id=int(receipt["customer_id"]),
+                    currency=str(receipt["currency"]),
+                    amount=int(receipt["amount"]),
+                    kind="topup",
+                    idempotency_key=(
+                        f"tenant:{self.tenant_id}:wallet-topup:"
+                        f"{int(receipt['topup_id'])}"
+                    ),
+                    note=f"wallet topup #{int(receipt['topup_id'])}",
+                )
+        return {
+            "topup_id": int(receipt["topup_id"]),
+            "status": target,
+            "customer_id": int(receipt["customer_id"]),
+            "amount": int(receipt["amount"]),
+            "currency": str(receipt["currency"]),
+            "wallet_transaction": wallet_tx,
+        }
+
+    def adjust_wallet_admin(
+        self,
+        actor_id: int,
+        *,
+        customer_id: int,
+        currency: str,
+        amount: int,
+        note: str = "",
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        owned = self.conn.execute(
+            "SELECT 1 FROM tenant_customers WHERE id=? AND tenant_id=?",
+            (int(customer_id), self.tenant_id),
+        ).fetchone()
+        if owned is None:
+            raise TenantBusinessError("customer not found")
+        delta = int(amount)
+        if delta == 0:
+            raise ValueError("wallet amount must be non-zero")
+        nonce = secrets.token_hex(8)
+        with transaction(self.conn):
+            return self._wallet_change_tx(
+                customer_id=int(customer_id),
+                currency=currency,
+                amount=delta,
+                kind="admin_credit" if delta > 0 else "admin_debit",
+                idempotency_key=(
+                    f"tenant:{self.tenant_id}:admin-wallet:"
+                    f"{int(customer_id)}:{nonce}"
+                ),
+                note=note,
+            )
+
+    def add_coupon(
+        self,
+        actor_id: int,
+        *,
+        code: str,
+        discount_kind: str,
+        value: int,
+        currency: str = "",
+        min_amount: int = 0,
+        max_discount: int = 0,
+        max_uses: int = 0,
+        per_customer_limit: int = 1,
+        expires_at: str = "",
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        coupon_code = str(code or "").strip().upper()
+        kind = str(discount_kind or "").strip().lower()
+        if (
+            not coupon_code
+            or len(coupon_code) > 40
+            or kind not in ("percent", "fixed")
+            or int(value) <= 0
+            or (kind == "percent" and int(value) > 100)
+            or min(int(min_amount), int(max_discount), int(max_uses), int(per_customer_limit)) < 0
+        ):
+            raise ValueError("invalid coupon")
+        currency_code = str(currency or "").strip().upper()
+        if kind == "fixed" and not currency_code:
+            raise ValueError("fixed coupon requires currency")
+        expiry = _text(expires_at, 80, required=False) or None
+        if expiry:
+            parse_utc(expiry)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            cursor = self.conn.execute(
+                "INSERT INTO tenant_coupons "
+                "(tenant_id, code, discount_kind, value, currency, min_amount, "
+                "max_discount, max_uses, used_count, per_customer_limit, starts_at, "
+                "expires_at, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, 'active', ?, ?)",
+                (
+                    self.tenant_id,
+                    coupon_code,
+                    kind,
+                    int(value),
+                    currency_code or None,
+                    int(min_amount),
+                    int(max_discount),
+                    int(max_uses),
+                    int(per_customer_limit),
+                    expiry,
+                    now,
+                    now,
+                ),
+            )
+        return self.coupon(int(cursor.lastrowid or 0))
+
+    def coupon(self, coupon_id: int) -> dict[str, Any]:
+        row = self.conn.execute(
+            "SELECT * FROM tenant_coupons WHERE id=? AND tenant_id=?",
+            (int(coupon_id), self.tenant_id),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("coupon not found")
+        return dict(row)
+
+    def list_coupons_admin(self, actor_id: int) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        return [
+            dict(row)
+            for row in self.conn.execute(
+                "SELECT * FROM tenant_coupons "
+                "WHERE tenant_id=? ORDER BY id DESC",
+                (self.tenant_id,),
+            ).fetchall()
+        ]
+
+    def set_coupon_status_admin(
+        self,
+        actor_id: int,
+        *,
+        coupon_id: int,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_coupons SET status=?, updated_at=? "
+                "WHERE id=? AND tenant_id=?",
+                (
+                    "active" if enabled else "disabled",
+                    now,
+                    int(coupon_id),
+                    self.tenant_id,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("coupon not found")
+        return self.coupon(int(coupon_id))
+
+    def apply_coupon(
+        self,
+        actor_id: int,
+        *,
+        order_id: int,
+        code: str,
+    ) -> dict[str, Any]:
+        customer = self._customer(actor_id)
+        coupon_code = str(code or "").strip().upper()
+        if not coupon_code:
+            raise TenantBusinessError("coupon not found")
+        now_dt = utcnow()
+        now = iso_utc(now_dt)
+        with transaction(self.conn):
+            order_row = self.conn.execute(
+                "SELECT * FROM tenant_orders "
+                "WHERE id=? AND tenant_id=? AND customer_id=?",
+                (int(order_id), self.tenant_id, int(customer["id"])),
+            ).fetchone()
+            if order_row is None:
+                raise TenantBusinessError("order not found")
+            order = dict(order_row)
+            if order["status"] != "pending_payment":
+                raise TenantBusinessError("order is not awaiting payment")
+            if order.get("coupon_id") is not None:
+                raise TenantBusinessError("coupon already applied")
+
+            coupon_row = self.conn.execute(
+                "SELECT * FROM tenant_coupons "
+                "WHERE tenant_id=? AND code=? AND status='active'",
+                (self.tenant_id, coupon_code),
+            ).fetchone()
+            if coupon_row is None:
+                raise TenantBusinessError("coupon not found")
+            coupon = dict(coupon_row)
+            if coupon.get("starts_at") and parse_utc(
+                str(coupon["starts_at"])
+            ) > now_dt:
+                raise TenantBusinessError("coupon is not active yet")
+            if coupon.get("expires_at") and parse_utc(
+                str(coupon["expires_at"])
+            ) <= now_dt:
+                raise TenantBusinessError("coupon expired")
+            if (
+                int(coupon["max_uses"] or 0) > 0
+                and int(coupon["used_count"] or 0)
+                >= int(coupon["max_uses"])
+            ):
+                raise TenantBusinessError("coupon usage limit reached")
+            per_limit = int(coupon["per_customer_limit"] or 0)
+            if per_limit > 0:
+                used = self.conn.execute(
+                    "SELECT COUNT(*) FROM tenant_coupon_redemptions "
+                    "WHERE tenant_id=? AND coupon_id=? AND customer_id=?",
+                    (
+                        self.tenant_id,
+                        int(coupon["id"]),
+                        int(customer["id"]),
+                    ),
+                ).fetchone()
+                if int(used[0] or 0) >= per_limit:
+                    raise TenantBusinessError("coupon customer limit reached")
+
+            original = int(order.get("original_amount") or order["amount"])
+            if original < int(coupon["min_amount"] or 0):
+                raise TenantBusinessError("order is below coupon minimum")
+            if coupon["discount_kind"] == "fixed":
+                if str(coupon.get("currency") or "") != str(order["currency"]):
+                    raise TenantBusinessError("coupon currency mismatch")
+                discount = int(coupon["value"])
+            else:
+                discount = (original * int(coupon["value"])) // 100
+            max_discount = int(coupon["max_discount"] or 0)
+            if max_discount > 0:
+                discount = min(discount, max_discount)
+            discount = min(original, max(0, discount))
+            if discount <= 0:
+                raise TenantBusinessError("coupon has no discount")
+            final_amount = original - discount
+
+            changed = self.conn.execute(
+                "UPDATE tenant_orders SET amount=?, discount_amount=?, coupon_id=?, "
+                "updated_at=? WHERE id=? AND tenant_id=? AND customer_id=? "
+                "AND status='pending_payment' AND coupon_id IS NULL",
+                (
+                    final_amount,
+                    discount,
+                    int(coupon["id"]),
+                    now,
+                    int(order_id),
+                    self.tenant_id,
+                    int(customer["id"]),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("order state changed")
+            self.conn.execute(
+                "INSERT INTO tenant_coupon_redemptions "
+                "(tenant_id, coupon_id, customer_id, order_id, discount_amount, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    self.tenant_id,
+                    int(coupon["id"]),
+                    int(customer["id"]),
+                    int(order_id),
+                    discount,
+                    now,
+                ),
+            )
+            self.conn.execute(
+                "UPDATE tenant_coupons SET used_count=used_count+1, updated_at=? "
+                "WHERE id=? AND tenant_id=?",
+                (now, int(coupon["id"]), self.tenant_id),
+            )
+        return self.order(actor_id, int(order_id))
+
+    def _grant_referral_reward_tx(
+        self,
+        *,
+        invitee_customer_id: int,
+        reward_type: str,
+        order_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        settings = self._ensure_growth_settings()
+        if not bool(settings["referral_enabled"]):
+            return None
+        if reward_type not in ("trial", "purchase"):
+            raise ValueError("invalid referral reward")
+        amount = int(
+            settings["referral_trial_reward"]
+            if reward_type == "trial"
+            else settings["referral_purchase_reward"]
+        )
+        if amount <= 0:
+            return None
+        referral = self.conn.execute(
+            "SELECT * FROM tenant_referrals "
+            "WHERE tenant_id=? AND invitee_customer_id=? "
+            "AND status='active' AND qualified=1 AND fraud_flag=0",
+            (self.tenant_id, int(invitee_customer_id)),
+        ).fetchone()
+        if referral is None:
+            return None
+        ref = dict(referral)
+        existing = self.conn.execute(
+            "SELECT * FROM tenant_referral_rewards "
+            "WHERE tenant_id=? AND referral_id=? AND reward_type=?",
+            (self.tenant_id, int(ref["id"]), reward_type),
+        ).fetchone()
+        if existing is not None:
+            return dict(existing)
+        if reward_type == "trial":
+            paid = self.conn.execute(
+                "SELECT 1 FROM tenant_orders "
+                "WHERE tenant_id=? AND customer_id=? "
+                "AND order_kind IN ('purchase','renewal') "
+                "AND status IN ('paid','fulfilled') LIMIT 1",
+                (self.tenant_id, int(invitee_customer_id)),
+            ).fetchone()
+            if paid is not None:
+                return None
+        else:
+            if order_id is None:
+                return None
+            order = self.conn.execute(
+                "SELECT * FROM tenant_orders "
+                "WHERE id=? AND tenant_id=? AND customer_id=? "
+                "AND order_kind='purchase' AND status IN ('paid','fulfilled')",
+                (int(order_id), self.tenant_id, int(invitee_customer_id)),
+            ).fetchone()
+            if order is None or int(order["amount"] or 0) < int(settings["referral_min_purchase"] or 0):
+                return None
+            first = self.conn.execute(
+                "SELECT id FROM tenant_orders "
+                "WHERE tenant_id=? AND customer_id=? AND order_kind='purchase' "
+                "AND status IN ('paid','fulfilled') ORDER BY paid_at, id LIMIT 1",
+                (self.tenant_id, int(invitee_customer_id)),
+            ).fetchone()
+            if first is None or int(first["id"]) != int(order_id):
+                return None
+        max_rewards = int(settings["referral_max_rewards"] or 0)
+        if max_rewards > 0:
+            count = self.conn.execute(
+                "SELECT COUNT(*) FROM tenant_referral_rewards "
+                "WHERE tenant_id=? AND inviter_customer_id=? AND status='paid'",
+                (self.tenant_id, int(ref["inviter_customer_id"])),
+            ).fetchone()
+            if int(count[0] or 0) >= max_rewards:
+                return None
+        currency = str(settings["referral_currency"])
+        now = iso_utc(utcnow())
+        self._wallet_change_tx(
+            customer_id=int(ref["inviter_customer_id"]),
+            currency=currency,
+            amount=amount,
+            kind=(
+                "referral_trial"
+                if reward_type == "trial"
+                else "referral_purchase"
+            ),
+            order_id=int(order_id) if order_id is not None else None,
+            idempotency_key=(
+                f"tenant:{self.tenant_id}:referral:{int(ref['id'])}:"
+                f"{reward_type}"
+            ),
+            note=f"referral {reward_type} reward",
+        )
+        cursor = self.conn.execute(
+            "INSERT INTO tenant_referral_rewards "
+            "(tenant_id, referral_id, inviter_customer_id, invitee_customer_id, "
+            "reward_type, amount, currency, order_id, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'paid', ?)",
+            (
+                self.tenant_id,
+                int(ref["id"]),
+                int(ref["inviter_customer_id"]),
+                int(invitee_customer_id),
+                reward_type,
+                amount,
+                currency,
+                int(order_id) if order_id is not None else None,
+                now,
+            ),
+        )
+        row = self.conn.execute(
+            "SELECT * FROM tenant_referral_rewards WHERE id=?",
+            (int(cursor.lastrowid or 0),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def _create_paid_subscription_tx(
+        self,
+        *,
+        order: dict[str, Any],
+        now: str,
+    ) -> int | None:
+        if str(order.get("order_kind") or "purchase") == "renewal":
+            linked = self.conn.execute(
+                "SELECT subscription_id FROM tenant_renewal_orders "
+                "WHERE order_id=? AND tenant_id=?",
+                (int(order["id"]), self.tenant_id),
+            ).fetchone()
+            if linked is None:
+                raise TenantBusinessError("renewal subscription is unavailable")
+            return int(linked["subscription_id"])
+        existing = self.conn.execute(
+            "SELECT id FROM tenant_subscriptions "
+            "WHERE tenant_id=? AND order_id=?",
+            (self.tenant_id, int(order["id"])),
+        ).fetchone()
+        if existing is not None:
+            return int(existing["id"])
+        plan = self.plan(int(order["plan_id"]), public=False)
+        expires = iso_utc(utcnow() + timedelta(days=int(plan["duration_days"])))
+        cursor = self.conn.execute(
+            "INSERT INTO tenant_subscriptions "
+            "(tenant_id, customer_id, plan_id, order_id, server_id, status, "
+            "usage_bytes, traffic_bytes, expires_at, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, NULL, 'pending_provisioning', 0, ?, ?, ?, ?)",
+            (
+                self.tenant_id,
+                int(order["customer_id"]),
+                int(order["plan_id"]),
+                int(order["id"]),
+                int(plan["traffic_gb"]) * 1024 * 1024 * 1024,
+                expires,
+                now,
+                now,
+            ),
+        )
+        return int(cursor.lastrowid or 0)
+
+    def pay_order_with_wallet(
+        self,
+        actor_id: int,
+        *,
+        order_id: int,
+    ) -> dict[str, Any]:
+        customer = self._customer(actor_id)
+        order = self.order(actor_id, int(order_id))
+        if order["status"] != "pending_payment":
+            raise TenantBusinessError("order is not awaiting payment")
+        due = int(order["amount"] or 0)
+        now = iso_utc(utcnow())
+        subscription_id: int | None = None
+        with transaction(self.conn):
+            if due > 0:
+                self._wallet_change_tx(
+                    customer_id=int(customer["id"]),
+                    currency=str(order["currency"]),
+                    amount=-due,
+                    kind="purchase",
+                    order_id=int(order_id),
+                    idempotency_key=(
+                        f"tenant:{self.tenant_id}:wallet-order:{int(order_id)}"
+                    ),
+                    note=f"wallet payment for order #{int(order_id)}",
+                )
+            changed = self.conn.execute(
+                "UPDATE tenant_orders SET status='paid', wallet_amount=?, "
+                "paid_at=COALESCE(paid_at, ?), updated_at=? "
+                "WHERE id=? AND tenant_id=? AND customer_id=? "
+                "AND status='pending_payment'",
+                (
+                    due,
+                    now,
+                    now,
+                    int(order_id),
+                    self.tenant_id,
+                    int(customer["id"]),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("order state changed")
+            paid_order = dict(
+                self.conn.execute(
+                    "SELECT * FROM tenant_orders WHERE id=? AND tenant_id=?",
+                    (int(order_id), self.tenant_id),
+                ).fetchone()
+            )
+            subscription_id = self._create_paid_subscription_tx(
+                order=paid_order,
+                now=now,
+            )
+            if str(paid_order.get("order_kind") or "") == "purchase":
+                self._grant_referral_reward_tx(
+                    invitee_customer_id=int(customer["id"]),
+                    reward_type="purchase",
+                    order_id=int(order_id),
+                )
+        result: dict[str, Any] = {
+            "order_id": int(order_id),
+            "status": "paid",
+            "subscription_id": subscription_id,
+        }
+        try:
+            fulfilled = self.fulfill_paid_order(
+                self.owner_telegram_id, order_id=int(order_id)
+            )
+            result.update(fulfilled)
+        except TenantBusinessError:
+            result["fulfillment_pending"] = True
+        return result
+
+    def retry_own_paid_order(
+        self,
+        actor_id: int,
+        *,
+        order_id: int,
+    ) -> dict[str, Any]:
+        customer = self._customer(actor_id, active=False)
+        row = self.conn.execute(
+            "SELECT 1 FROM tenant_orders "
+            "WHERE id=? AND tenant_id=? AND customer_id=? AND status='paid'",
+            (int(order_id), self.tenant_id, int(customer["id"])),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("order is not awaiting fulfillment")
+        return self.fulfill_paid_order(
+            self.owner_telegram_id, order_id=int(order_id)
+        )
+
+    def _trial_plan(self, settings: dict[str, Any]) -> dict[str, Any]:
+        name = "__WHITELABEL_FREE_TRIAL__"
+        row = self.conn.execute(
+            "SELECT * FROM tenant_sale_plans WHERE tenant_id=? AND name=?",
+            (self.tenant_id, name),
+        ).fetchone()
+        now = iso_utc(utcnow())
+        if row is None:
+            with transaction(self.conn):
+                cursor = self.conn.execute(
+                    "INSERT INTO tenant_sale_plans "
+                    "(tenant_id, name, traffic_gb, duration_days, price, currency, "
+                    "status, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, 0, ?, 'archived', ?, ?)",
+                    (
+                        self.tenant_id,
+                        name,
+                        int(settings["trial_traffic_gb"]),
+                        int(settings["trial_duration_days"]),
+                        str(settings["referral_currency"]),
+                        now,
+                        now,
+                    ),
+                )
+            row = self.conn.execute(
+                "SELECT * FROM tenant_sale_plans WHERE id=?",
+                (int(cursor.lastrowid or 0),),
+            ).fetchone()
+        elif (
+            int(row["traffic_gb"]) != int(settings["trial_traffic_gb"])
+            or int(row["duration_days"]) != int(settings["trial_duration_days"])
+        ):
+            with transaction(self.conn):
+                self.conn.execute(
+                    "UPDATE tenant_sale_plans SET traffic_gb=?, duration_days=?, "
+                    "currency=?, updated_at=? WHERE id=? AND tenant_id=?",
+                    (
+                        int(settings["trial_traffic_gb"]),
+                        int(settings["trial_duration_days"]),
+                        str(settings["referral_currency"]),
+                        now,
+                        int(row["id"]),
+                        self.tenant_id,
+                    ),
+                )
+            row = self.conn.execute(
+                "SELECT * FROM tenant_sale_plans WHERE id=?",
+                (int(row["id"]),),
+            ).fetchone()
+        assert row is not None
+        return dict(row)
+
+    def claim_free_trial(self, actor_id: int) -> dict[str, Any]:
+        customer = self._customer(actor_id)
+        settings = self._ensure_growth_settings()
+        if not bool(settings["trial_enabled"]):
+            raise TenantBusinessError("free trial is disabled")
+        existing = self.conn.execute(
+            "SELECT * FROM tenant_trial_claims "
+            "WHERE tenant_id=? AND customer_id=?",
+            (self.tenant_id, int(customer["id"])),
+        ).fetchone()
+        if existing is not None:
+            if str(existing["status"]) == "failed":
+                try:
+                    result = self.fulfill_paid_order(
+                        self.owner_telegram_id,
+                        order_id=int(existing["order_id"]),
+                    )
+                except TenantBusinessError:
+                    raise TenantBusinessError("free trial provisioning is still pending")
+                with transaction(self.conn):
+                    now_retry = iso_utc(utcnow())
+                    self.conn.execute(
+                        "UPDATE tenant_trial_claims "
+                        "SET status='issued', updated_at=? "
+                        "WHERE id=? AND tenant_id=? AND status='failed'",
+                        (now_retry, int(existing["id"]), self.tenant_id),
+                    )
+                    self.conn.execute(
+                        "UPDATE tenant_customers SET trial_used_at=?, updated_at=? "
+                        "WHERE id=? AND tenant_id=?",
+                        (
+                            now_retry,
+                            now_retry,
+                            int(customer["id"]),
+                            self.tenant_id,
+                        ),
+                    )
+                    self._grant_referral_reward_tx(
+                        invitee_customer_id=int(customer["id"]),
+                        reward_type="trial",
+                    )
+                result.update(
+                    {
+                        "order_kind": "trial",
+                        "order_id": int(existing["order_id"]),
+                    }
+                )
+                return result
+            raise TenantBusinessError("free trial already used")
+        paid = self.conn.execute(
+            "SELECT 1 FROM tenant_orders WHERE tenant_id=? AND customer_id=? "
+            "AND order_kind IN ('purchase','renewal') "
+            "AND status IN ('paid','fulfilled') LIMIT 1",
+            (self.tenant_id, int(customer["id"])),
+        ).fetchone()
+        if paid is not None:
+            raise TenantBusinessError("free trial is only for new customers")
+        plan = self._trial_plan(settings)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            cursor = self.conn.execute(
+                "INSERT INTO tenant_orders "
+                "(tenant_id, customer_id, plan_id, amount, currency, status, "
+                "created_at, updated_at, paid_at, order_kind, original_amount, "
+                "discount_amount, wallet_amount) "
+                "VALUES (?, ?, ?, 0, ?, 'paid', ?, ?, ?, 'trial', 0, 0, 0)",
+                (
+                    self.tenant_id,
+                    int(customer["id"]),
+                    int(plan["id"]),
+                    str(plan["currency"]),
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            order_id = int(cursor.lastrowid or 0)
+            paid_order = dict(
+                self.conn.execute(
+                    "SELECT * FROM tenant_orders WHERE id=?",
+                    (order_id,),
+                ).fetchone()
+            )
+            subscription_id = self._create_paid_subscription_tx(
+                order=paid_order, now=now
+            )
+            self.conn.execute(
+                "INSERT INTO tenant_trial_claims "
+                "(tenant_id, customer_id, order_id, subscription_id, status, "
+                "created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+                (
+                    self.tenant_id,
+                    int(customer["id"]),
+                    order_id,
+                    int(subscription_id or 0),
+                    now,
+                    now,
+                ),
+            )
+        try:
+            result = self.fulfill_paid_order(
+                self.owner_telegram_id, order_id=order_id
+            )
+        except TenantBusinessError:
+            with transaction(self.conn):
+                self.conn.execute(
+                    "UPDATE tenant_trial_claims SET status='failed', updated_at=? "
+                    "WHERE tenant_id=? AND customer_id=? AND order_id=?",
+                    (
+                        iso_utc(utcnow()),
+                        self.tenant_id,
+                        int(customer["id"]),
+                        order_id,
+                    ),
+                )
+            raise
+        with transaction(self.conn):
+            self.conn.execute(
+                "UPDATE tenant_trial_claims SET status='issued', updated_at=? "
+                "WHERE tenant_id=? AND customer_id=? AND order_id=?",
+                (
+                    iso_utc(utcnow()),
+                    self.tenant_id,
+                    int(customer["id"]),
+                    order_id,
+                ),
+            )
+            self.conn.execute(
+                "UPDATE tenant_customers SET trial_used_at=?, updated_at=? "
+                "WHERE id=? AND tenant_id=?",
+                (
+                    iso_utc(utcnow()),
+                    iso_utc(utcnow()),
+                    int(customer["id"]),
+                    self.tenant_id,
+                ),
+            )
+            self._grant_referral_reward_tx(
+                invitee_customer_id=int(customer["id"]),
+                reward_type="trial",
+            )
+        result.update({"order_kind": "trial", "order_id": order_id})
+        return result
+
     def add_plan(self, actor_id: int, *, name: str, traffic_gb: int, duration_days: int, price: int, currency: str = "IRR") -> dict[str, Any]:
         self._admin(actor_id)
         if min(int(traffic_gb), int(duration_days)) <= 0 or int(price) < 0:
@@ -906,8 +2141,11 @@ class TenantBusinessService:
         now = iso_utc(utcnow())
         with transaction(self.conn):
             cursor = self.conn.execute(
-                "INSERT INTO tenant_orders (tenant_id, customer_id, plan_id, amount, currency, status, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, 'pending_payment', ?, ?)",
+                "INSERT INTO tenant_orders "
+                "(tenant_id, customer_id, plan_id, amount, currency, status, "
+                "created_at, updated_at, order_kind, original_amount, "
+                "discount_amount, wallet_amount) "
+                "VALUES (?, ?, ?, ?, ?, 'pending_payment', ?, ?, 'purchase', ?, 0, 0)",
                 (
                     self.tenant_id,
                     int(customer["id"]),
@@ -916,6 +2154,7 @@ class TenantBusinessService:
                     str(plan["currency"]),
                     now,
                     now,
+                    int(plan["price"]),
                 ),
             )
         return self.order(actor_id, int(cursor.lastrowid or 0))
@@ -949,8 +2188,10 @@ class TenantBusinessService:
                 raise TenantBusinessError("renewal already pending")
             cursor = self.conn.execute(
                 "INSERT INTO tenant_orders "
-                "(tenant_id, customer_id, plan_id, amount, currency, status, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, 'pending_payment', ?, ?)",
+                "(tenant_id, customer_id, plan_id, amount, currency, status, "
+                "created_at, updated_at, order_kind, original_amount, "
+                "discount_amount, wallet_amount) "
+                "VALUES (?, ?, ?, ?, ?, 'pending_payment', ?, ?, 'renewal', ?, 0, 0)",
                 (
                     self.tenant_id,
                     int(customer["id"]),
@@ -959,6 +2200,7 @@ class TenantBusinessService:
                     str(plan["currency"]),
                     now,
                     now,
+                    int(plan["price"]),
                 ),
             )
             order_id = int(cursor.lastrowid or 0)
@@ -972,7 +2214,7 @@ class TenantBusinessService:
         customer = self._customer(actor_id)
         row = self.conn.execute(
             "SELECT o.*, p.name AS plan_name, p.traffic_gb, p.duration_days, "
-            "CASE WHEN ro.order_id IS NULL THEN 'purchase' ELSE 'renewal' END AS operation, "
+            "o.order_kind AS operation, "
             "ro.subscription_id AS renewal_subscription_id "
             "FROM tenant_orders o JOIN tenant_sale_plans p ON p.id=o.plan_id "
             "LEFT JOIN tenant_renewal_orders ro ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
@@ -986,7 +2228,7 @@ class TenantBusinessService:
         self._admin(actor_id)
         rows = self.conn.execute(
             "SELECT o.*, c.display_name, p.name AS plan_name, "
-            "CASE WHEN ro.order_id IS NULL THEN 'purchase' ELSE 'renewal' END AS operation, "
+            "o.order_kind AS operation, "
             "ro.subscription_id AS renewal_subscription_id "
             "FROM tenant_orders o "
             "JOIN tenant_customers c ON c.id=o.customer_id "
@@ -1001,7 +2243,7 @@ class TenantBusinessService:
         self._admin(actor_id)
         rows = self.conn.execute(
             "SELECT o.id, o.customer_id, o.plan_id, o.status, c.display_name, p.name AS plan_name, "
-            "CASE WHEN ro.order_id IS NULL THEN 'purchase' ELSE 'renewal' END AS operation, "
+            "o.order_kind AS operation, "
             "ro.subscription_id AS renewal_subscription_id "
             "FROM tenant_orders o "
             "JOIN tenant_customers c ON c.id=o.customer_id "
@@ -1011,6 +2253,49 @@ class TenantBusinessService:
             (self.tenant_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+    def cancel_order(self, actor_id: int, *, order_id: int) -> dict[str, Any]:
+        """Cancel one unpaid owned order and release any reserved coupon use."""
+        customer = self._customer(actor_id, active=False)
+        row = self.conn.execute(
+            "SELECT * FROM tenant_orders "
+            "WHERE id=? AND tenant_id=? AND customer_id=?",
+            (int(order_id), self.tenant_id, int(customer["id"])),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("order not found")
+        order = dict(row)
+        if order["status"] != "pending_payment":
+            raise TenantBusinessError("order cannot be cancelled")
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_orders SET status='cancelled', updated_at=? "
+                "WHERE id=? AND tenant_id=? AND customer_id=? "
+                "AND status='pending_payment'",
+                (
+                    now,
+                    int(order_id),
+                    self.tenant_id,
+                    int(customer["id"]),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("order state changed")
+            coupon_id = order.get("coupon_id")
+            if coupon_id is not None:
+                self.conn.execute(
+                    "DELETE FROM tenant_coupon_redemptions "
+                    "WHERE tenant_id=? AND order_id=?",
+                    (self.tenant_id, int(order_id)),
+                )
+                self.conn.execute(
+                    "UPDATE tenant_coupons "
+                    "SET used_count=MAX(0, used_count-1), updated_at=? "
+                    "WHERE id=? AND tenant_id=?",
+                    (now, int(coupon_id), self.tenant_id),
+                )
+        return self.order(actor_id, int(order_id))
+
     def submit_receipt(self, actor_id: int, *, order_id: int, method_id: int, reference: str | None = None, telegram_file_id: str | None = None) -> dict[str, Any]:
         order = self.order(actor_id, order_id)
         if order["status"] != "pending_payment": raise TenantBusinessError("order is not awaiting payment")
@@ -1024,20 +2309,23 @@ class TenantBusinessService:
             cursor = self.conn.execute("INSERT INTO tenant_receipts (tenant_id, order_id, payment_method_id, reference, telegram_file_id, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)", (self.tenant_id, int(order_id), int(method["id"]), ref, file_id, now))
         return {"id": int(cursor.lastrowid or 0), "order_id": int(order_id)}
 
-    def review_receipt(self, actor_id: int, receipt_id: int, *, approve: bool) -> dict[str, Any]:
-        """Approve money first; purchase/renewal fulfillment remains retryable."""
+    def review_receipt(
+        self, actor_id: int, receipt_id: int, *, approve: bool
+    ) -> dict[str, Any]:
+        """Approve money first; fulfillment and referral credit stay retry-safe."""
         self._admin(actor_id)
         now = iso_utc(utcnow())
         subscription_id: int | None = None
         operation = "purchase"
         with transaction(self.conn):
             row = self.conn.execute(
-                "SELECT r.*, o.customer_id, o.plan_id, o.status AS order_status, "
-                "p.traffic_gb, p.duration_days, ro.subscription_id AS renewal_subscription_id "
+                "SELECT r.*, o.customer_id, o.plan_id, o.amount, o.order_kind, "
+                "o.status AS order_status, "
+                "ro.subscription_id AS renewal_subscription_id "
                 "FROM tenant_receipts r "
-                "JOIN tenant_orders o ON o.id=r.order_id "
-                "JOIN tenant_sale_plans p ON p.id=o.plan_id "
-                "LEFT JOIN tenant_renewal_orders ro ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
+                "JOIN tenant_orders o ON o.id=r.order_id AND o.tenant_id=r.tenant_id "
+                "LEFT JOIN tenant_renewal_orders ro "
+                "ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
                 "WHERE r.id=? AND r.tenant_id=?",
                 (int(receipt_id), self.tenant_id),
             ).fetchone()
@@ -1046,11 +2334,13 @@ class TenantBusinessService:
             receipt = dict(row)
             if receipt["status"] != "pending" or receipt["order_status"] != "payment_review":
                 raise TenantBusinessError("receipt was already reviewed")
+
+            receipt_status = "approved" if approve else "rejected"
             changed = self.conn.execute(
                 "UPDATE tenant_receipts SET status=?, reviewed_by=?, reviewed_at=? "
                 "WHERE id=? AND tenant_id=? AND status='pending'",
                 (
-                    "approved" if approve else "rejected",
+                    receipt_status,
                     int(actor_id),
                     now,
                     int(receipt_id),
@@ -1060,52 +2350,42 @@ class TenantBusinessService:
             if changed.rowcount != 1:
                 raise TenantBusinessError("receipt state changed")
 
-            target = "rejected"
-            if approve:
-                target = "paid"
-                if receipt["renewal_subscription_id"] is not None:
-                    operation = "renewal"
-                    subscription_id = int(receipt["renewal_subscription_id"])
-                    owned = self.conn.execute(
-                        "SELECT 1 FROM tenant_subscriptions "
-                        "WHERE id=? AND tenant_id=? AND customer_id=?",
-                        (
-                            subscription_id,
-                            self.tenant_id,
-                            int(receipt["customer_id"]),
-                        ),
-                    ).fetchone()
-                    if owned is None:
-                        raise TenantBusinessError("renewal subscription is unavailable")
-                else:
-                    expires = iso_utc(
-                        utcnow() + timedelta(days=int(receipt["duration_days"]))
+            if not approve:
+                changed = self.conn.execute(
+                    "UPDATE tenant_orders SET status='rejected', updated_at=? "
+                    "WHERE id=? AND tenant_id=? AND status='payment_review'",
+                    (now, int(receipt["order_id"]), self.tenant_id),
+                )
+                if changed.rowcount != 1:
+                    raise TenantBusinessError("order state changed")
+                coupon_id = self.conn.execute(
+                    "SELECT coupon_id FROM tenant_orders WHERE id=? AND tenant_id=?",
+                    (int(receipt["order_id"]), self.tenant_id),
+                ).fetchone()
+                if coupon_id is not None and coupon_id["coupon_id"] is not None:
+                    self.conn.execute(
+                        "UPDATE tenant_coupons SET used_count=MAX(0, used_count-1), "
+                        "updated_at=? WHERE id=? AND tenant_id=?",
+                        (now, int(coupon_id["coupon_id"]), self.tenant_id),
                     )
-                    cursor = self.conn.execute(
-                        "INSERT INTO tenant_subscriptions "
-                        "(tenant_id, customer_id, plan_id, order_id, server_id, status, usage_bytes, traffic_bytes, expires_at, created_at, updated_at) "
-                        "VALUES (?, ?, ?, ?, NULL, 'pending_provisioning', 0, ?, ?, ?, ?)",
-                        (
-                            self.tenant_id,
-                            int(receipt["customer_id"]),
-                            int(receipt["plan_id"]),
-                            int(receipt["order_id"]),
-                            int(receipt["traffic_gb"]) * 1024 * 1024 * 1024,
-                            expires,
-                            now,
-                            now,
-                        ),
+                    self.conn.execute(
+                        "DELETE FROM tenant_coupon_redemptions "
+                        "WHERE tenant_id=? AND order_id=?",
+                        (self.tenant_id, int(receipt["order_id"])),
                     )
-                    subscription_id = int(cursor.lastrowid or 0)
+                return {
+                    "order_id": int(receipt["order_id"]),
+                    "status": "rejected",
+                    "customer_id": int(receipt["customer_id"]),
+                    "subscription_id": None,
+                    "operation": str(receipt.get("order_kind") or "purchase"),
+                }
 
             changed = self.conn.execute(
-                "UPDATE tenant_orders "
-                "SET status=?, paid_at=CASE WHEN ?='paid' "
-                "THEN COALESCE(paid_at, ?) ELSE paid_at END, updated_at=? "
+                "UPDATE tenant_orders SET status='paid', "
+                "paid_at=COALESCE(paid_at, ?), updated_at=? "
                 "WHERE id=? AND tenant_id=? AND status='payment_review'",
                 (
-                    target,
-                    target,
                     now,
                     now,
                     int(receipt["order_id"]),
@@ -1114,9 +2394,26 @@ class TenantBusinessService:
             )
             if changed.rowcount != 1:
                 raise TenantBusinessError("order state changed")
+            paid_order_row = self.conn.execute(
+                "SELECT * FROM tenant_orders WHERE id=? AND tenant_id=?",
+                (int(receipt["order_id"]), self.tenant_id),
+            ).fetchone()
+            assert paid_order_row is not None
+            paid_order = dict(paid_order_row)
+            operation = str(paid_order.get("order_kind") or "purchase")
+            subscription_id = self._create_paid_subscription_tx(
+                order=paid_order,
+                now=now,
+            )
+            if operation == "purchase":
+                self._grant_referral_reward_tx(
+                    invitee_customer_id=int(receipt["customer_id"]),
+                    reward_type="purchase",
+                    order_id=int(receipt["order_id"]),
+                )
         return {
             "order_id": int(receipt["order_id"]),
-            "status": target,
+            "status": "paid",
             "customer_id": int(receipt["customer_id"]),
             "subscription_id": subscription_id,
             "operation": operation,
@@ -2164,6 +3461,7 @@ class TenantBusinessService:
         )
         paid_where = (
             "o.tenant_id=? AND o.status IN ('paid','fulfilled') "
+            "AND o.order_kind IN ('purchase','renewal') "
             "AND o.paid_at IS NOT NULL"
         )
         paid_args: list[Any] = [self.tenant_id]
@@ -2190,11 +3488,11 @@ class TenantBusinessService:
         )
         operation_rows = self.conn.execute(
             "SELECT o.currency, "
-            "SUM(CASE WHEN ro.order_id IS NULL THEN 1 ELSE 0 END) AS purchase_count, "
-            "COALESCE(SUM(CASE WHEN ro.order_id IS NULL THEN o.amount ELSE 0 END),0) "
+            "SUM(CASE WHEN o.order_kind='purchase' THEN 1 ELSE 0 END) AS purchase_count, "
+            "COALESCE(SUM(CASE WHEN o.order_kind='purchase' THEN o.amount ELSE 0 END),0) "
             "AS purchase_amount, "
-            "SUM(CASE WHEN ro.order_id IS NOT NULL THEN 1 ELSE 0 END) AS renewal_count, "
-            "COALESCE(SUM(CASE WHEN ro.order_id IS NOT NULL THEN o.amount ELSE 0 END),0) "
+            "SUM(CASE WHEN o.order_kind='renewal' THEN 1 ELSE 0 END) AS renewal_count, "
+            "COALESCE(SUM(CASE WHEN o.order_kind='renewal' THEN o.amount ELSE 0 END),0) "
             "AS renewal_amount, "
             "COALESCE(SUM(p.traffic_gb),0) AS traffic_gb "
             "FROM tenant_orders o "
@@ -2394,6 +3692,7 @@ class TenantBusinessService:
                 "SELECT currency, COUNT(*) AS count, "
                 "COALESCE(SUM(amount),0) AS amount "
                 "FROM tenant_orders WHERE tenant_id=? AND customer_id=? "
+                "AND order_kind IN ('purchase','renewal') "
                 "AND status IN ('paid','fulfilled') AND paid_at IS NOT NULL "
                 "GROUP BY currency ORDER BY currency",
                 (self.tenant_id, int(customer_id)),
@@ -2403,8 +3702,7 @@ class TenantBusinessService:
             dict(item)
             for item in self.conn.execute(
                 "SELECT o.*, p.name AS plan_name, "
-                "CASE WHEN ro.order_id IS NULL THEN 'purchase' ELSE 'renewal' END "
-                "AS operation "
+                "o.order_kind AS operation "
                 "FROM tenant_orders o "
                 "JOIN tenant_sale_plans p ON p.id=o.plan_id AND p.tenant_id=o.tenant_id "
                 "LEFT JOIN tenant_renewal_orders ro "
@@ -2512,6 +3810,7 @@ class TenantBusinessService:
             self.conn.execute(
                 "SELECT currency, COUNT(*) AS count, COALESCE(SUM(amount),0) AS amount "
                 "FROM tenant_orders WHERE tenant_id=? AND customer_id=? "
+                "AND order_kind IN ('purchase','renewal') "
                 "AND status IN ('paid','fulfilled') AND paid_at IS NOT NULL "
                 "GROUP BY currency ORDER BY currency",
                 (self.tenant_id, int(customer["id"])),
@@ -2544,8 +3843,7 @@ class TenantBusinessService:
         customer = self._customer(actor_id, active=False)
         rows = self.conn.execute(
             "SELECT o.*, p.name AS plan_name, "
-            "CASE WHEN ro.order_id IS NULL THEN 'purchase' ELSE 'renewal' END "
-            "AS operation "
+            "o.order_kind AS operation "
             "FROM tenant_orders o "
             "JOIN tenant_sale_plans p ON p.id=o.plan_id AND p.tenant_id=o.tenant_id "
             "LEFT JOIN tenant_renewal_orders ro "

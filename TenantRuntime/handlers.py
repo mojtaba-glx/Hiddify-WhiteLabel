@@ -122,7 +122,10 @@ def _customer_profile_text(profile: dict) -> str:
     if recent:
         lines.extend(["", "🧾 آخرین سفارش‌ها"])
         for order in recent[:5]:
-            op = "تمدید" if order.get("operation") == "renewal" else "خرید"
+            op = {
+                "renewal": "تمدید",
+                "trial": "تست رایگان",
+            }.get(str(order.get("operation") or ""), "خرید")
             lines.append(
                 f"• #{order['id']} · {op} · {order.get('plan_name') or '-'} · "
                 f"{order.get('status')} · {int(order.get('amount') or 0):,} "
@@ -154,6 +157,77 @@ def _user_account_text(summary: dict) -> str:
     ])
 
 
+def _wallet_text(summary: dict) -> str:
+    accounts = list(summary.get("accounts") or [])
+    history = list(summary.get("history") or [])
+    lines = ["💰 کیف پول", ""]
+    if accounts:
+        lines.extend(
+            f"• {int(x.get('balance') or 0):,} {x.get('currency') or ''}"
+            for x in accounts
+        )
+    else:
+        lines.append("• موجودی: 0")
+    if history:
+        lines.extend(["", "🧾 آخرین تراکنش‌ها"])
+        labels = {
+            "topup": "شارژ کیف پول",
+            "admin_credit": "شارژ ادمین",
+            "admin_debit": "کسر ادمین",
+            "referral_trial": "پاداش دعوت/تست",
+            "referral_purchase": "پاداش دعوت/خرید",
+            "purchase": "پرداخت سفارش",
+            "refund": "برگشت",
+        }
+        for tx in history[:10]:
+            amount = int(tx.get("amount") or 0)
+            lines.append(
+                f"• {labels.get(str(tx.get('kind')), str(tx.get('kind') or '-'))}: "
+                f"{amount:+,} {tx.get('currency') or ''} → "
+                f"{int(tx.get('resulting_balance') or 0):,}"
+            )
+    return "\n".join(lines)
+
+
+def _checkout_text(order: dict, wallet: dict) -> str:
+    balance = 0
+    for account in list(wallet.get("accounts") or []):
+        if str(account.get("currency")) == str(order.get("currency")):
+            balance = int(account.get("balance") or 0)
+            break
+    original = int(order.get("original_amount") or order.get("amount") or 0)
+    discount = int(order.get("discount_amount") or 0)
+    final = int(order.get("amount") or 0)
+    operation = str(order.get("operation") or "purchase")
+    op_title = "تمدید" if operation == "renewal" else "خرید"
+    return "\n".join([
+        f"🧾 {op_title} سفارش #{order['id']}",
+        f"پلن: {order.get('plan_name') or '-'}",
+        f"مبلغ اصلی: {original:,} {order.get('currency') or ''}",
+        f"تخفیف: {discount:,} {order.get('currency') or ''}",
+        f"مبلغ نهایی: {final:,} {order.get('currency') or ''}",
+        f"کیف پول: {balance:,} {order.get('currency') or ''}",
+    ])
+
+
+def _growth_text(settings: dict, coupons: list[dict]) -> str:
+    return "\n".join([
+        "🎯 فروش پیشرفته",
+        "",
+        f"🤝 Referral: {'فعال' if int(settings.get('referral_enabled') or 0) else 'خاموش'}",
+        f"• پاداش تست: {int(settings.get('referral_trial_reward') or 0):,} {settings.get('referral_currency') or ''}",
+        f"• پاداش اولین خرید: {int(settings.get('referral_purchase_reward') or 0):,} {settings.get('referral_currency') or ''}",
+        f"• حداقل خرید: {int(settings.get('referral_min_purchase') or 0):,}",
+        f"• سقف پاداش هر دعوت‌کننده: {int(settings.get('referral_max_rewards') or 0) or 'نامحدود'}",
+        "",
+        f"🎁 تست رایگان: {'فعال' if int(settings.get('trial_enabled') or 0) else 'خاموش'}",
+        f"• حجم: {int(settings.get('trial_traffic_gb') or 0)}GB",
+        f"• مدت: {int(settings.get('trial_duration_days') or 0)} روز",
+        "",
+        f"🎟 کوپن‌ها: {len(coupons)}",
+    ])
+
+
 def _services(context: ContextTypes.DEFAULT_TYPE):
     spec = context.application.bot_data.get("runtime_spec")
     policy = context.application.bot_data.get("runtime_policy")
@@ -178,13 +252,16 @@ def _menu(spec: RuntimeBotSpec) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("📦 پلن‌های فروش", callback_data="biz:plans"), InlineKeyboardButton("💳 پرداخت", callback_data="biz:payments")],
             [InlineKeyboardButton("🧾 سفارش‌ها", callback_data="biz:orders"), InlineKeyboardButton("📡 سرویس‌ها", callback_data="biz:subs")],
             [InlineKeyboardButton("👥 مشتریان", callback_data="biz:customers"), InlineKeyboardButton("⚠️ نیازمند بررسی", callback_data="biz:attention")],
-            [InlineKeyboardButton("🎫 تیکت‌ها", callback_data="biz:tickets"), InlineKeyboardButton("🔗 لینک هوشمند", callback_data="biz:links")],
+            [InlineKeyboardButton("🎯 فروش پیشرفته", callback_data="biz:growth"), InlineKeyboardButton("🔗 لینک هوشمند", callback_data="biz:links")],
+            [InlineKeyboardButton("🎫 تیکت‌ها", callback_data="biz:tickets")],
         ]
     else:
         rows = [
             [InlineKeyboardButton("💳 خرید اشتراک", callback_data="shop:buy"), InlineKeyboardButton("📦 اشتراک‌های من", callback_data="shop:subs")],
             [InlineKeyboardButton("👤 حساب من", callback_data="shop:account"), InlineKeyboardButton("🧾 سفارش‌های من", callback_data="shop:orders")],
-            [InlineKeyboardButton("🎫 پشتیبانی", callback_data="shop:tickets"), InlineKeyboardButton("📖 راهنما", callback_data="shop:guide")],
+            [InlineKeyboardButton("💰 کیف پول", callback_data="shop:wallet"), InlineKeyboardButton("🤝 دعوت دوستان", callback_data="shop:referral")],
+            [InlineKeyboardButton("🎁 تست رایگان", callback_data="shop:trial"), InlineKeyboardButton("🎫 پشتیبانی", callback_data="shop:tickets")],
+            [InlineKeyboardButton("📖 راهنما", callback_data="shop:guide")],
         ]
     rows.extend([[InlineKeyboardButton("🏠 منو", callback_data="runtime:home")], [InlineKeyboardButton("📊 وضعیت", callback_data="runtime:status")]])
     return InlineKeyboardMarkup(rows)
@@ -241,7 +318,21 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     state_store.save(user_id, {**state, "visits": visits, "screen": "home"})
     if spec.role == "user":
         user = update.effective_user
-        business.register_customer(user_id, display_name=str(getattr(user, "full_name", None) or "کاربر"), username=getattr(user, "username", None))
+        business.register_customer(
+            user_id,
+            display_name=str(getattr(user, "full_name", None) or "کاربر"),
+            username=getattr(user, "username", None),
+        )
+        args = list(getattr(context, "args", None) or [])
+        if args:
+            payload = str(args[0] or "").strip()
+            if payload.startswith("ref_"):
+                try:
+                    business.register_referral(
+                        user_id, referral_code=payload[4:]
+                    )
+                except TenantBusinessError:
+                    pass
     text = _home_text(spec, visits)
     if update.callback_query:
         await update.callback_query.answer()
@@ -330,6 +421,185 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     _report_text(report, dashboard=True),
                     reply_markup=InlineKeyboardMarkup(rows),
                 ); return
+            if data == "biz:growth":
+                settings = business.growth_settings(actor)
+                coupons = business.list_coupons_admin(actor)
+                await update.callback_query.edit_message_text(
+                    _growth_text(settings, coupons),
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton(
+                                "🤝 روشن/خاموش Referral",
+                                callback_data="biz:growthtoggle:referral",
+                            ),
+                            InlineKeyboardButton(
+                                "🎁 روشن/خاموش تست",
+                                callback_data="biz:growthtoggle:trial",
+                            ),
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "⚙️ تنظیم مقادیر",
+                                callback_data="biz:growthconfig",
+                            ),
+                            InlineKeyboardButton(
+                                "🎟 کوپن‌ها",
+                                callback_data="biz:coupons",
+                            ),
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "💰 شارژهای کیف پول",
+                                callback_data="biz:wallettopups",
+                            )
+                        ],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
+                ); return
+            if data.startswith("biz:growthtoggle:"):
+                target = data.rsplit(":", 1)[1]
+                settings = business.growth_settings(actor)
+                if target == "referral":
+                    settings = business.update_growth_settings(
+                        actor,
+                        referral_enabled=not bool(settings["referral_enabled"]),
+                    )
+                elif target == "trial":
+                    settings = business.update_growth_settings(
+                        actor,
+                        trial_enabled=not bool(settings["trial_enabled"]),
+                    )
+                else:
+                    raise ValueError("invalid growth toggle")
+                await update.callback_query.edit_message_text(
+                    _growth_text(settings, business.list_coupons_admin(actor)),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ فروش پیشرفته", callback_data="biz:growth")]
+                    ]),
+                ); return
+            if data == "biz:growthconfig":
+                context.user_data["biz_flow"] = {"kind": "growth_config"}
+                await update.callback_query.edit_message_text(
+                    "تنظیمات را با این فرمت بفرستید:\n"
+                    "پاداش تست | پاداش اولین خرید | حداقل خرید | سقف پاداش | ارز | حجم تست GB | روز تست\n"
+                    "مثال: 10000 | 20000 | 50000 | 0 | IRR | 1 | 1",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ فروش پیشرفته", callback_data="biz:growth")]
+                    ]),
+                ); return
+            if data == "biz:coupons":
+                items = business.list_coupons_admin(actor)
+                lines = ["🎟 کوپن‌ها"]
+                rows = []
+                for item in items[:30]:
+                    kind = "%" if item["discount_kind"] == "percent" else str(item.get("currency") or "")
+                    lines.append(
+                        f"• {item['code']} · {item['value']}{kind} · "
+                        f"{item['used_count']}/{item['max_uses'] or '∞'} · {item['status']}"
+                    )
+                    rows.append([
+                        InlineKeyboardButton(
+                            f"{'⛔' if item['status']=='active' else '✅'} {item['code']}",
+                            callback_data=f"biz:couponstatus:{item['id']}:{'off' if item['status']=='active' else 'on'}",
+                        )
+                    ])
+                if not items:
+                    lines.append("موردی نیست.")
+                rows.extend([
+                    [InlineKeyboardButton("➕ کوپن جدید", callback_data="biz:addcoupon")],
+                    [InlineKeyboardButton("↩️ فروش پیشرفته", callback_data="biz:growth")],
+                ])
+                await update.callback_query.edit_message_text(
+                    "\n".join(lines),
+                    reply_markup=InlineKeyboardMarkup(rows),
+                ); return
+            if data == "biz:addcoupon":
+                context.user_data["biz_flow"] = {"kind": "coupon_add"}
+                await update.callback_query.edit_message_text(
+                    "فرمت کوپن:\n"
+                    "CODE | percent/fixed | مقدار | ارز(برای fixed) | حداقل سفارش | سقف تخفیف | حداکثر استفاده | سقف هر کاربر | انقضا اختیاری\n"
+                    "مثال درصدی: OFF15 | percent | 15 | | 0 | 0 | 100 | 1 |\n"
+                    "مثال ثابت: GIFT20 | fixed | 20000 | IRR | 50000 | 0 | 20 | 1 |",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ کوپن‌ها", callback_data="biz:coupons")]
+                    ]),
+                ); return
+            if data.startswith("biz:couponstatus:"):
+                _, _, coupon_id, state = data.split(":", 3)
+                business.set_coupon_status_admin(
+                    actor,
+                    coupon_id=int(coupon_id),
+                    enabled=state == "on",
+                )
+                await update.callback_query.edit_message_text(
+                    "✅ وضعیت کوپن تغییر کرد.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ کوپن‌ها", callback_data="biz:coupons")]
+                    ]),
+                ); return
+            if data == "biz:wallettopups":
+                items = business.list_wallet_topups_admin(actor)
+                receipts = business.list_wallet_topup_receipts_admin(actor)
+                text = "💰 شارژهای کیف پول\n" + (
+                    "\n".join(
+                        f"• #{x['id']} · {x['display_name']} · "
+                        f"{int(x['amount']):,} {x['currency']} · {x['status']}"
+                        for x in items[:30]
+                    )
+                    or "موردی نیست."
+                )
+                rows = [[InlineKeyboardButton(
+                    f"✅/❌ رسید شارژ #{x['id']} · {x['display_name']}",
+                    callback_data=f"biz:wallettopupreceipt:{x['id']}",
+                )] for x in receipts]
+                rows.append([InlineKeyboardButton("↩️ فروش پیشرفته", callback_data="biz:growth")])
+                await update.callback_query.edit_message_text(
+                    text, reply_markup=InlineKeyboardMarkup(rows)
+                ); return
+            if data.startswith("biz:wallettopupreceipt:"):
+                receipt_id = int(data.rsplit(":", 1)[1])
+                receipt = next(
+                    (
+                        x for x in business.list_wallet_topup_receipts_admin(actor)
+                        if int(x["id"]) == receipt_id
+                    ),
+                    None,
+                )
+                if receipt is None:
+                    raise TenantBusinessError("wallet topup receipt not found")
+                context.user_data["wallet_topup_confirm"] = {"receipt_id": receipt_id}
+                await update.callback_query.edit_message_text(
+                    f"💰 رسید شارژ کیف پول #{receipt_id}\n"
+                    f"مشتری: {receipt['display_name']}\n"
+                    f"مبلغ: {int(receipt['amount']):,} {receipt['currency']}\n"
+                    f"پیگیری: {receipt.get('reference') or 'تصویر'}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✅ تأیید", callback_data="biz:wallettopupconfirm:yes")],
+                        [InlineKeyboardButton("❌ رد", callback_data="biz:wallettopupconfirm:no")],
+                        [InlineKeyboardButton("↩️ شارژها", callback_data="biz:wallettopups")],
+                    ]),
+                ); return
+            if data.startswith("biz:wallettopupconfirm:"):
+                pending = context.user_data.pop("wallet_topup_confirm", None)
+                if not isinstance(pending, dict):
+                    raise TenantBusinessError("confirmation expired")
+                approve = data.rsplit(":", 1)[1] == "yes"
+                reviewed = business.review_wallet_topup_receipt(
+                    actor,
+                    receipt_id=int(pending["receipt_id"]),
+                    approve=approve,
+                )
+                await update.callback_query.edit_message_text(
+                    (
+                        f"✅ کیف پول {int(reviewed['amount']):,} {reviewed['currency']} شارژ شد."
+                        if approve
+                        else "❌ رسید شارژ کیف پول رد شد."
+                    ),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ شارژها", callback_data="biz:wallettopups")],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
+                ); return
             if data == "biz:reports":
                 rows = [
                     [
@@ -404,12 +674,56 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                         ],
                         [
                             InlineKeyboardButton(
+                                "💰 کیف پول مشتری",
+                                callback_data=f"biz:wallet:{customer_id}",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
                                 toggle_title,
                                 callback_data=f"biz:customerstatus:{customer_id}:{next_status}",
                             )
                         ],
                         [InlineKeyboardButton("🔎 جستجوی جدید", callback_data="biz:customersearch")],
                         [InlineKeyboardButton("↩️ مشتریان", callback_data="biz:customers")],
+                    ]),
+                ); return
+            if data.startswith("biz:wallet:"):
+                customer_id = int(data.rsplit(":", 1)[1])
+                profile = business.customer_profile_admin(
+                    actor, customer_id=customer_id
+                )
+                customer_actor = int(profile["telegram_user_id"])
+                wallet = business.wallet_summary(customer_actor)
+                await update.callback_query.edit_message_text(
+                    f"👤 {profile['display_name']}\n\n" + _wallet_text(wallet),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "➕/➖ تغییر موجودی",
+                            callback_data=f"biz:walletadjust:{customer_id}",
+                        )],
+                        [InlineKeyboardButton(
+                            "👤 پروفایل مشتری",
+                            callback_data=f"biz:customer:{customer_id}",
+                        )],
+                    ]),
+                ); return
+            if data.startswith("biz:walletadjust:"):
+                customer_id = int(data.rsplit(":", 1)[1])
+                business.customer_profile_admin(actor, customer_id=customer_id)
+                context.user_data["biz_flow"] = {
+                    "kind": "wallet_adjust",
+                    "customer_id": customer_id,
+                }
+                await update.callback_query.edit_message_text(
+                    "ارز | مبلغ مثبت/منفی | یادداشت اختیاری\n"
+                    "مثال شارژ: IRR | 50000 | هدیه\n"
+                    "مثال کسر: IRR | -20000 | اصلاح حساب",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "↩️ کیف پول مشتری",
+                            callback_data=f"biz:wallet:{customer_id}",
+                        )]
                     ]),
                 ); return
             if data.startswith("biz:customerstatus:"):
@@ -640,7 +954,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     reply_markup=_menu(spec),
                 ); return
             if data == "biz:plans":
-                items = business.list_plans(public=False); text = "📦 پلن‌های فروش\n" + ("\n".join(f"• {x['name']} · {x['traffic_gb']}GB · {x['duration_days']} روز · {x['price']:,} {x['currency']}" for x in items) or "موردی نیست.")
+                items = [
+                    x for x in business.list_plans(public=False)
+                    if not str(x.get("name") or "").startswith("__WHITELABEL_")
+                ]; text = "📦 پلن‌های فروش\n" + ("\n".join(f"• {x['name']} · {x['traffic_gb']}GB · {x['duration_days']} روز · {x['price']:,} {x['currency']}" for x in items) or "موردی نیست.")
                 await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ پلن", callback_data="biz:addplan")], [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")]])); return
             if data == "biz:addplan":
                 context.user_data["biz_flow"] = {"kind": "plan"}; await update.callback_query.edit_message_text("نام | حجم گیگ | روز | قیمت | ارز", reply_markup=_menu(spec)); return
@@ -907,21 +1224,131 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ); return
             if data == "shop:orders":
                 items = business.list_customer_orders(actor, limit=15)
+                labels = {"purchase": "خرید", "renewal": "تمدید", "trial": "تست رایگان"}
                 text = "🧾 سفارش‌های من\n" + (
                     "\n".join(
-                        f"• #{x['id']} · "
-                        f"{'تمدید' if x.get('operation') == 'renewal' else 'خرید'} · "
+                        f"• #{x['id']} · {labels.get(str(x.get('operation')), 'خرید')} · "
                         f"{x.get('plan_name') or '-'} · {x.get('status')}\n"
                         f"  {int(x.get('amount') or 0):,} {x.get('currency') or ''}"
+                        f"{' · تخفیف: '+format(int(x.get('discount_amount') or 0), ',') if int(x.get('discount_amount') or 0) else ''}"
                         f"{' · پرداخت: ' + str(x.get('paid_at')) if x.get('paid_at') else ''}"
                         for x in items
                     )
                     or "سفارشی ندارید."
                 )
+                rows = []
+                for x in items:
+                    if x["status"] == "paid":
+                        rows.append([InlineKeyboardButton(
+                            f"🔁 تلاش فعال‌سازی سفارش #{x['id']}",
+                            callback_data=f"shop:retryorder:{x['id']}",
+                        )])
+                    elif x["status"] == "pending_payment":
+                        rows.append([InlineKeyboardButton(
+                            f"❌ لغو سفارش #{x['id']}",
+                            callback_data=f"shop:cancelorder:{x['id']}",
+                        )])
+                rows.extend([
+                    [InlineKeyboardButton("👤 حساب من", callback_data="shop:account")],
+                    [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                ])
+                await update.callback_query.edit_message_text(
+                    text,
+                    reply_markup=InlineKeyboardMarkup(rows),
+                ); return
+            if data.startswith("shop:retryorder:"):
+                order_id = int(data.rsplit(":", 1)[1])
+                result = business.retry_own_paid_order(actor, order_id=order_id)
+                await update.callback_query.edit_message_text(
+                    f"✅ سفارش #{order_id} انجام شد.\n🔗 {result.get('subscription_url') or '-'}",
+                    reply_markup=_menu(spec),
+                ); return
+            if data.startswith("shop:cancelorder:"):
+                order_id = int(data.rsplit(":", 1)[1])
+                business.cancel_order(actor, order_id=order_id)
+                await update.callback_query.edit_message_text(
+                    f"✅ سفارش #{order_id} لغو شد و در صورت وجود، سهمیه کوپن آزاد شد.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🧾 سفارش‌های من", callback_data="shop:orders")],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
+                ); return
+            if data == "shop:wallet":
+                await update.callback_query.edit_message_text(
+                    _wallet_text(business.wallet_summary(actor)),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("➕ شارژ کیف پول", callback_data="shop:wallettopup")],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
+                ); return
+            if data == "shop:wallettopup":
+                context.user_data["biz_flow"] = {"kind": "wallet_topup_create"}
+                await update.callback_query.edit_message_text(
+                    "💰 مبلغ | ارز را ارسال کنید.\nمثال: 100000 | IRR",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ کیف پول", callback_data="shop:wallet")]
+                    ]),
+                ); return
+            if data.startswith("shop:wallettopupmethod:"):
+                _, _, topup_id, method_id = data.split(":", 3)
+                topup = business.wallet_topup(actor, int(topup_id))
+                method = business.method(int(method_id), currency=str(topup["currency"]))
+                context.user_data["biz_flow"] = {
+                    "kind": "wallet_receipt",
+                    "topup_id": int(topup_id),
+                    "method_id": int(method_id),
+                }
+                await update.callback_query.edit_message_text(
+                    f"پرداخت شارژ کیف پول به: {method['destination']}\n"
+                    f"{method.get('instructions') or ''}\n"
+                    "کد پیگیری یا عکس رسید را ارسال کنید.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ کیف پول", callback_data="shop:wallet")]
+                    ]),
+                ); return
+            if data == "shop:referral":
+                summary = business.referral_summary(actor)
+                settings = dict(summary.get("settings") or {})
+                username = str(getattr(context.bot, "username", None) or "").strip()
+                code = str(summary["referral_code"])
+                invite = (
+                    f"https://t.me/{username}?start=ref_{code}"
+                    if username
+                    else f"/start ref_{code}"
+                )
+                rewards = list(summary.get("rewards") or [])
+                reward_lines = [
+                    f"• {x.get('reward_type')}: {int(x.get('amount') or 0):,} "
+                    f"{x.get('currency') or ''} ({int(x.get('count') or 0)} مورد)"
+                    for x in rewards
+                ] or ["• هنوز پاداشی ثبت نشده است."]
+                text = "\n".join([
+                    "🤝 دعوت دوستان",
+                    f"وضعیت: {'فعال' if int(settings.get('referral_enabled') or 0) else 'خاموش'}",
+                    f"دعوت موفق ثبت‌شده: {int(summary.get('referred_count') or 0)}",
+                    f"پاداش تست: {int(settings.get('referral_trial_reward') or 0):,} {settings.get('referral_currency') or ''}",
+                    f"پاداش اولین خرید: {int(settings.get('referral_purchase_reward') or 0):,} {settings.get('referral_currency') or ''}",
+                    "",
+                    "🔗 لینک دعوت شما:",
+                    invite,
+                    "",
+                    "🎁 پاداش‌ها",
+                    *reward_lines,
+                ])
                 await update.callback_query.edit_message_text(
                     text,
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("👤 حساب من", callback_data="shop:account")],
+                        [InlineKeyboardButton("💰 کیف پول", callback_data="shop:wallet")],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
+                ); return
+            if data == "shop:trial":
+                result = business.claim_free_trial(actor)
+                await update.callback_query.edit_message_text(
+                    "✅ تست رایگان فعال شد.\n"
+                    f"🔗 {result.get('subscription_url') or '-'}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📦 اشتراک‌های من", callback_data="shop:subs")],
                         [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
                     ]),
                 ); return
@@ -929,9 +1356,78 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 plans = business.list_plans(); rows = [[InlineKeyboardButton(f"{p['name']} · {p['price']:,} {p['currency']}", callback_data=f"shop:plan:{p['id']}")] for p in plans] or [[InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")]]
                 rows.append([InlineKeyboardButton("↩️ منو", callback_data="runtime:home")]); await update.callback_query.edit_message_text("💳 خرید اشتراک", reply_markup=InlineKeyboardMarkup(rows)); return
             if data.startswith("shop:plan:"):
-                order = business.create_order(actor, int(data.rsplit(":", 1)[1])); methods = business.list_methods(currency=str(order['currency']))
-                rows = [[InlineKeyboardButton(f"{m['title']} ({m['kind']})", callback_data=f"shop:pay:{order['id']}:{m['id']}")] for m in methods] or [[InlineKeyboardButton("روش پرداخت موجود نیست", callback_data="noop")]]
-                await update.callback_query.edit_message_text(f"سفارش #{order['id']} · {order['amount']:,} {order['currency']}\nروش پرداخت را انتخاب کنید.", reply_markup=InlineKeyboardMarkup(rows)); return
+                order = business.create_order(actor, int(data.rsplit(":", 1)[1]))
+                await update.callback_query.edit_message_text(
+                    _checkout_text(order, business.wallet_summary(actor)),
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("🎟 کد تخفیف", callback_data=f"shop:coupon:{order['id']}"),
+                            InlineKeyboardButton("💰 پرداخت کیف پول", callback_data=f"shop:walletpay:{order['id']}"),
+                        ],
+                        [InlineKeyboardButton("💳 روش‌های پرداخت", callback_data=f"shop:paymethods:{order['id']}")],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
+                ); return
+            if data.startswith("shop:checkout:"):
+                order_id = int(data.rsplit(":", 1)[1])
+                order = business.order(actor, order_id)
+                await update.callback_query.edit_message_text(
+                    _checkout_text(order, business.wallet_summary(actor)),
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("🎟 کد تخفیف", callback_data=f"shop:coupon:{order_id}"),
+                            InlineKeyboardButton("💰 پرداخت کیف پول", callback_data=f"shop:walletpay:{order_id}"),
+                        ],
+                        [InlineKeyboardButton("💳 روش‌های پرداخت", callback_data=f"shop:paymethods:{order_id}")],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
+                ); return
+            if data.startswith("shop:coupon:"):
+                order_id = int(data.rsplit(":", 1)[1])
+                order = business.order(actor, order_id)
+                if order["status"] != "pending_payment":
+                    raise TenantBusinessError("order is not awaiting payment")
+                context.user_data["biz_flow"] = {
+                    "kind": "coupon_apply",
+                    "order_id": order_id,
+                }
+                await update.callback_query.edit_message_text(
+                    "🎟 کد تخفیف را ارسال کنید.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ سفارش", callback_data=f"shop:checkout:{order_id}")]
+                    ]),
+                ); return
+            if data.startswith("shop:walletpay:"):
+                order_id = int(data.rsplit(":", 1)[1])
+                result = business.pay_order_with_wallet(actor, order_id=order_id)
+                if result.get("fulfillment_pending"):
+                    text = (
+                        f"✅ مبلغ سفارش #{order_id} از کیف پول پرداخت شد.\n"
+                        "⚠️ فعال‌سازی پنل فعلاً انجام نشد؛ پرداخت محفوظ است و می‌توانید از «سفارش‌های من» دوباره تلاش کنید."
+                    )
+                else:
+                    text = (
+                        f"✅ سفارش #{order_id} با کیف پول پرداخت و فعال شد.\n"
+                        f"🔗 {result.get('subscription_url') or '-'}"
+                    )
+                await update.callback_query.edit_message_text(
+                    text, reply_markup=_menu(spec)
+                ); return
+            if data.startswith("shop:paymethods:"):
+                order_id = int(data.rsplit(":", 1)[1])
+                order = business.order(actor, order_id)
+                if order["status"] != "pending_payment":
+                    raise TenantBusinessError("order is not awaiting payment")
+                methods = business.list_methods(currency=str(order["currency"]))
+                rows = [[InlineKeyboardButton(
+                    f"{m['title']} ({m['kind']})",
+                    callback_data=f"shop:pay:{order_id}:{m['id']}"
+                )] for m in methods] or [[InlineKeyboardButton("روش پرداخت موجود نیست", callback_data="noop")]]
+                rows.append([InlineKeyboardButton("↩️ سفارش", callback_data=f"shop:checkout:{order_id}")])
+                await update.callback_query.edit_message_text(
+                    _checkout_text(order, business.wallet_summary(actor)) + "\n\nروش پرداخت را انتخاب کنید.",
+                    reply_markup=InlineKeyboardMarkup(rows),
+                ); return
             if data.startswith("shop:pay:"):
                 _, _, order_id, method_id = data.split(":", 3); order = business.order(actor, int(order_id)); method = business.method(int(method_id), currency=str(order['currency']))
                 context.user_data["biz_flow"] = {"kind": "receipt", "order_id": int(order_id), "method_id": int(method_id)}
@@ -983,15 +1479,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     subscription_id=int(subscription_id),
                     plan_id=int(plan_id),
                 )
-                methods = business.list_methods(currency=str(order["currency"]))
-                rows = [[InlineKeyboardButton(
-                    f"{m['title']} ({m['kind']})",
-                    callback_data=f"shop:pay:{order['id']}:{m['id']}"
-                )] for m in methods] or [[InlineKeyboardButton("روش پرداخت موجود نیست", callback_data="noop")]]
                 await update.callback_query.edit_message_text(
-                    f"تمدید سفارش #{order['id']} · {order['plan_name']} · {order['amount']:,} {order['currency']}\n"
-                    "روش پرداخت را انتخاب کنید.",
-                    reply_markup=InlineKeyboardMarkup(rows),
+                    _checkout_text(order, business.wallet_summary(actor)),
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("🎟 کد تخفیف", callback_data=f"shop:coupon:{order['id']}"),
+                            InlineKeyboardButton("💰 پرداخت کیف پول", callback_data=f"shop:walletpay:{order['id']}"),
+                        ],
+                        [InlineKeyboardButton("💳 روش‌های پرداخت", callback_data=f"shop:paymethods:{order['id']}")],
+                        [InlineKeyboardButton("↩️ اشتراک‌های من", callback_data="shop:subs")],
+                    ]),
                 ); return
             if data == "shop:tickets":
                 items = business.list_tickets(actor)
@@ -1049,8 +1546,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ); return
             if data == "shop:guide":
                 await update.callback_query.edit_message_text(
-                    "📖 راهنما\nبرای خرید، پلن و روش پرداخت را انتخاب کنید. برای تمدید از «اشتراک‌های من» روی ♻️ تمدید بزنید. "
-                    "سرویس منقضی بدون تمدید دوباره فعال نمی‌شود. مصرف و آخرین اتصال به‌صورت دوره‌ای از پنل همگام می‌شود.",
+                    "📖 راهنما\nبرای خرید، پلن را انتخاب کنید و در Checkout می‌توانید کد تخفیف، کیف پول یا روش پرداخت را بزنید. "
+                    "برای تمدید از «اشتراک‌های من» روی ♻️ تمدید بزنید. تست رایگان فقط یک‌بار و برای کاربر بدون خرید قبلی است. "
+                    "پاداش دعوت دوستان به کیف پول اضافه می‌شود. سرویس منقضی بدون تمدید دوباره فعال نمی‌شود.",
                     reply_markup=_menu(spec),
                 ); return
     except (ValueError, TenantBusinessError, PermissionError, sqlite3.IntegrityError):
@@ -1117,6 +1615,134 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 await update.effective_message.reply_text(
                     f"✅ {len(results)} نتیجه پیدا شد.",
                     reply_markup=InlineKeyboardMarkup(rows),
+                )
+                return
+            if kind == "wallet_topup_create":
+                if len(fields) != 2:
+                    raise ValueError("invalid wallet topup")
+                topup = business.create_wallet_topup(
+                    actor,
+                    amount=int(fields[0]),
+                    currency=fields[1],
+                )
+                methods = business.list_methods(currency=str(topup["currency"]))
+                context.user_data.pop("biz_flow", None)
+                rows = [[InlineKeyboardButton(
+                    f"{m['title']} ({m['kind']})",
+                    callback_data=f"shop:wallettopupmethod:{topup['id']}:{m['id']}",
+                )] for m in methods]
+                if not rows:
+                    rows = [[InlineKeyboardButton("روش پرداخت موجود نیست", callback_data="noop")]]
+                rows.append([InlineKeyboardButton("↩️ کیف پول", callback_data="shop:wallet")])
+                await update.effective_message.reply_text(
+                    f"شارژ #{topup['id']} · {int(topup['amount']):,} {topup['currency']}\n"
+                    "روش پرداخت را انتخاب کنید.",
+                    reply_markup=InlineKeyboardMarkup(rows),
+                )
+                return
+            if kind == "wallet_receipt":
+                business.submit_wallet_topup_receipt(
+                    actor,
+                    topup_id=int(flow["topup_id"]),
+                    method_id=int(flow["method_id"]),
+                    reference=text,
+                )
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    "✅ رسید شارژ کیف پول برای بررسی ارسال شد.",
+                    reply_markup=_menu(spec),
+                )
+                return
+            if kind == "growth_config":
+                if len(fields) != 7:
+                    raise ValueError("invalid growth config")
+                business.update_growth_settings(
+                    actor,
+                    referral_trial_reward=int(fields[0]),
+                    referral_purchase_reward=int(fields[1]),
+                    referral_min_purchase=int(fields[2]),
+                    referral_max_rewards=int(fields[3]),
+                    referral_currency=fields[4],
+                    trial_traffic_gb=int(fields[5]),
+                    trial_duration_days=int(fields[6]),
+                )
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    "✅ تنظیمات فروش پیشرفته ذخیره شد.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🎯 فروش پیشرفته", callback_data="biz:growth")]
+                    ]),
+                )
+                return
+            if kind == "coupon_add":
+                if len(fields) not in (8, 9):
+                    raise ValueError("invalid coupon")
+                business.add_coupon(
+                    actor,
+                    code=fields[0],
+                    discount_kind=fields[1],
+                    value=int(fields[2]),
+                    currency=fields[3],
+                    min_amount=int(fields[4] or 0),
+                    max_discount=int(fields[5] or 0),
+                    max_uses=int(fields[6] or 0),
+                    per_customer_limit=int(fields[7] or 0),
+                    expires_at=fields[8] if len(fields) == 9 else "",
+                )
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    "✅ کوپن ساخته شد.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🎟 کوپن‌ها", callback_data="biz:coupons")]
+                    ]),
+                )
+                return
+            if kind == "wallet_adjust":
+                if len(fields) not in (2, 3):
+                    raise ValueError("invalid wallet adjustment")
+                customer_id = int(flow["customer_id"])
+                business.adjust_wallet_admin(
+                    actor,
+                    customer_id=customer_id,
+                    currency=fields[0],
+                    amount=int(fields[1]),
+                    note=fields[2] if len(fields) == 3 else "",
+                )
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    "✅ موجودی کیف پول تغییر کرد.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "💰 کیف پول مشتری",
+                            callback_data=f"biz:wallet:{customer_id}",
+                        )]
+                    ]),
+                )
+                return
+            if kind == "coupon_apply":
+                order_id = int(flow["order_id"])
+                order = business.apply_coupon(
+                    actor,
+                    order_id=order_id,
+                    code=text,
+                )
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    "✅ کد تخفیف اعمال شد.\n\n"
+                    + _checkout_text(order, business.wallet_summary(actor)),
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton(
+                                "💰 پرداخت کیف پول",
+                                callback_data=f"shop:walletpay:{order_id}",
+                            ),
+                            InlineKeyboardButton(
+                                "💳 روش‌های پرداخت",
+                                callback_data=f"shop:paymethods:{order_id}",
+                            ),
+                        ],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
                 )
                 return
             if kind == "panel_secret":
@@ -1249,12 +1875,23 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     spec, _, _, business = _services(context)
     flow = context.user_data.get("biz_flow")
     actor = int(update.effective_user.id) if update.effective_user else 0
-    if spec.role != "user" or not isinstance(flow, dict) or flow.get("kind") != "receipt":
+    if spec.role != "user" or not isinstance(flow, dict) or flow.get("kind") not in ("receipt", "wallet_receipt"):
         await update.effective_message.reply_text("از منوی ربات استفاده کنید.", reply_markup=_menu(spec)); return
     try:
-        business.submit_receipt(actor, order_id=int(flow['order_id']), method_id=int(flow['method_id']), reference=str(update.effective_message.caption or "").strip() or None, telegram_file_id=str(update.effective_message.photo[-1].file_id))
+        if flow.get("kind") == "wallet_receipt":
+            business.submit_wallet_topup_receipt(
+                actor,
+                topup_id=int(flow["topup_id"]),
+                method_id=int(flow["method_id"]),
+                reference=str(update.effective_message.caption or "").strip() or None,
+                telegram_file_id=str(update.effective_message.photo[-1].file_id),
+            )
+            success_text = "✅ تصویر رسید شارژ کیف پول برای بررسی ارسال شد."
+        else:
+            business.submit_receipt(actor, order_id=int(flow['order_id']), method_id=int(flow['method_id']), reference=str(update.effective_message.caption or "").strip() or None, telegram_file_id=str(update.effective_message.photo[-1].file_id))
+            success_text = "✅ تصویر رسید برای بررسی ارسال شد."
         context.user_data.pop("biz_flow", None)
-        await update.effective_message.reply_text("✅ تصویر رسید برای بررسی ارسال شد.", reply_markup=_menu(spec))
+        await update.effective_message.reply_text(success_text, reply_markup=_menu(spec))
     except (ValueError, TenantBusinessError, sqlite3.IntegrityError):
         await update.effective_message.reply_text("❌ ثبت تصویر رسید انجام نشد.", reply_markup=_menu(spec))
 

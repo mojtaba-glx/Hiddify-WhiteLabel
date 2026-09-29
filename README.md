@@ -25,7 +25,7 @@ Hiddify-WhiteLabel/
 ├── Ops/                  # Phase 6 - health, encrypted backup, locks, systemd
 ├── Shared/               # settings, redacted logging, crypto, time, access
 ├── Database/             # connection, repositories, migration runner
-├── Migrations/           # versioned SQL (currently 0001 through 0016)
+├── Migrations/           # versioned SQL (currently 0001 through 0017)
 ├── Tests/                # offline pytest suite, fake tokens only
 ├── scripts/              # migrate helper
 ├── install.sh            # English operations menu and systemd installer
@@ -186,6 +186,27 @@ Support tickets now have a full lifecycle: users can list and reopen their own
 ticket history to read replies; admins can inspect a ticket, reply, close it and
 jump to the tenant-scoped customer profile. UserBot also exposes account and
 order-history screens without allowing blocked customers to create new orders.
+Tenant sales growth now includes wallet checkout/top-up, coupons, referrals and
+one-time free trials. Wallet credits use an append-only transaction ledger with
+idempotency keys. Users can top up by existing tenant payment methods; AdminBot
+reviews the top-up receipt and a repeated approval cannot double-credit the
+wallet. Full wallet payment supports purchases and renewals, while zero-value
+orders such as a 100% coupon can finalize without an external receipt.
+
+Coupons support percentage or fixed discounts, minimum order amounts, optional
+maximum discounts, global use limits, per-customer limits and expiry. Rejected
+payment receipts or explicit cancellation of an unpaid order release the
+reserved coupon use.
+
+Referral links use tenant-local opaque codes (`/start ref_<code>`), prevent
+self/cross-tenant referrals and can reward the inviter for a valid free trial
+and the invitee's first qualifying purchase. Rewards are credited to the same
+wallet ledger exactly once per referral/reward type.
+
+Free Trial is configured per tenant (enabled, traffic GB and duration days),
+is available only once to a customer with no previous paid purchase/renewal,
+uses the normal multi-node provisioning + smart-subscription engine, and keeps
+the same claim/order for safe retry if the provider is temporarily unavailable.
 
 The MasterBot JobQueue runs the Phase-3 evaluator at the configured interval.
 It advances expiry/grace states, suspends expired licenses, persists 7/3/1-day
