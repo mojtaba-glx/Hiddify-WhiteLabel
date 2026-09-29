@@ -2258,9 +2258,32 @@ class TenantBusinessService:
             " WHERE n.tenant_id=? AND "
             " (n.status='error' OR n.fail_count>0 OR n.frozen_at IS NOT NULL)) AS node_attention, "
             "(SELECT COUNT(*) FROM tenant_tickets t "
-            " WHERE t.tenant_id=? AND t.status='open') AS tickets_open",
-            (self.tenant_id,) * 11,
+            " WHERE t.tenant_id=? AND t.status='open') AS tickets_open, "
+            "(SELECT COUNT(*) FROM tenant_servers srv "
+            " WHERE srv.tenant_id=? AND srv.status='active') AS servers_active, "
+            "(SELECT COUNT(*) FROM tenant_nodes n "
+            " WHERE n.tenant_id=? AND n.status='active') AS nodes_active, "
+            "(SELECT COALESCE(SUM(s.usage_bytes),0) FROM tenant_subscriptions s "
+            " WHERE s.tenant_id=? AND s.status IN ('active','disabled')) AS usage_bytes, "
+            "(SELECT COALESCE(SUM(s.traffic_bytes),0) FROM tenant_subscriptions s "
+            " WHERE s.tenant_id=? AND s.status IN ('active','disabled')) AS traffic_bytes",
+            (self.tenant_id,) * 15,
         ).fetchone()
+        current_data = dict(current)
+        reference_now = now or utcnow()
+        if reference_now.tzinfo is None:
+            reference_now = reference_now.replace(tzinfo=timezone.utc)
+        expiring = self.conn.execute(
+            "SELECT COUNT(*) FROM tenant_subscriptions "
+            "WHERE tenant_id=? AND status='active' "
+            "AND expires_at>? AND expires_at<=?",
+            (
+                self.tenant_id,
+                iso_utc(reference_now),
+                iso_utc(reference_now + timedelta(days=1)),
+            ),
+        ).fetchone()
+        current_data["expiring_24h"] = int(expiring[0] or 0)
 
         return {
             "period_days": int(days),
@@ -2274,7 +2297,7 @@ class TenantBusinessService:
             "approved_receipts": int(payment_counts["approved"] or 0),
             "rejected_receipts": int(payment_counts["rejected"] or 0),
             "new_customers": int(new_customers[0] or 0),
-            "current": dict(current),
+            "current": current_data,
         }
 
     def dashboard_summary(
