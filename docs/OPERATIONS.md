@@ -109,6 +109,25 @@ Successful updates retain the private rollback snapshot under
 `runtime/update-rollback/`. This snapshot is for local emergency rollback;
 it is not a substitute for the encrypted off-server backup.
 
+## Release-readiness drill
+
+Before a staged release candidate is tested against real panels, run the
+offline release gate from the repository checkout:
+
+```bash
+python3 scripts/release_drill.py
+```
+
+Use `--full-suite` to run the complete offline pytest suite, or
+`--plan-only --json` to inspect the exact deterministic plan without
+executing commands. The automated drill performs no network calls and uses a
+private temporary database for its fresh-migration smoke test.
+
+The real Hiddify/X-UI/X-NET staging sequence remains an explicit operator step
+with disposable test users and test inbounds. Follow
+`docs/STAGED_RELEASE_DRILL.md`; do not use production customer accounts for
+that acceptance drill.
+
 ## Service model
 
 The installer manages:
