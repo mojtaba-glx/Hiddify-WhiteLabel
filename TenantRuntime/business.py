@@ -1301,6 +1301,30 @@ class TenantBusinessService:
             ).fetchall()
         ]
 
+    def set_coupon_status_admin(
+        self,
+        actor_id: int,
+        *,
+        coupon_id: int,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_coupons SET status=?, updated_at=? "
+                "WHERE id=? AND tenant_id=?",
+                (
+                    "active" if enabled else "disabled",
+                    now,
+                    int(coupon_id),
+                    self.tenant_id,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("coupon not found")
+        return self.coupon(int(coupon_id))
+
     def apply_coupon(
         self,
         actor_id: int,
@@ -1702,6 +1726,43 @@ class TenantBusinessService:
             (self.tenant_id, int(customer["id"])),
         ).fetchone()
         if existing is not None:
+            if str(existing["status"]) == "failed":
+                try:
+                    result = self.fulfill_paid_order(
+                        self.owner_telegram_id,
+                        order_id=int(existing["order_id"]),
+                    )
+                except TenantBusinessError:
+                    raise TenantBusinessError("free trial provisioning is still pending")
+                with transaction(self.conn):
+                    now_retry = iso_utc(utcnow())
+                    self.conn.execute(
+                        "UPDATE tenant_trial_claims "
+                        "SET status='issued', updated_at=? "
+                        "WHERE id=? AND tenant_id=? AND status='failed'",
+                        (now_retry, int(existing["id"]), self.tenant_id),
+                    )
+                    self.conn.execute(
+                        "UPDATE tenant_customers SET trial_used_at=?, updated_at=? "
+                        "WHERE id=? AND tenant_id=?",
+                        (
+                            now_retry,
+                            now_retry,
+                            int(customer["id"]),
+                            self.tenant_id,
+                        ),
+                    )
+                    self._grant_referral_reward_tx(
+                        invitee_customer_id=int(customer["id"]),
+                        reward_type="trial",
+                    )
+                result.update(
+                    {
+                        "order_kind": "trial",
+                        "order_id": int(existing["order_id"]),
+                    }
+                )
+                return result
             raise TenantBusinessError("free trial already used")
         paid = self.conn.execute(
             "SELECT 1 FROM tenant_orders WHERE tenant_id=? AND customer_id=? "
