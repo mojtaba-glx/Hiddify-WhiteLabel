@@ -1191,6 +1191,198 @@ class TenantBusinessService:
         ]
         return {"accounts": accounts, "history": history}
 
+    def create_wallet_topup(
+        self,
+        actor_id: int,
+        *,
+        amount: int,
+        currency: str,
+    ) -> dict[str, Any]:
+        customer = self._customer(actor_id)
+        value = int(amount)
+        currency_code = _text(currency, 8).upper()
+        if value <= 0:
+            raise ValueError("invalid wallet topup amount")
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            cursor = self.conn.execute(
+                "INSERT INTO tenant_wallet_topups "
+                "(tenant_id, customer_id, amount, currency, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'pending_payment', ?, ?)",
+                (
+                    self.tenant_id,
+                    int(customer["id"]),
+                    value,
+                    currency_code,
+                    now,
+                    now,
+                ),
+            )
+        row = self.conn.execute(
+            "SELECT * FROM tenant_wallet_topups WHERE id=? AND tenant_id=?",
+            (int(cursor.lastrowid or 0), self.tenant_id),
+        ).fetchone()
+        assert row is not None
+        return dict(row)
+
+    def wallet_topup(self, actor_id: int, topup_id: int) -> dict[str, Any]:
+        customer = self._customer(actor_id, active=False)
+        row = self.conn.execute(
+            "SELECT * FROM tenant_wallet_topups "
+            "WHERE id=? AND tenant_id=? AND customer_id=?",
+            (int(topup_id), self.tenant_id, int(customer["id"])),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("wallet topup not found")
+        return dict(row)
+
+    def submit_wallet_topup_receipt(
+        self,
+        actor_id: int,
+        *,
+        topup_id: int,
+        method_id: int,
+        reference: str | None = None,
+        telegram_file_id: str | None = None,
+    ) -> dict[str, Any]:
+        topup = self.wallet_topup(actor_id, int(topup_id))
+        if topup["status"] != "pending_payment":
+            raise TenantBusinessError("wallet topup is not awaiting payment")
+        method = self.method(int(method_id), currency=str(topup["currency"]))
+        ref = _text(reference, 160, required=False) or None
+        file_id = _text(telegram_file_id, 256, required=False) or None
+        if not ref and not file_id:
+            raise ValueError("receipt is required")
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_wallet_topups SET status='payment_review', updated_at=? "
+                "WHERE id=? AND tenant_id=? AND status='pending_payment'",
+                (now, int(topup_id), self.tenant_id),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("wallet topup state changed")
+            cursor = self.conn.execute(
+                "INSERT INTO tenant_wallet_topup_receipts "
+                "(tenant_id, topup_id, payment_method_id, reference, telegram_file_id, "
+                "status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+                (
+                    self.tenant_id,
+                    int(topup_id),
+                    int(method["id"]),
+                    ref,
+                    file_id,
+                    now,
+                ),
+            )
+        return {"id": int(cursor.lastrowid or 0), "topup_id": int(topup_id)}
+
+    def list_wallet_topups_admin(self, actor_id: int) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        rows = self.conn.execute(
+            "SELECT w.*, c.display_name, c.telegram_user_id "
+            "FROM tenant_wallet_topups w "
+            "JOIN tenant_customers c "
+            "ON c.id=w.customer_id AND c.tenant_id=w.tenant_id "
+            "WHERE w.tenant_id=? ORDER BY w.id DESC LIMIT 100",
+            (self.tenant_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_wallet_topup_receipts_admin(
+        self, actor_id: int
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        rows = self.conn.execute(
+            "SELECT r.*, w.customer_id, w.amount, w.currency, "
+            "w.status AS topup_status, c.display_name, c.telegram_user_id "
+            "FROM tenant_wallet_topup_receipts r "
+            "JOIN tenant_wallet_topups w "
+            "ON w.id=r.topup_id AND w.tenant_id=r.tenant_id "
+            "JOIN tenant_customers c "
+            "ON c.id=w.customer_id AND c.tenant_id=w.tenant_id "
+            "WHERE r.tenant_id=? AND r.status='pending' "
+            "ORDER BY r.id",
+            (self.tenant_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def review_wallet_topup_receipt(
+        self,
+        actor_id: int,
+        *,
+        receipt_id: int,
+        approve: bool,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            row = self.conn.execute(
+                "SELECT r.*, w.customer_id, w.amount, w.currency, "
+                "w.status AS topup_status "
+                "FROM tenant_wallet_topup_receipts r "
+                "JOIN tenant_wallet_topups w "
+                "ON w.id=r.topup_id AND w.tenant_id=r.tenant_id "
+                "WHERE r.id=? AND r.tenant_id=?",
+                (int(receipt_id), self.tenant_id),
+            ).fetchone()
+            if row is None:
+                raise TenantBusinessError("wallet topup receipt not found")
+            receipt = dict(row)
+            if receipt["status"] != "pending" or receipt["topup_status"] != "payment_review":
+                raise TenantBusinessError("wallet topup receipt was already reviewed")
+            changed = self.conn.execute(
+                "UPDATE tenant_wallet_topup_receipts "
+                "SET status=?, reviewed_by=?, reviewed_at=? "
+                "WHERE id=? AND tenant_id=? AND status='pending'",
+                (
+                    "approved" if approve else "rejected",
+                    int(actor_id),
+                    now,
+                    int(receipt_id),
+                    self.tenant_id,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("wallet topup receipt state changed")
+            target = "paid" if approve else "rejected"
+            changed = self.conn.execute(
+                "UPDATE tenant_wallet_topups SET status=?, "
+                "paid_at=CASE WHEN ?='paid' THEN COALESCE(paid_at, ?) ELSE paid_at END, "
+                "updated_at=? WHERE id=? AND tenant_id=? AND status='payment_review'",
+                (
+                    target,
+                    target,
+                    now,
+                    now,
+                    int(receipt["topup_id"]),
+                    self.tenant_id,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("wallet topup state changed")
+            wallet_tx = None
+            if approve:
+                wallet_tx = self._wallet_change_tx(
+                    customer_id=int(receipt["customer_id"]),
+                    currency=str(receipt["currency"]),
+                    amount=int(receipt["amount"]),
+                    kind="admin_credit",
+                    idempotency_key=(
+                        f"tenant:{self.tenant_id}:wallet-topup:"
+                        f"{int(receipt['topup_id'])}"
+                    ),
+                    note=f"wallet topup #{int(receipt['topup_id'])}",
+                )
+        return {
+            "topup_id": int(receipt["topup_id"]),
+            "status": target,
+            "customer_id": int(receipt["customer_id"]),
+            "amount": int(receipt["amount"]),
+            "currency": str(receipt["currency"]),
+            "wallet_transaction": wallet_tx,
+        }
+
     def adjust_wallet_admin(
         self,
         actor_id: int,
