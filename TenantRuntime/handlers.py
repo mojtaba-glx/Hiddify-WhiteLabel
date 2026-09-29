@@ -154,6 +154,76 @@ def _user_account_text(summary: dict) -> str:
     ])
 
 
+def _wallet_text(summary: dict) -> str:
+    accounts = list(summary.get("accounts") or [])
+    history = list(summary.get("history") or [])
+    lines = ["💰 کیف پول", ""]
+    if accounts:
+        lines.extend(
+            f"• {int(x.get('balance') or 0):,} {x.get('currency') or ''}"
+            for x in accounts
+        )
+    else:
+        lines.append("• موجودی: 0")
+    if history:
+        lines.extend(["", "🧾 آخرین تراکنش‌ها"])
+        labels = {
+            "admin_credit": "شارژ ادمین",
+            "admin_debit": "کسر ادمین",
+            "referral_trial": "پاداش دعوت/تست",
+            "referral_purchase": "پاداش دعوت/خرید",
+            "purchase": "پرداخت سفارش",
+            "refund": "برگشت",
+        }
+        for tx in history[:10]:
+            amount = int(tx.get("amount") or 0)
+            lines.append(
+                f"• {labels.get(str(tx.get('kind')), str(tx.get('kind') or '-'))}: "
+                f"{amount:+,} {tx.get('currency') or ''} → "
+                f"{int(tx.get('resulting_balance') or 0):,}"
+            )
+    return "\n".join(lines)
+
+
+def _checkout_text(order: dict, wallet: dict) -> str:
+    balance = 0
+    for account in list(wallet.get("accounts") or []):
+        if str(account.get("currency")) == str(order.get("currency")):
+            balance = int(account.get("balance") or 0)
+            break
+    original = int(order.get("original_amount") or order.get("amount") or 0)
+    discount = int(order.get("discount_amount") or 0)
+    final = int(order.get("amount") or 0)
+    operation = str(order.get("operation") or "purchase")
+    op_title = "تمدید" if operation == "renewal" else "خرید"
+    return "\n".join([
+        f"🧾 {op_title} سفارش #{order['id']}",
+        f"پلن: {order.get('plan_name') or '-'}",
+        f"مبلغ اصلی: {original:,} {order.get('currency') or ''}",
+        f"تخفیف: {discount:,} {order.get('currency') or ''}",
+        f"مبلغ نهایی: {final:,} {order.get('currency') or ''}",
+        f"کیف پول: {balance:,} {order.get('currency') or ''}",
+    ])
+
+
+def _growth_text(settings: dict, coupons: list[dict]) -> str:
+    return "\n".join([
+        "🎯 فروش پیشرفته",
+        "",
+        f"🤝 Referral: {'فعال' if int(settings.get('referral_enabled') or 0) else 'خاموش'}",
+        f"• پاداش تست: {int(settings.get('referral_trial_reward') or 0):,} {settings.get('referral_currency') or ''}",
+        f"• پاداش اولین خرید: {int(settings.get('referral_purchase_reward') or 0):,} {settings.get('referral_currency') or ''}",
+        f"• حداقل خرید: {int(settings.get('referral_min_purchase') or 0):,}",
+        f"• سقف پاداش هر دعوت‌کننده: {int(settings.get('referral_max_rewards') or 0) or 'نامحدود'}",
+        "",
+        f"🎁 تست رایگان: {'فعال' if int(settings.get('trial_enabled') or 0) else 'خاموش'}",
+        f"• حجم: {int(settings.get('trial_traffic_gb') or 0)}GB",
+        f"• مدت: {int(settings.get('trial_duration_days') or 0)} روز",
+        "",
+        f"🎟 کوپن‌ها: {len(coupons)}",
+    ])
+
+
 def _services(context: ContextTypes.DEFAULT_TYPE):
     spec = context.application.bot_data.get("runtime_spec")
     policy = context.application.bot_data.get("runtime_policy")
@@ -178,13 +248,16 @@ def _menu(spec: RuntimeBotSpec) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("📦 پلن‌های فروش", callback_data="biz:plans"), InlineKeyboardButton("💳 پرداخت", callback_data="biz:payments")],
             [InlineKeyboardButton("🧾 سفارش‌ها", callback_data="biz:orders"), InlineKeyboardButton("📡 سرویس‌ها", callback_data="biz:subs")],
             [InlineKeyboardButton("👥 مشتریان", callback_data="biz:customers"), InlineKeyboardButton("⚠️ نیازمند بررسی", callback_data="biz:attention")],
-            [InlineKeyboardButton("🎫 تیکت‌ها", callback_data="biz:tickets"), InlineKeyboardButton("🔗 لینک هوشمند", callback_data="biz:links")],
+            [InlineKeyboardButton("🎯 فروش پیشرفته", callback_data="biz:growth"), InlineKeyboardButton("🔗 لینک هوشمند", callback_data="biz:links")],
+            [InlineKeyboardButton("🎫 تیکت‌ها", callback_data="biz:tickets")],
         ]
     else:
         rows = [
             [InlineKeyboardButton("💳 خرید اشتراک", callback_data="shop:buy"), InlineKeyboardButton("📦 اشتراک‌های من", callback_data="shop:subs")],
             [InlineKeyboardButton("👤 حساب من", callback_data="shop:account"), InlineKeyboardButton("🧾 سفارش‌های من", callback_data="shop:orders")],
-            [InlineKeyboardButton("🎫 پشتیبانی", callback_data="shop:tickets"), InlineKeyboardButton("📖 راهنما", callback_data="shop:guide")],
+            [InlineKeyboardButton("💰 کیف پول", callback_data="shop:wallet"), InlineKeyboardButton("🤝 دعوت دوستان", callback_data="shop:referral")],
+            [InlineKeyboardButton("🎁 تست رایگان", callback_data="shop:trial"), InlineKeyboardButton("🎫 پشتیبانی", callback_data="shop:tickets")],
+            [InlineKeyboardButton("📖 راهنما", callback_data="shop:guide")],
         ]
     rows.extend([[InlineKeyboardButton("🏠 منو", callback_data="runtime:home")], [InlineKeyboardButton("📊 وضعیت", callback_data="runtime:status")]])
     return InlineKeyboardMarkup(rows)
@@ -241,7 +314,21 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     state_store.save(user_id, {**state, "visits": visits, "screen": "home"})
     if spec.role == "user":
         user = update.effective_user
-        business.register_customer(user_id, display_name=str(getattr(user, "full_name", None) or "کاربر"), username=getattr(user, "username", None))
+        business.register_customer(
+            user_id,
+            display_name=str(getattr(user, "full_name", None) or "کاربر"),
+            username=getattr(user, "username", None),
+        )
+        args = list(getattr(context, "args", None) or [])
+        if args:
+            payload = str(args[0] or "").strip()
+            if payload.startswith("ref_"):
+                try:
+                    business.register_referral(
+                        user_id, referral_code=payload[4:]
+                    )
+                except TenantBusinessError:
+                    pass
     text = _home_text(spec, visits)
     if update.callback_query:
         await update.callback_query.answer()
