@@ -306,6 +306,212 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     actor = int(update.effective_user.id) if update.effective_user else 0
     try:
         if spec.role == "admin":
+            if data == "biz:dashboard":
+                report = business.dashboard_summary(actor)
+                rows = [
+                    [
+                        InlineKeyboardButton("📈 گزارش فروش", callback_data="biz:reports"),
+                        InlineKeyboardButton("⚠️ نیازمند بررسی", callback_data="biz:attention"),
+                    ],
+                    [
+                        InlineKeyboardButton("👥 مشتریان", callback_data="biz:customers"),
+                        InlineKeyboardButton("📡 سرویس‌ها", callback_data="biz:subs"),
+                    ],
+                    [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                ]
+                await update.callback_query.edit_message_text(
+                    _report_text(report, dashboard=True),
+                    reply_markup=InlineKeyboardMarkup(rows),
+                ); return
+            if data == "biz:reports":
+                rows = [
+                    [
+                        InlineKeyboardButton("امروز", callback_data="biz:report:1"),
+                        InlineKeyboardButton("۷ روز", callback_data="biz:report:7"),
+                    ],
+                    [
+                        InlineKeyboardButton("۳۰ روز", callback_data="biz:report:30"),
+                        InlineKeyboardButton("۹۰ روز", callback_data="biz:report:90"),
+                    ],
+                    [InlineKeyboardButton("همه زمان‌ها", callback_data="biz:report:0")],
+                    [InlineKeyboardButton("↩️ داشبورد", callback_data="biz:dashboard")],
+                ]
+                await update.callback_query.edit_message_text(
+                    "📈 بازه گزارش فروش را انتخاب کنید.",
+                    reply_markup=InlineKeyboardMarkup(rows),
+                ); return
+            if data.startswith("biz:report:"):
+                days = int(data.rsplit(":", 1)[1])
+                if days not in (0, 1, 7, 30, 90):
+                    raise ValueError("invalid report range")
+                report = business.sales_report(actor, days=days)
+                await update.callback_query.edit_message_text(
+                    _report_text(report),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔁 انتخاب بازه", callback_data="biz:reports")],
+                        [InlineKeyboardButton("↩️ داشبورد", callback_data="biz:dashboard")],
+                    ]),
+                ); return
+            if data == "biz:customers":
+                report = business.dashboard_summary(actor)
+                current = dict(report.get("current") or {})
+                await update.callback_query.edit_message_text(
+                    "👥 مدیریت مشتریان\n"
+                    f"کل: {int(current.get('customers_total') or 0)}\n"
+                    f"فعال: {int(current.get('customers_active') or 0)}\n\n"
+                    "با نام، @username، Telegram ID یا Customer ID جستجو کنید.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔎 جستجوی مشتری", callback_data="biz:customersearch")],
+                        [InlineKeyboardButton("↩️ داشبورد", callback_data="biz:dashboard")],
+                    ]),
+                ); return
+            if data == "biz:customersearch":
+                context.user_data["biz_flow"] = {"kind": "customer_search"}
+                await update.callback_query.edit_message_text(
+                    "🔎 نام، @username، Telegram ID یا Customer ID را ارسال کنید.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ مشتریان", callback_data="biz:customers")]
+                    ]),
+                ); return
+            if data.startswith("biz:customer:"):
+                customer_id = int(data.rsplit(":", 1)[1])
+                profile = business.customer_profile_admin(
+                    actor, customer_id=customer_id
+                )
+                next_status = (
+                    "active" if profile["status"] == "blocked" else "blocked"
+                )
+                toggle_title = (
+                    "✅ آزادسازی مشتری"
+                    if next_status == "active"
+                    else "🚫 مسدود کردن مشتری"
+                )
+                await update.callback_query.edit_message_text(
+                    _customer_profile_text(profile),
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton(
+                                "📦 سرویس‌های مشتری",
+                                callback_data=f"biz:customersubs:{customer_id}",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                toggle_title,
+                                callback_data=f"biz:customerstatus:{customer_id}:{next_status}",
+                            )
+                        ],
+                        [InlineKeyboardButton("🔎 جستجوی جدید", callback_data="biz:customersearch")],
+                        [InlineKeyboardButton("↩️ مشتریان", callback_data="biz:customers")],
+                    ]),
+                ); return
+            if data.startswith("biz:customerstatus:"):
+                _, _, customer_id, status = data.split(":", 3)
+                profile = business.set_customer_status_admin(
+                    actor,
+                    customer_id=int(customer_id),
+                    status=status,
+                )
+                await update.callback_query.edit_message_text(
+                    "✅ وضعیت مشتری تغییر کرد.\n\n" + _customer_profile_text(profile),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "👤 بازگشت به پروفایل",
+                            callback_data=f"biz:customer:{int(customer_id)}",
+                        )],
+                        [InlineKeyboardButton("↩️ مشتریان", callback_data="biz:customers")],
+                    ]),
+                ); return
+            if data.startswith("biz:customersubs:"):
+                customer_id = int(data.rsplit(":", 1)[1])
+                profile = business.customer_profile_admin(
+                    actor, customer_id=customer_id
+                )
+                items = business.subscriptions_for_customer_admin(
+                    actor, customer_id=customer_id
+                )
+                text = (
+                    f"📦 سرویس‌های {profile.get('display_name') or 'مشتری'}\n"
+                    + (
+                        "\n".join(
+                            f"• #{x['id']} · {x['plan_name']} · {x['status']}"
+                            f"{' ⚠️ enforcement' if int(x.get('enforcement_pending') or 0) else ''}\n"
+                            f"  {int(x.get('usage_bytes') or 0)/(1024**3):.2f}/"
+                            f"{int(x.get('traffic_bytes') or 0)/(1024**3):.0f}GB · "
+                            f"{x.get('server_label') or '-'} · انقضا: {x.get('expires_at') or '-'}"
+                            for x in items[:20]
+                        )
+                        or "سرویسی ثبت نشده است."
+                    )
+                )
+                rows = []
+                for item in items[:10]:
+                    if item["status"] in ("active", "disabled"):
+                        rows.append([
+                            InlineKeyboardButton(
+                                f"🔄 سینک #{item['id']}",
+                                callback_data=f"biz:syncsub:{item['id']}",
+                            ),
+                            InlineKeyboardButton(
+                                f"🧩 نودها #{item['id']}",
+                                callback_data=f"biz:subnodes:{item['id']}",
+                            ),
+                        ])
+                rows.extend([
+                    [InlineKeyboardButton(
+                        "👤 پروفایل مشتری",
+                        callback_data=f"biz:customer:{customer_id}",
+                    )],
+                    [InlineKeyboardButton("↩️ مشتریان", callback_data="biz:customers")],
+                ])
+                await update.callback_query.edit_message_text(
+                    text, reply_markup=InlineKeyboardMarkup(rows)
+                ); return
+            if data == "biz:attention":
+                items = business.service_attention_admin(actor)
+                lines = ["⚠️ سرویس‌های نیازمند بررسی"]
+                rows = []
+                if not items:
+                    lines.append("✅ موردی برای بررسی وجود ندارد.")
+                for item in items[:20]:
+                    reasons = []
+                    if item["status"] == "pending_provisioning":
+                        reasons.append("در انتظار ساخت")
+                    elif item["status"] == "expired":
+                        reasons.append("منقضی")
+                    elif item["status"] == "disabled":
+                        reasons.append("غیرفعال")
+                    if int(item.get("enforcement_pending") or 0):
+                        reasons.append("Enforcement pending")
+                    if int(item.get("node_errors") or 0):
+                        reasons.append(f"{int(item['node_errors'])} نود خطادار")
+                    lines.append(
+                        f"• #{item['id']} · {item['display_name']} · "
+                        f"{item['plan_name']} · {' / '.join(reasons) or item['status']}"
+                    )
+                    if item["status"] == "pending_provisioning":
+                        rows.append([InlineKeyboardButton(
+                            f"🔁 تلاش تحویل سفارش #{item['order_id']}",
+                            callback_data=f"biz:fulfill:{item['order_id']}",
+                        )])
+                    elif int(item.get("enforcement_pending") or 0):
+                        rows.append([InlineKeyboardButton(
+                            f"🔄 اجرای مجدد #{item['id']}",
+                            callback_data=f"biz:syncsub:{item['id']}",
+                        )])
+                    elif int(item.get("node_errors") or 0):
+                        rows.append([InlineKeyboardButton(
+                            f"🧩 بررسی نودهای #{item['id']}",
+                            callback_data=f"biz:subnodes:{item['id']}",
+                        )])
+                rows.extend([
+                    [InlineKeyboardButton("🔄 همگام‌سازی همه", callback_data="biz:syncall")],
+                    [InlineKeyboardButton("↩️ داشبورد", callback_data="biz:dashboard")],
+                ])
+                await update.callback_query.edit_message_text(
+                    "\n".join(lines),
+                    reply_markup=InlineKeyboardMarkup(rows),
+                ); return
             if data == "biz:servers":
                 rows = [[InlineKeyboardButton(f"{'⭐ ' if int(item.get('is_default') or 0) else '🖥 '}{item['label']} · {item['panel_kind']} · {item['status']}", callback_data=f"biz:server:{item['id']}")] for item in business.list_servers()]
                 rows += [[InlineKeyboardButton("➕ سرور", callback_data="biz:addserver")], [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")]]
@@ -602,6 +808,38 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     ]),
                 ); return
         else:
+            if data == "shop:account":
+                summary = business.customer_account_summary(actor)
+                await update.callback_query.edit_message_text(
+                    _user_account_text(summary),
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("📦 اشتراک‌های من", callback_data="shop:subs"),
+                            InlineKeyboardButton("🧾 سفارش‌های من", callback_data="shop:orders"),
+                        ],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
+                ); return
+            if data == "shop:orders":
+                items = business.list_customer_orders(actor, limit=15)
+                text = "🧾 سفارش‌های من\n" + (
+                    "\n".join(
+                        f"• #{x['id']} · "
+                        f"{'تمدید' if x.get('operation') == 'renewal' else 'خرید'} · "
+                        f"{x.get('plan_name') or '-'} · {x.get('status')}\n"
+                        f"  {int(x.get('amount') or 0):,} {x.get('currency') or ''}"
+                        f"{' · پرداخت: ' + str(x.get('paid_at')) if x.get('paid_at') else ''}"
+                        for x in items
+                    )
+                    or "سفارشی ندارید."
+                )
+                await update.callback_query.edit_message_text(
+                    text,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("👤 حساب من", callback_data="shop:account")],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
+                ); return
             if data == "shop:buy":
                 plans = business.list_plans(); rows = [[InlineKeyboardButton(f"{p['name']} · {p['price']:,} {p['currency']}", callback_data=f"shop:plan:{p['id']}")] for p in plans] or [[InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")]]
                 rows.append([InlineKeyboardButton("↩️ منو", callback_data="runtime:home")]); await update.callback_query.edit_message_text("💳 خرید اشتراک", reply_markup=InlineKeyboardMarkup(rows)); return
