@@ -1236,14 +1236,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     )
                     or "سفارشی ندارید."
                 )
-                rows = [
-                    [InlineKeyboardButton(
-                        f"🔁 تلاش فعال‌سازی سفارش #{x['id']}",
-                        callback_data=f"shop:retryorder:{x['id']}",
-                    )]
-                    for x in items
-                    if x["status"] == "paid"
-                ]
+                rows = []
+                for x in items:
+                    if x["status"] == "paid":
+                        rows.append([InlineKeyboardButton(
+                            f"🔁 تلاش فعال‌سازی سفارش #{x['id']}",
+                            callback_data=f"shop:retryorder:{x['id']}",
+                        )])
+                    elif x["status"] == "pending_payment":
+                        rows.append([InlineKeyboardButton(
+                            f"❌ لغو سفارش #{x['id']}",
+                            callback_data=f"shop:cancelorder:{x['id']}",
+                        )])
                 rows.extend([
                     [InlineKeyboardButton("👤 حساب من", callback_data="shop:account")],
                     [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
@@ -1258,6 +1262,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await update.callback_query.edit_message_text(
                     f"✅ سفارش #{order_id} انجام شد.\n🔗 {result.get('subscription_url') or '-'}",
                     reply_markup=_menu(spec),
+                ); return
+            if data.startswith("shop:cancelorder:"):
+                order_id = int(data.rsplit(":", 1)[1])
+                business.cancel_order(actor, order_id=order_id)
+                await update.callback_query.edit_message_text(
+                    f"✅ سفارش #{order_id} لغو شد و در صورت وجود، سهمیه کوپن آزاد شد.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🧾 سفارش‌های من", callback_data="shop:orders")],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
                 ); return
             if data == "shop:wallet":
                 await update.callback_query.edit_message_text(
