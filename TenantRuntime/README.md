@@ -1,5 +1,16 @@
 # TenantRuntime
 
+## Physical role separation
+
+Tenant Telegram handlers are physically separated by role. Admin-only menus,
+callbacks and text flows live in `TenantRuntime/AdminBot/handlers.py`; the
+end-user shop, receipt and support flows live in
+`TenantRuntime/UserBot/handlers.py`. `TenantRuntime/common.py` contains only
+shared policy/service/error helpers and `TenantRuntime/handlers.py` is a small
+role dispatcher. Provider, lifecycle, smart-subscription and business services
+remain shared because they are role-independent domain infrastructure.
+
+
 TenantRuntime runs all provisioned tenant `AdminBot` and `UserBot` instances
 inside a fixed number of shard processes. Each shard owns the bots whose
 database id matches `bot_id % RUNTIME_SHARD_COUNT == RUNTIME_SHARD_INDEX`.
