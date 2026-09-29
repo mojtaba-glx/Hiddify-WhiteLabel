@@ -401,12 +401,6 @@ def test_referral_rejects_self_existing_and_cross_tenant_codes(
     )
     foreign.update_growth_settings(8001, referral_enabled=True)
     assert int(foreign_tenant["id"]) != int(tenant["id"])
-    with pytest.raises(TenantBusinessError):
-        service.register_customer(
-            7303, display_name="Third", username="third"
-        )
-        # unreachable: registration returns normally; separate assertion below
-
     third = service.register_customer(
         7303, display_name="Third", username="third"
     )
