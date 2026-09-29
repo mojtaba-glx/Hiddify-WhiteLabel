@@ -789,8 +789,86 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     )
                 return
             if data == "biz:tickets":
-                items = business.list_tickets_admin(actor); text = "🎫 تیکت‌ها\n" + ("\n".join(f"#{x['id']} · {x['display_name']} · {x['subject']} · {x['status']}" for x in items) or "موردی نیست.")
-                await update.callback_query.edit_message_text(text, reply_markup=_menu(spec)); return
+                items = business.list_tickets_admin(actor)
+                text = "🎫 تیکت‌ها\n" + (
+                    "\n".join(
+                        f"#{x['id']} · {x['display_name']} · {x['subject']} · {x['status']}"
+                        for x in items[:30]
+                    )
+                    or "موردی نیست."
+                )
+                rows = [
+                    [InlineKeyboardButton(
+                        f"{'🟠' if x['status'] == 'open' else '🟢' if x['status'] == 'answered' else '⚪'} "
+                        f"#{x['id']} · {x['display_name']}"[:60],
+                        callback_data=f"biz:ticket:{x['id']}",
+                    )]
+                    for x in items[:20]
+                ]
+                rows.append([InlineKeyboardButton("↩️ منو", callback_data="runtime:home")])
+                await update.callback_query.edit_message_text(
+                    text, reply_markup=InlineKeyboardMarkup(rows)
+                ); return
+            if data.startswith("biz:ticket:"):
+                ticket_id = int(data.rsplit(":", 1)[1])
+                ticket = business.ticket_admin(actor, ticket_id=ticket_id)
+                username = str(ticket.get("username") or "").strip()
+                text = (
+                    f"🎫 تیکت #{ticket_id}\n"
+                    f"👤 {ticket['display_name']} · "
+                    f"{'@' + username.lstrip('@') if username else ticket['telegram_user_id']}\n"
+                    f"وضعیت: {ticket['status']}\n"
+                    f"موضوع: {ticket['subject']}\n\n"
+                    f"پیام:\n{ticket['body']}\n\n"
+                    f"پاسخ ادمین:\n{ticket.get('admin_reply') or '—'}"
+                )
+                rows = []
+                if ticket["status"] != "closed":
+                    rows.append([
+                        InlineKeyboardButton(
+                            "✍️ پاسخ",
+                            callback_data=f"biz:ticketreply:{ticket_id}",
+                        ),
+                        InlineKeyboardButton(
+                            "✅ بستن",
+                            callback_data=f"biz:ticketclose:{ticket_id}",
+                        ),
+                    ])
+                rows.extend([
+                    [InlineKeyboardButton(
+                        "👤 پروفایل مشتری",
+                        callback_data=f"biz:customer:{ticket['customer_id']}",
+                    )],
+                    [InlineKeyboardButton("↩️ تیکت‌ها", callback_data="biz:tickets")],
+                ])
+                await update.callback_query.edit_message_text(
+                    text, reply_markup=InlineKeyboardMarkup(rows)
+                ); return
+            if data.startswith("biz:ticketreply:"):
+                ticket_id = int(data.rsplit(":", 1)[1])
+                business.ticket_admin(actor, ticket_id=ticket_id)
+                context.user_data["biz_flow"] = {
+                    "kind": "ticket_reply",
+                    "ticket_id": ticket_id,
+                }
+                await update.callback_query.edit_message_text(
+                    f"✍️ پاسخ تیکت #{ticket_id} را ارسال کنید.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "↩️ بازگشت به تیکت",
+                            callback_data=f"biz:ticket:{ticket_id}",
+                        )]
+                    ]),
+                ); return
+            if data.startswith("biz:ticketclose:"):
+                ticket_id = int(data.rsplit(":", 1)[1])
+                business.close_ticket_admin(actor, ticket_id=ticket_id)
+                await update.callback_query.edit_message_text(
+                    f"✅ تیکت #{ticket_id} بسته شد.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ تیکت‌ها", callback_data="biz:tickets")]
+                    ]),
+                ); return
             if data == "biz:links":
                 items = business.list_smart_links(actor)
                 managed = [x for x in items if str(x.get("target") or "").startswith("subscription:")]
@@ -909,7 +987,59 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     reply_markup=InlineKeyboardMarkup(rows),
                 ); return
             if data == "shop:tickets":
-                context.user_data["biz_flow"] = {"kind": "ticket"}; await update.callback_query.edit_message_text("موضوع | متن تیکت را ارسال کنید.", reply_markup=_menu(spec)); return
+                items = business.list_tickets(actor)
+                text = "🎫 تیکت‌های من\n" + (
+                    "\n".join(
+                        f"• #{x['id']} · {x['subject']} · {x['status']}"
+                        f"{' · پاسخ داده شد' if x.get('admin_reply') else ''}"
+                        for x in items
+                    )
+                    or "تیکتی ندارید."
+                )
+                rows = [
+                    [InlineKeyboardButton(
+                        f"🎫 #{x['id']} · {x['subject']}"[:60],
+                        callback_data=f"shop:ticket:{x['id']}",
+                    )]
+                    for x in items[:15]
+                ]
+                rows.extend([
+                    [InlineKeyboardButton("➕ تیکت جدید", callback_data="shop:newticket")],
+                    [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                ])
+                await update.callback_query.edit_message_text(
+                    text, reply_markup=InlineKeyboardMarkup(rows)
+                ); return
+            if data == "shop:newticket":
+                context.user_data["biz_flow"] = {"kind": "ticket"}
+                await update.callback_query.edit_message_text(
+                    "موضوع | متن تیکت را ارسال کنید.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ تیکت‌های من", callback_data="shop:tickets")]
+                    ]),
+                ); return
+            if data.startswith("shop:ticket:"):
+                ticket_id = int(data.rsplit(":", 1)[1])
+                ticket = next(
+                    (
+                        x for x in business.list_tickets(actor)
+                        if int(x["id"]) == ticket_id
+                    ),
+                    None,
+                )
+                if ticket is None:
+                    raise TenantBusinessError("ticket not found")
+                await update.callback_query.edit_message_text(
+                    f"🎫 تیکت #{ticket_id}\n"
+                    f"وضعیت: {ticket['status']}\n"
+                    f"موضوع: {ticket['subject']}\n\n"
+                    f"پیام شما:\n{ticket['body']}\n\n"
+                    f"پاسخ پشتیبانی:\n{ticket.get('admin_reply') or 'هنوز پاسخی ثبت نشده است.'}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ تیکت‌های من", callback_data="shop:tickets")],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
+                ); return
             if data == "shop:guide":
                 await update.callback_query.edit_message_text(
                     "📖 راهنما\nبرای خرید، پلن و روش پرداخت را انتخاب کنید. برای تمدید از «اشتراک‌های من» روی ♻️ تمدید بزنید. "
