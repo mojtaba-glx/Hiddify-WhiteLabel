@@ -1060,6 +1060,26 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if isinstance(flow, dict):
             fields = [part.strip() for part in text.split("|")]
             kind = flow.get("kind")
+            if kind == "ticket_reply":
+                ticket_id = int(flow["ticket_id"])
+                ticket = business.reply_ticket_admin(
+                    actor,
+                    ticket_id=ticket_id,
+                    reply=text,
+                )
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    f"✅ پاسخ تیکت #{ticket_id} ثبت شد.\n"
+                    f"وضعیت: {ticket['status']}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "🎫 مشاهده تیکت",
+                            callback_data=f"biz:ticket:{ticket_id}",
+                        )],
+                        [InlineKeyboardButton("↩️ تیکت‌ها", callback_data="biz:tickets")],
+                    ]),
+                )
+                return
             if kind == "customer_search":
                 results = business.search_customers_admin(actor, text)
                 context.user_data.pop("biz_flow", None)
