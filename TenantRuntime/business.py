@@ -1367,7 +1367,7 @@ class TenantBusinessService:
                     customer_id=int(receipt["customer_id"]),
                     currency=str(receipt["currency"]),
                     amount=int(receipt["amount"]),
-                    kind="admin_credit",
+                    kind="topup",
                     idempotency_key=(
                         f"tenant:{self.tenant_id}:wallet-topup:"
                         f"{int(receipt['topup_id'])}"
