@@ -1097,239 +1097,233 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if isinstance(flow, dict):
             fields = [part.strip() for part in text.split("|")]
             kind = flow.get("kind")
-        if kind == "ticket_reply":
-            ticket_id = int(flow["ticket_id"])
-            ticket = business.reply_ticket_admin(
-                actor,
-                ticket_id=ticket_id,
-                reply=text,
-            )
-            context.user_data.pop("biz_flow", None)
-            await update.effective_message.reply_text(
-                f"✅ پاسخ تیکت #{ticket_id} ثبت شد.\n"
-                f"وضعیت: {ticket['status']}",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(
-                        "🎫 مشاهده تیکت",
-                        callback_data=f"biz:ticket:{ticket_id}",
-                    )],
-                    [InlineKeyboardButton("↩️ تیکت‌ها", callback_data="biz:tickets")],
-                ]),
-            )
-            return
-
-        if kind == "customer_search":
-            results = business.search_customers_admin(actor, text)
-            context.user_data.pop("biz_flow", None)
-            if not results:
+            if kind == "ticket_reply":
+                ticket_id = int(flow["ticket_id"])
+                ticket = business.reply_ticket_admin(
+                    actor,
+                    ticket_id=ticket_id,
+                    reply=text,
+                )
+                context.user_data.pop("biz_flow", None)
                 await update.effective_message.reply_text(
-                    "❌ مشتری پیدا نشد.",
+                    f"✅ پاسخ تیکت #{ticket_id} ثبت شد.\n"
+                    f"وضعیت: {ticket['status']}",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔎 جستجوی دوباره", callback_data="biz:customersearch")],
-                        [InlineKeyboardButton("↩️ مشتریان", callback_data="biz:customers")],
+                        [InlineKeyboardButton(
+                            "🎫 مشاهده تیکت",
+                            callback_data=f"biz:ticket:{ticket_id}",
+                        )],
+                        [InlineKeyboardButton("↩️ تیکت‌ها", callback_data="biz:tickets")],
                     ]),
                 )
                 return
-            rows = [
-                [InlineKeyboardButton(
-                    (
-                        f"👤 {item.get('display_name') or item.get('telegram_user_id')} · "
-                        f"فعال {int(item.get('active_subscriptions') or 0)} · "
-                        f"منقضی {int(item.get('expired_subscriptions') or 0)}"
-                    )[:60],
-                    callback_data=f"biz:customer:{item['id']}",
-                )]
-                for item in results
-            ]
-            rows.extend([
-                [InlineKeyboardButton("🔎 جستجوی جدید", callback_data="biz:customersearch")],
-                [InlineKeyboardButton("↩️ مشتریان", callback_data="biz:customers")],
-            ])
-            await update.effective_message.reply_text(
-                f"✅ {len(results)} نتیجه پیدا شد.",
-                reply_markup=InlineKeyboardMarkup(rows),
-            )
-            return
-
-        if kind == "growth_config":
-            if len(fields) != 7:
-                raise ValueError("invalid growth config")
-            business.update_growth_settings(
-                actor,
-                referral_trial_reward=int(fields[0]),
-                referral_purchase_reward=int(fields[1]),
-                referral_min_purchase=int(fields[2]),
-                referral_max_rewards=int(fields[3]),
-                referral_currency=fields[4],
-                trial_traffic_gb=int(fields[5]),
-                trial_duration_days=int(fields[6]),
-            )
-            context.user_data.pop("biz_flow", None)
-            await update.effective_message.reply_text(
-                "✅ تنظیمات فروش پیشرفته ذخیره شد.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🎯 فروش پیشرفته", callback_data="biz:growth")]
-                ]),
-            )
-            return
-
-        if kind == "coupon_add":
-            if len(fields) not in (8, 9):
-                raise ValueError("invalid coupon")
-            business.add_coupon(
-                actor,
-                code=fields[0],
-                discount_kind=fields[1],
-                value=int(fields[2]),
-                currency=fields[3],
-                min_amount=int(fields[4] or 0),
-                max_discount=int(fields[5] or 0),
-                max_uses=int(fields[6] or 0),
-                per_customer_limit=int(fields[7] or 0),
-                expires_at=fields[8] if len(fields) == 9 else "",
-            )
-            context.user_data.pop("biz_flow", None)
-            await update.effective_message.reply_text(
-                "✅ کوپن ساخته شد.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🎟 کوپن‌ها", callback_data="biz:coupons")]
-                ]),
-            )
-            return
-
-        if kind == "wallet_adjust":
-            if len(fields) not in (2, 3):
-                raise ValueError("invalid wallet adjustment")
-            customer_id = int(flow["customer_id"])
-            business.adjust_wallet_admin(
-                actor,
-                customer_id=customer_id,
-                currency=fields[0],
-                amount=int(fields[1]),
-                note=fields[2] if len(fields) == 3 else "",
-            )
-            context.user_data.pop("biz_flow", None)
-            await update.effective_message.reply_text(
-                "✅ موجودی کیف پول تغییر کرد.",
-                reply_markup=InlineKeyboardMarkup([
+            if kind == "customer_search":
+                results = business.search_customers_admin(actor, text)
+                context.user_data.pop("biz_flow", None)
+                if not results:
+                    await update.effective_message.reply_text(
+                        "❌ مشتری پیدا نشد.",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔎 جستجوی دوباره", callback_data="biz:customersearch")],
+                            [InlineKeyboardButton("↩️ مشتریان", callback_data="biz:customers")],
+                        ]),
+                    )
+                    return
+                rows = [
                     [InlineKeyboardButton(
-                        "💰 کیف پول مشتری",
-                        callback_data=f"biz:wallet:{customer_id}",
+                        (
+                            f"👤 {item.get('display_name') or item.get('telegram_user_id')} · "
+                            f"فعال {int(item.get('active_subscriptions') or 0)} · "
+                            f"منقضی {int(item.get('expired_subscriptions') or 0)}"
+                        )[:60],
+                        callback_data=f"biz:customer:{item['id']}",
                     )]
-                ]),
-            )
-            return
-
-        if kind == "panel_secret":
-            if not text:
-                raise ValueError("empty secret")
-            business.set_panel_credential(
-                actor,
-                server_id=int(flow["server_id"]),
-                secret=text,
-            )
-            try:
-                await update.effective_message.delete()
-            except Exception:
-                pass
-        elif kind == "xui_secret":
-            flavor = str(flow.get("flavor") or "")
-            if flavor == "sanaei":
+                    for item in results
+                ]
+                rows.extend([
+                    [InlineKeyboardButton("🔎 جستجوی جدید", callback_data="biz:customersearch")],
+                    [InlineKeyboardButton("↩️ مشتریان", callback_data="biz:customers")],
+                ])
+                await update.effective_message.reply_text(
+                    f"✅ {len(results)} نتیجه پیدا شد.",
+                    reply_markup=InlineKeyboardMarkup(rows),
+                )
+                return
+            if kind == "growth_config":
+                if len(fields) != 7:
+                    raise ValueError("invalid growth config")
+                business.update_growth_settings(
+                    actor,
+                    referral_trial_reward=int(fields[0]),
+                    referral_purchase_reward=int(fields[1]),
+                    referral_min_purchase=int(fields[2]),
+                    referral_max_rewards=int(fields[3]),
+                    referral_currency=fields[4],
+                    trial_traffic_gb=int(fields[5]),
+                    trial_duration_days=int(fields[6]),
+                )
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    "✅ تنظیمات فروش پیشرفته ذخیره شد.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🎯 فروش پیشرفته", callback_data="biz:growth")]
+                    ]),
+                )
+                return
+            if kind == "coupon_add":
+                if len(fields) not in (8, 9):
+                    raise ValueError("invalid coupon")
+                business.add_coupon(
+                    actor,
+                    code=fields[0],
+                    discount_kind=fields[1],
+                    value=int(fields[2]),
+                    currency=fields[3],
+                    min_amount=int(fields[4] or 0),
+                    max_discount=int(fields[5] or 0),
+                    max_uses=int(fields[6] or 0),
+                    per_customer_limit=int(fields[7] or 0),
+                    expires_at=fields[8] if len(fields) == 9 else "",
+                )
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    "✅ کوپن ساخته شد.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🎟 کوپن‌ها", callback_data="biz:coupons")]
+                    ]),
+                )
+                return
+            if kind == "wallet_adjust":
+                if len(fields) not in (2, 3):
+                    raise ValueError("invalid wallet adjustment")
+                customer_id = int(flow["customer_id"])
+                business.adjust_wallet_admin(
+                    actor,
+                    customer_id=customer_id,
+                    currency=fields[0],
+                    amount=int(fields[1]),
+                    note=fields[2] if len(fields) == 3 else "",
+                )
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    "✅ موجودی کیف پول تغییر کرد.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "💰 کیف پول مشتری",
+                            callback_data=f"biz:wallet:{customer_id}",
+                        )]
+                    ]),
+                )
+                return
+            if kind == "panel_secret":
                 if not text:
-                    raise ValueError("empty token")
-                business.set_xui_credential(
+                    raise ValueError("empty secret")
+                business.set_panel_credential(
                     actor,
                     server_id=int(flow["server_id"]),
-                    api_token=text,
+                    secret=text,
                 )
-            elif flavor == "alireza" and 2 <= len(fields) <= 3:
-                business.set_xui_credential(
-                    actor,
-                    server_id=int(flow["server_id"]),
-                    username=fields[0],
-                    password=fields[1],
-                    secret_header=fields[2] if len(fields) == 3 else "",
-                )
-            else:
-                raise ValueError("invalid X-UI credential")
-            try:
-                await update.effective_message.delete()
-            except Exception:
-                pass
-        elif kind == "xnet_secret":
-            if len(fields) == 1 and fields[0]:
-                business.set_xnet_credential(
-                    actor,
-                    server_id=int(flow["server_id"]),
-                    api_token=fields[0],
-                )
-            elif len(fields) == 3:
-                business.set_xnet_credential(
-                    actor,
-                    server_id=int(flow["server_id"]),
-                    api_token=fields[0],
-                    username=fields[1] or "admin",
-                    password=fields[2],
-                )
-            else:
-                raise ValueError("invalid X-NET credential")
-            try:
-                await update.effective_message.delete()
-            except Exception:
-                pass
-        elif kind == "server" and 2 <= len(fields) <= 7:
-            panel_kind = fields[1].lower()
-            if panel_kind == "xui":
-                if len(fields) < 4:
-                    raise ValueError("X-UI flavor is required")
-                business.add_server(
+                try:
+                    await update.effective_message.delete()
+                except Exception:
+                    pass
+            elif kind == "xui_secret":
+                flavor = str(flow.get("flavor") or "")
+                if flavor == "sanaei":
+                    if not text:
+                        raise ValueError("empty token")
+                    business.set_xui_credential(
+                        actor,
+                        server_id=int(flow["server_id"]),
+                        api_token=text,
+                    )
+                elif flavor == "alireza" and 2 <= len(fields) <= 3:
+                    business.set_xui_credential(
+                        actor,
+                        server_id=int(flow["server_id"]),
+                        username=fields[0],
+                        password=fields[1],
+                        secret_header=fields[2] if len(fields) == 3 else "",
+                    )
+                else:
+                    raise ValueError("invalid X-UI credential")
+                try:
+                    await update.effective_message.delete()
+                except Exception:
+                    pass
+            elif kind == "xnet_secret":
+                if len(fields) == 1 and fields[0]:
+                    business.set_xnet_credential(
+                        actor,
+                        server_id=int(flow["server_id"]),
+                        api_token=fields[0],
+                    )
+                elif len(fields) == 3:
+                    business.set_xnet_credential(
+                        actor,
+                        server_id=int(flow["server_id"]),
+                        api_token=fields[0],
+                        username=fields[1] or "admin",
+                        password=fields[2],
+                    )
+                else:
+                    raise ValueError("invalid X-NET credential")
+                try:
+                    await update.effective_message.delete()
+                except Exception:
+                    pass
+            elif kind == "server" and 2 <= len(fields) <= 7:
+                panel_kind = fields[1].lower()
+                if panel_kind == "xui":
+                    if len(fields) < 4:
+                        raise ValueError("X-UI flavor is required")
+                    business.add_server(
+                        actor,
+                        label=fields[0],
+                        panel_kind=panel_kind,
+                        endpoint=fields[2],
+                        xui_flavor=fields[3],
+                        xui_inbound_ids=fields[4] if len(fields) >= 5 else "",
+                        xui_public_origin=fields[5] if len(fields) >= 6 else "",
+                        xui_sub_path=fields[6] if len(fields) >= 7 else "",
+                    )
+                elif panel_kind == "xnet":
+                    if len(fields) < 3:
+                        raise ValueError("X-NET endpoint is required")
+                    business.add_server(
+                        actor,
+                        label=fields[0],
+                        panel_kind=panel_kind,
+                        endpoint=fields[2],
+                        xnet_inbound_ids=fields[3] if len(fields) >= 4 else "",
+                        xnet_public_origin=fields[4] if len(fields) >= 5 else "",
+                        xnet_sub_port=int(fields[5] or 0) if len(fields) >= 6 else 0,
+                        xnet_sub_path=fields[6] if len(fields) >= 7 else "",
+                    )
+                else:
+                    business.add_server(
+                        actor,
+                        label=fields[0],
+                        panel_kind=panel_kind,
+                        endpoint=fields[2] if len(fields) >= 3 else "",
+                        admin_path=fields[3] if len(fields) >= 4 else "",
+                        user_path=fields[4] if len(fields) >= 5 else "",
+                    )
+            elif kind == "node" and 2 <= len(fields) <= 3:
+                business.add_node(
                     actor,
                     label=fields[0],
-                    panel_kind=panel_kind,
-                    endpoint=fields[2],
-                    xui_flavor=fields[3],
-                    xui_inbound_ids=fields[4] if len(fields) >= 5 else "",
-                    xui_public_origin=fields[5] if len(fields) >= 6 else "",
-                    xui_sub_path=fields[6] if len(fields) >= 7 else "",
+                    server_id=int(fields[1]),
+                    location=fields[2] if len(fields) == 3 else "",
                 )
-            elif panel_kind == "xnet":
-                if len(fields) < 3:
-                    raise ValueError("X-NET endpoint is required")
-                business.add_server(
-                    actor,
-                    label=fields[0],
-                    panel_kind=panel_kind,
-                    endpoint=fields[2],
-                    xnet_inbound_ids=fields[3] if len(fields) >= 4 else "",
-                    xnet_public_origin=fields[4] if len(fields) >= 5 else "",
-                    xnet_sub_port=int(fields[5] or 0) if len(fields) >= 6 else 0,
-                    xnet_sub_path=fields[6] if len(fields) >= 7 else "",
-                )
+            elif kind == "plan" and len(fields) == 5:
+                business.add_plan(actor, name=fields[0], traffic_gb=int(fields[1]), duration_days=int(fields[2]), price=int(fields[3]), currency=fields[4])
+            elif kind == "payment" and len(fields) == 6:
+                business.add_payment_method(actor, kind=fields[0], title=fields[1], currency=fields[2], destination=fields[3], network=fields[4], instructions=fields[5])
+            elif kind == "link" and len(fields) == 2:
+                business.create_smart_link(actor, label=fields[0], target=fields[1])
             else:
-                business.add_server(
-                    actor,
-                    label=fields[0],
-                    panel_kind=panel_kind,
-                    endpoint=fields[2] if len(fields) >= 3 else "",
-                    admin_path=fields[3] if len(fields) >= 4 else "",
-                    user_path=fields[4] if len(fields) >= 5 else "",
-                )
-        elif kind == "node" and 2 <= len(fields) <= 3:
-            business.add_node(
-                actor,
-                label=fields[0],
-                server_id=int(fields[1]),
-                location=fields[2] if len(fields) == 3 else "",
-            )
-        elif kind == "plan" and len(fields) == 5:
-            business.add_plan(actor, name=fields[0], traffic_gb=int(fields[1]), duration_days=int(fields[2]), price=int(fields[3]), currency=fields[4])
-        elif kind == "payment" and len(fields) == 6:
-            business.add_payment_method(actor, kind=fields[0], title=fields[1], currency=fields[2], destination=fields[3], network=fields[4], instructions=fields[5])
-        elif kind == "link" and len(fields) == 2:
-            business.create_smart_link(actor, label=fields[0], target=fields[1])
-        else:
-            raise ValueError("invalid input")
-
+                raise ValueError("invalid input")
             context.user_data.pop("biz_flow", None)
             await update.effective_message.reply_text("✅ ذخیره شد.", reply_markup=_menu(spec))
             return
