@@ -25,6 +25,128 @@ from TenantRuntime.business import TenantBusinessError, TenantBusinessService
 logger = get_logger(__name__)
 
 
+def _money_lines(items: list[dict]) -> list[str]:
+    if not items:
+        return ["• مبلغ تأییدشده: 0"]
+    return [
+        f"• {int(item.get('amount') or 0):,} {item.get('currency') or ''} "
+        f"({int(item.get('count') or 0)} پرداخت)"
+        for item in items
+    ]
+
+
+def _report_text(report: dict, *, dashboard: bool = False) -> str:
+    current = dict(report.get("current") or {})
+    lines = [
+        "📊 داشبورد امروز" if dashboard else "📈 گزارش فروش",
+        f"🗓 {report.get('period_label') or '-'}",
+        "",
+        "💰 دریافتی تأییدشده",
+        *_money_lines(list(report.get("totals") or [])),
+    ]
+    operations = list(report.get("operations") or [])
+    if operations:
+        lines.extend(["", "🛒 خرید و تمدید"])
+        for item in operations:
+            currency = item.get("currency") or ""
+            lines.append(
+                f"• خرید: {int(item.get('purchase_count') or 0)} مورد — "
+                f"{int(item.get('purchase_amount') or 0):,} {currency}"
+            )
+            lines.append(
+                f"• تمدید: {int(item.get('renewal_count') or 0)} مورد — "
+                f"{int(item.get('renewal_amount') or 0):,} {currency}"
+            )
+            lines.append(
+                f"• حجم فروخته/تمدیدشده: {int(item.get('traffic_gb') or 0):,}GB"
+            )
+    lines.extend([
+        "",
+        "👥 کاربران",
+        f"• خریداران یکتا: {int(report.get('unique_customers') or 0)}",
+        f"• کاربران جدید: {int(report.get('new_customers') or 0)}",
+        "",
+        "🧾 رسیدها",
+        f"• تأییدشده: {int(report.get('approved_receipts') or 0)}",
+        f"• ردشده: {int(report.get('rejected_receipts') or 0)}",
+        "",
+        "📡 وضعیت فعلی سرویس‌ها",
+        f"• فعال: {int(current.get('subs_active') or 0)}",
+        f"• غیرفعال: {int(current.get('subs_disabled') or 0)}",
+        f"• منقضی: {int(current.get('subs_expired') or 0)}",
+        f"• در انتظار ساخت: {int(current.get('subs_pending') or 0)}",
+        "",
+        "⚠️ نیازمند توجه",
+        f"• رسید در انتظار: {int(current.get('receipts_pending') or 0)}",
+        f"• پرداخت شده / تحویل‌نشده: {int(current.get('fulfillment_pending') or 0)}",
+        f"• Enforcement pending: {int(current.get('enforcement_pending') or 0)}",
+        f"• نود خطادار/Frozen: {int(current.get('node_attention') or 0)}",
+        f"• تیکت باز: {int(current.get('tickets_open') or 0)}",
+        "",
+        f"👤 مشتریان: {int(current.get('customers_active') or 0)} فعال از "
+        f"{int(current.get('customers_total') or 0)} کل",
+    ])
+    return "\n".join(lines)
+
+
+def _customer_profile_text(profile: dict) -> str:
+    username = str(profile.get("username") or "").strip()
+    paid = _money_lines(list(profile.get("paid_totals") or []))
+    lines = [
+        f"👤 {profile.get('display_name') or 'کاربر'}",
+        f"🔹 یوزرنیم: {'@' + username.lstrip('@') if username else '-'}",
+        f"🔢 Telegram ID: {profile.get('telegram_user_id')}",
+        f"🆔 Customer ID: {profile.get('id')}",
+        f"وضعیت: {profile.get('status')}",
+        "",
+        "📦 سرویس‌ها",
+        f"• کل: {int(profile.get('subscriptions_total') or 0)}",
+        f"• فعال: {int(profile.get('subscriptions_active') or 0)}",
+        f"• غیرفعال: {int(profile.get('subscriptions_disabled') or 0)}",
+        f"• منقضی: {int(profile.get('subscriptions_expired') or 0)}",
+        f"• در انتظار ساخت: {int(profile.get('subscriptions_pending') or 0)}",
+        "",
+        "💰 مجموع پرداخت",
+        *paid,
+        "",
+        f"🎫 تیکت باز: {int(profile.get('tickets_open') or 0)}",
+    ]
+    recent = list(profile.get("recent_orders") or [])
+    if recent:
+        lines.extend(["", "🧾 آخرین سفارش‌ها"])
+        for order in recent[:5]:
+            op = "تمدید" if order.get("operation") == "renewal" else "خرید"
+            lines.append(
+                f"• #{order['id']} · {op} · {order.get('plan_name') or '-'} · "
+                f"{order.get('status')} · {int(order.get('amount') or 0):,} "
+                f"{order.get('currency') or ''}"
+            )
+    return "\n".join(lines)
+
+
+def _user_account_text(summary: dict) -> str:
+    customer = dict(summary.get("customer") or {})
+    subs = dict(summary.get("subscriptions") or {})
+    username = str(customer.get("username") or "").strip()
+    return "\n".join([
+        "👤 حساب من",
+        f"نام: {customer.get('display_name') or 'کاربر'}",
+        f"یوزرنیم: {'@' + username.lstrip('@') if username else '-'}",
+        f"Telegram ID: {customer.get('telegram_user_id')}",
+        f"وضعیت حساب: {customer.get('status')}",
+        "",
+        "📦 اشتراک‌ها",
+        f"• فعال: {int(subs.get('active') or 0)}",
+        f"• غیرفعال: {int(subs.get('disabled') or 0)}",
+        f"• منقضی: {int(subs.get('expired') or 0)}",
+        f"• در انتظار فعال‌سازی: {int(subs.get('pending') or 0)}",
+        f"🧾 سفارش باز: {int(summary.get('pending_orders') or 0)}",
+        "",
+        "💰 پرداخت‌های تأییدشده",
+        *_money_lines(list(summary.get("paid_totals") or [])),
+    ])
+
+
 def _services(context: ContextTypes.DEFAULT_TYPE):
     spec = context.application.bot_data.get("runtime_spec")
     policy = context.application.bot_data.get("runtime_policy")
@@ -44,14 +166,17 @@ def _services(context: ContextTypes.DEFAULT_TYPE):
 def _menu(spec: RuntimeBotSpec) -> InlineKeyboardMarkup:
     if spec.role == "admin":
         rows = [
+            [InlineKeyboardButton("📊 داشبورد", callback_data="biz:dashboard"), InlineKeyboardButton("📈 گزارش فروش", callback_data="biz:reports")],
             [InlineKeyboardButton("🖥 سرورها", callback_data="biz:servers"), InlineKeyboardButton("🔗 نودها", callback_data="biz:nodes")],
             [InlineKeyboardButton("📦 پلن‌های فروش", callback_data="biz:plans"), InlineKeyboardButton("💳 پرداخت", callback_data="biz:payments")],
             [InlineKeyboardButton("🧾 سفارش‌ها", callback_data="biz:orders"), InlineKeyboardButton("📡 سرویس‌ها", callback_data="biz:subs")],
+            [InlineKeyboardButton("👥 مشتریان", callback_data="biz:customers"), InlineKeyboardButton("⚠️ نیازمند بررسی", callback_data="biz:attention")],
             [InlineKeyboardButton("🎫 تیکت‌ها", callback_data="biz:tickets"), InlineKeyboardButton("🔗 لینک هوشمند", callback_data="biz:links")],
         ]
     else:
         rows = [
             [InlineKeyboardButton("💳 خرید اشتراک", callback_data="shop:buy"), InlineKeyboardButton("📦 اشتراک‌های من", callback_data="shop:subs")],
+            [InlineKeyboardButton("👤 حساب من", callback_data="shop:account"), InlineKeyboardButton("🧾 سفارش‌های من", callback_data="shop:orders")],
             [InlineKeyboardButton("🎫 پشتیبانی", callback_data="shop:tickets"), InlineKeyboardButton("📖 راهنما", callback_data="shop:guide")],
         ]
     rows.extend([[InlineKeyboardButton("🏠 منو", callback_data="runtime:home")], [InlineKeyboardButton("📊 وضعیت", callback_data="runtime:status")]])
