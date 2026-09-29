@@ -1,6 +1,6 @@
 # Hiddify-WhiteLabel
 
-**Current version: `v0.9.3`**
+**Current version: `v0.10.0-rc.1`**
 
 White-Label SaaS for selling VPN subscriptions: each customer (tenant) gets
 two dedicated bots (`TenantAdminBot` + `TenantUserBot`). The platform owner
@@ -32,7 +32,7 @@ Hiddify-WhiteLabel/
 ├── docs/                 # ARCHITECTURE, THREAT_MODEL, ROADMAP, decisions/
 ├── .env.example          # empty template, no secrets
 ├── requirements.txt      # pinned deps
-└── VERSION               # 0.9.3
+└── VERSION               # 0.10.0-rc.1
 ```
 
 Reference project `Hiddify-SellBot` was used **read-only** to understand

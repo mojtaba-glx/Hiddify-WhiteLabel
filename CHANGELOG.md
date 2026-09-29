@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.10.0-rc.1 — Live Staging Release Candidate
+
+- Promoted the completed offline implementation to a traceable release candidate for real-panel staging.
+- Added live provider support for Hiddify Manager, X-UI Sanaei/Alireza and X-NET.
+- Added renewal, expiry, usage/last-online synchronization, multi-node provisioning and managed smart subscriptions.
+- Added reminder/global enforcement, tenant reports and AdminBot/UserBot operational flows.
+- Added wallet, coupons, referrals and one-time free trials with tenant-scoped transactional safeguards.
+- Added the deterministic offline release drill and the real-panel staged acceptance/rollback runbook.
+- Final `v0.10.0` remains gated on the same candidate passing Hiddify, X-UI, X-NET, multi-node and rollback staging checks.
+
 ## v0.9.3 — Installer Rollback Hardening
 
 - Added private pre-update SQLite + `.env` snapshots using SQLite's backup API.
