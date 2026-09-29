@@ -2027,7 +2027,7 @@ class TenantBusinessService:
         self._admin(actor_id)
         rows = self.conn.execute(
             "SELECT o.id, o.customer_id, o.plan_id, o.status, c.display_name, p.name AS plan_name, "
-            "CASE WHEN ro.order_id IS NULL THEN 'purchase' ELSE 'renewal' END AS operation, "
+            "o.order_kind AS operation, "
             "ro.subscription_id AS renewal_subscription_id "
             "FROM tenant_orders o "
             "JOIN tenant_customers c ON c.id=o.customer_id "
@@ -3433,6 +3433,7 @@ class TenantBusinessService:
                 "SELECT currency, COUNT(*) AS count, "
                 "COALESCE(SUM(amount),0) AS amount "
                 "FROM tenant_orders WHERE tenant_id=? AND customer_id=? "
+                "AND order_kind IN ('purchase','renewal') "
                 "AND status IN ('paid','fulfilled') AND paid_at IS NOT NULL "
                 "GROUP BY currency ORDER BY currency",
                 (self.tenant_id, int(customer_id)),
@@ -3442,8 +3443,7 @@ class TenantBusinessService:
             dict(item)
             for item in self.conn.execute(
                 "SELECT o.*, p.name AS plan_name, "
-                "CASE WHEN ro.order_id IS NULL THEN 'purchase' ELSE 'renewal' END "
-                "AS operation "
+                "o.order_kind AS operation "
                 "FROM tenant_orders o "
                 "JOIN tenant_sale_plans p ON p.id=o.plan_id AND p.tenant_id=o.tenant_id "
                 "LEFT JOIN tenant_renewal_orders ro "
@@ -3551,6 +3551,7 @@ class TenantBusinessService:
             self.conn.execute(
                 "SELECT currency, COUNT(*) AS count, COALESCE(SUM(amount),0) AS amount "
                 "FROM tenant_orders WHERE tenant_id=? AND customer_id=? "
+                "AND order_kind IN ('purchase','renewal') "
                 "AND status IN ('paid','fulfilled') AND paid_at IS NOT NULL "
                 "GROUP BY currency ORDER BY currency",
                 (self.tenant_id, int(customer["id"])),
