@@ -28,8 +28,14 @@
   photo/reference receipts, owner review, wallet top-up/spending, customer
   renewal, and paid-order provisioning. Customer callbacks and all customer
   data reads are actor-scoped; order totals are database-authoritative.
-- [~] **Phase 8 — Tenant product modules**: completed the tenant-scoped data
-  model and AdminBot/UserBot flows for inventory, nodes, sale plans,
-  card/crypto payment instructions, orders/receipts, pending subscriptions,
-  tickets and smart links. Still required: encrypted Hiddify/X-UI adapters,
-  live subscription provisioning/usage sync, and a staged release drill.
+- [~] **Phase 8 — Tenant product modules + staged acceptance**: the
+  tenant-scoped product is implemented for Hiddify Manager, X-UI
+  Sanaei/Alireza and X-NET, including renewal/expiry/usage sync, multi-node
+  managed smart subscriptions, reminder/global enforcement, reports and
+  AdminBot/UserBot management, wallet/coupons/referrals/free trials.
+  The automated offline release gate is now implemented in
+  `scripts/release_drill.py`. The remaining acceptance item is the
+  operator-run real-panel staging drill and rollback record described in
+  `docs/STAGED_RELEASE_DRILL.md`. Phase 8 stays partial until every advertised
+  provider and the operational rollback drill pass on the same release
+  candidate.
