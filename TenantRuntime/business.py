@@ -1937,7 +1937,7 @@ class TenantBusinessService:
         customer = self._customer(actor_id)
         row = self.conn.execute(
             "SELECT o.*, p.name AS plan_name, p.traffic_gb, p.duration_days, "
-            "CASE WHEN ro.order_id IS NULL THEN 'purchase' ELSE 'renewal' END AS operation, "
+            "o.order_kind AS operation, "
             "ro.subscription_id AS renewal_subscription_id "
             "FROM tenant_orders o JOIN tenant_sale_plans p ON p.id=o.plan_id "
             "LEFT JOIN tenant_renewal_orders ro ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
@@ -1951,7 +1951,7 @@ class TenantBusinessService:
         self._admin(actor_id)
         rows = self.conn.execute(
             "SELECT o.*, c.display_name, p.name AS plan_name, "
-            "CASE WHEN ro.order_id IS NULL THEN 'purchase' ELSE 'renewal' END AS operation, "
+            "o.order_kind AS operation, "
             "ro.subscription_id AS renewal_subscription_id "
             "FROM tenant_orders o "
             "JOIN tenant_customers c ON c.id=o.customer_id "
@@ -1989,20 +1989,23 @@ class TenantBusinessService:
             cursor = self.conn.execute("INSERT INTO tenant_receipts (tenant_id, order_id, payment_method_id, reference, telegram_file_id, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)", (self.tenant_id, int(order_id), int(method["id"]), ref, file_id, now))
         return {"id": int(cursor.lastrowid or 0), "order_id": int(order_id)}
 
-    def review_receipt(self, actor_id: int, receipt_id: int, *, approve: bool) -> dict[str, Any]:
-        """Approve money first; purchase/renewal fulfillment remains retryable."""
+    def review_receipt(
+        self, actor_id: int, receipt_id: int, *, approve: bool
+    ) -> dict[str, Any]:
+        """Approve money first; fulfillment and referral credit stay retry-safe."""
         self._admin(actor_id)
         now = iso_utc(utcnow())
         subscription_id: int | None = None
         operation = "purchase"
         with transaction(self.conn):
             row = self.conn.execute(
-                "SELECT r.*, o.customer_id, o.plan_id, o.status AS order_status, "
-                "p.traffic_gb, p.duration_days, ro.subscription_id AS renewal_subscription_id "
+                "SELECT r.*, o.customer_id, o.plan_id, o.amount, o.order_kind, "
+                "o.status AS order_status, "
+                "ro.subscription_id AS renewal_subscription_id "
                 "FROM tenant_receipts r "
-                "JOIN tenant_orders o ON o.id=r.order_id "
-                "JOIN tenant_sale_plans p ON p.id=o.plan_id "
-                "LEFT JOIN tenant_renewal_orders ro ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
+                "JOIN tenant_orders o ON o.id=r.order_id AND o.tenant_id=r.tenant_id "
+                "LEFT JOIN tenant_renewal_orders ro "
+                "ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
                 "WHERE r.id=? AND r.tenant_id=?",
                 (int(receipt_id), self.tenant_id),
             ).fetchone()
@@ -2011,11 +2014,13 @@ class TenantBusinessService:
             receipt = dict(row)
             if receipt["status"] != "pending" or receipt["order_status"] != "payment_review":
                 raise TenantBusinessError("receipt was already reviewed")
+
+            receipt_status = "approved" if approve else "rejected"
             changed = self.conn.execute(
                 "UPDATE tenant_receipts SET status=?, reviewed_by=?, reviewed_at=? "
                 "WHERE id=? AND tenant_id=? AND status='pending'",
                 (
-                    "approved" if approve else "rejected",
+                    receipt_status,
                     int(actor_id),
                     now,
                     int(receipt_id),
@@ -2025,52 +2030,42 @@ class TenantBusinessService:
             if changed.rowcount != 1:
                 raise TenantBusinessError("receipt state changed")
 
-            target = "rejected"
-            if approve:
-                target = "paid"
-                if receipt["renewal_subscription_id"] is not None:
-                    operation = "renewal"
-                    subscription_id = int(receipt["renewal_subscription_id"])
-                    owned = self.conn.execute(
-                        "SELECT 1 FROM tenant_subscriptions "
-                        "WHERE id=? AND tenant_id=? AND customer_id=?",
-                        (
-                            subscription_id,
-                            self.tenant_id,
-                            int(receipt["customer_id"]),
-                        ),
-                    ).fetchone()
-                    if owned is None:
-                        raise TenantBusinessError("renewal subscription is unavailable")
-                else:
-                    expires = iso_utc(
-                        utcnow() + timedelta(days=int(receipt["duration_days"]))
+            if not approve:
+                changed = self.conn.execute(
+                    "UPDATE tenant_orders SET status='rejected', updated_at=? "
+                    "WHERE id=? AND tenant_id=? AND status='payment_review'",
+                    (now, int(receipt["order_id"]), self.tenant_id),
+                )
+                if changed.rowcount != 1:
+                    raise TenantBusinessError("order state changed")
+                coupon_id = self.conn.execute(
+                    "SELECT coupon_id FROM tenant_orders WHERE id=? AND tenant_id=?",
+                    (int(receipt["order_id"]), self.tenant_id),
+                ).fetchone()
+                if coupon_id is not None and coupon_id["coupon_id"] is not None:
+                    self.conn.execute(
+                        "UPDATE tenant_coupons SET used_count=MAX(0, used_count-1), "
+                        "updated_at=? WHERE id=? AND tenant_id=?",
+                        (now, int(coupon_id["coupon_id"]), self.tenant_id),
                     )
-                    cursor = self.conn.execute(
-                        "INSERT INTO tenant_subscriptions "
-                        "(tenant_id, customer_id, plan_id, order_id, server_id, status, usage_bytes, traffic_bytes, expires_at, created_at, updated_at) "
-                        "VALUES (?, ?, ?, ?, NULL, 'pending_provisioning', 0, ?, ?, ?, ?)",
-                        (
-                            self.tenant_id,
-                            int(receipt["customer_id"]),
-                            int(receipt["plan_id"]),
-                            int(receipt["order_id"]),
-                            int(receipt["traffic_gb"]) * 1024 * 1024 * 1024,
-                            expires,
-                            now,
-                            now,
-                        ),
+                    self.conn.execute(
+                        "DELETE FROM tenant_coupon_redemptions "
+                        "WHERE tenant_id=? AND order_id=?",
+                        (self.tenant_id, int(receipt["order_id"])),
                     )
-                    subscription_id = int(cursor.lastrowid or 0)
+                return {
+                    "order_id": int(receipt["order_id"]),
+                    "status": "rejected",
+                    "customer_id": int(receipt["customer_id"]),
+                    "subscription_id": None,
+                    "operation": str(receipt.get("order_kind") or "purchase"),
+                }
 
             changed = self.conn.execute(
-                "UPDATE tenant_orders "
-                "SET status=?, paid_at=CASE WHEN ?='paid' "
-                "THEN COALESCE(paid_at, ?) ELSE paid_at END, updated_at=? "
+                "UPDATE tenant_orders SET status='paid', "
+                "paid_at=COALESCE(paid_at, ?), updated_at=? "
                 "WHERE id=? AND tenant_id=? AND status='payment_review'",
                 (
-                    target,
-                    target,
                     now,
                     now,
                     int(receipt["order_id"]),
@@ -2079,9 +2074,26 @@ class TenantBusinessService:
             )
             if changed.rowcount != 1:
                 raise TenantBusinessError("order state changed")
+            paid_order_row = self.conn.execute(
+                "SELECT * FROM tenant_orders WHERE id=? AND tenant_id=?",
+                (int(receipt["order_id"]), self.tenant_id),
+            ).fetchone()
+            assert paid_order_row is not None
+            paid_order = dict(paid_order_row)
+            operation = str(paid_order.get("order_kind") or "purchase")
+            subscription_id = self._create_paid_subscription_tx(
+                order=paid_order,
+                now=now,
+            )
+            if operation == "purchase":
+                self._grant_referral_reward_tx(
+                    invitee_customer_id=int(receipt["customer_id"]),
+                    reward_type="purchase",
+                    order_id=int(receipt["order_id"]),
+                )
         return {
             "order_id": int(receipt["order_id"]),
-            "status": target,
+            "status": "paid",
             "customer_id": int(receipt["customer_id"]),
             "subscription_id": subscription_id,
             "operation": operation,
@@ -3129,6 +3141,7 @@ class TenantBusinessService:
         )
         paid_where = (
             "o.tenant_id=? AND o.status IN ('paid','fulfilled') "
+            "AND o.order_kind IN ('purchase','renewal') "
             "AND o.paid_at IS NOT NULL"
         )
         paid_args: list[Any] = [self.tenant_id]
@@ -3155,11 +3168,11 @@ class TenantBusinessService:
         )
         operation_rows = self.conn.execute(
             "SELECT o.currency, "
-            "SUM(CASE WHEN ro.order_id IS NULL THEN 1 ELSE 0 END) AS purchase_count, "
-            "COALESCE(SUM(CASE WHEN ro.order_id IS NULL THEN o.amount ELSE 0 END),0) "
+            "SUM(CASE WHEN o.order_kind='purchase' THEN 1 ELSE 0 END) AS purchase_count, "
+            "COALESCE(SUM(CASE WHEN o.order_kind='purchase' THEN o.amount ELSE 0 END),0) "
             "AS purchase_amount, "
-            "SUM(CASE WHEN ro.order_id IS NOT NULL THEN 1 ELSE 0 END) AS renewal_count, "
-            "COALESCE(SUM(CASE WHEN ro.order_id IS NOT NULL THEN o.amount ELSE 0 END),0) "
+            "SUM(CASE WHEN o.order_kind='renewal' THEN 1 ELSE 0 END) AS renewal_count, "
+            "COALESCE(SUM(CASE WHEN o.order_kind='renewal' THEN o.amount ELSE 0 END),0) "
             "AS renewal_amount, "
             "COALESCE(SUM(p.traffic_gb),0) AS traffic_gb "
             "FROM tenant_orders o "
@@ -3509,8 +3522,7 @@ class TenantBusinessService:
         customer = self._customer(actor_id, active=False)
         rows = self.conn.execute(
             "SELECT o.*, p.name AS plan_name, "
-            "CASE WHEN ro.order_id IS NULL THEN 'purchase' ELSE 'renewal' END "
-            "AS operation "
+            "o.order_kind AS operation "
             "FROM tenant_orders o "
             "JOIN tenant_sale_plans p ON p.id=o.plan_id AND p.tenant_id=o.tenant_id "
             "LEFT JOIN tenant_renewal_orders ro "
