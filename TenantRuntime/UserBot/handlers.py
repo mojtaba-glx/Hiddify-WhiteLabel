@@ -569,71 +569,68 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if isinstance(flow, dict):
             fields = [part.strip() for part in text.split("|")]
             kind = flow.get("kind")
-        if kind == "wallet_topup_create":
-            if len(fields) != 2:
-                raise ValueError("invalid wallet topup")
-            topup = business.create_wallet_topup(
-                actor,
-                amount=int(fields[0]),
-                currency=fields[1],
-            )
-            methods = business.list_methods(currency=str(topup["currency"]))
-            context.user_data.pop("biz_flow", None)
-            rows = [[InlineKeyboardButton(
-                f"{m['title']} ({m['kind']})",
-                callback_data=f"shop:wallettopupmethod:{topup['id']}:{m['id']}",
-            )] for m in methods]
-            if not rows:
-                rows = [[InlineKeyboardButton("روش پرداخت موجود نیست", callback_data="noop")]]
-            rows.append([InlineKeyboardButton("↩️ کیف پول", callback_data="shop:wallet")])
-            await update.effective_message.reply_text(
-                f"شارژ #{topup['id']} · {int(topup['amount']):,} {topup['currency']}\n"
-                "روش پرداخت را انتخاب کنید.",
-                reply_markup=InlineKeyboardMarkup(rows),
-            )
-            return
-
-        if kind == "wallet_receipt":
-            business.submit_wallet_topup_receipt(
-                actor,
-                topup_id=int(flow["topup_id"]),
-                method_id=int(flow["method_id"]),
-                reference=text,
-            )
-            context.user_data.pop("biz_flow", None)
-            await update.effective_message.reply_text(
-                "✅ رسید شارژ کیف پول برای بررسی ارسال شد.",
-                reply_markup=_menu(spec),
-            )
-            return
-
-        if kind == "coupon_apply":
-            order_id = int(flow["order_id"])
-            order = business.apply_coupon(
-                actor,
-                order_id=order_id,
-                code=text,
-            )
-            context.user_data.pop("biz_flow", None)
-            await update.effective_message.reply_text(
-                "✅ کد تخفیف اعمال شد.\n\n"
-                + _checkout_text(order, business.wallet_summary(actor)),
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            "💰 پرداخت کیف پول",
-                            callback_data=f"shop:walletpay:{order_id}",
-                        ),
-                        InlineKeyboardButton(
-                            "💳 روش‌های پرداخت",
-                            callback_data=f"shop:paymethods:{order_id}",
-                        ),
-                    ],
-                    [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
-                ]),
-            )
-            return
-
+            if kind == "wallet_topup_create":
+                if len(fields) != 2:
+                    raise ValueError("invalid wallet topup")
+                topup = business.create_wallet_topup(
+                    actor,
+                    amount=int(fields[0]),
+                    currency=fields[1],
+                )
+                methods = business.list_methods(currency=str(topup["currency"]))
+                context.user_data.pop("biz_flow", None)
+                rows = [[InlineKeyboardButton(
+                    f"{m['title']} ({m['kind']})",
+                    callback_data=f"shop:wallettopupmethod:{topup['id']}:{m['id']}",
+                )] for m in methods]
+                if not rows:
+                    rows = [[InlineKeyboardButton("روش پرداخت موجود نیست", callback_data="noop")]]
+                rows.append([InlineKeyboardButton("↩️ کیف پول", callback_data="shop:wallet")])
+                await update.effective_message.reply_text(
+                    f"شارژ #{topup['id']} · {int(topup['amount']):,} {topup['currency']}\n"
+                    "روش پرداخت را انتخاب کنید.",
+                    reply_markup=InlineKeyboardMarkup(rows),
+                )
+                return
+            if kind == "wallet_receipt":
+                business.submit_wallet_topup_receipt(
+                    actor,
+                    topup_id=int(flow["topup_id"]),
+                    method_id=int(flow["method_id"]),
+                    reference=text,
+                )
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    "✅ رسید شارژ کیف پول برای بررسی ارسال شد.",
+                    reply_markup=_menu(spec),
+                )
+                return
+            if kind == "coupon_apply":
+                order_id = int(flow["order_id"])
+                order = business.apply_coupon(
+                    actor,
+                    order_id=order_id,
+                    code=text,
+                )
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    "✅ کد تخفیف اعمال شد.\n\n"
+                    + _checkout_text(order, business.wallet_summary(actor)),
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton(
+                                "💰 پرداخت کیف پول",
+                                callback_data=f"shop:walletpay:{order_id}",
+                            ),
+                            InlineKeyboardButton(
+                                "💳 روش‌های پرداخت",
+                                callback_data=f"shop:paymethods:{order_id}",
+                            ),
+                        ],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
+                )
+                return
             if kind == "receipt":
                 business.submit_receipt(
                     actor,
