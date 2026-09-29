@@ -484,3 +484,34 @@ def test_wallet_topup_receipt_credits_once_and_reject_path_does_not_credit(
         if x["currency"] == "IRR"
     )["balance"] == 75000
 
+def test_cancel_pending_order_releases_coupon_reservation(
+    conn, factories, cipher
+) -> None:
+    _tenant, service, _panel, plan, _method, _user = _setup(
+        conn, factories, cipher
+    )
+    coupon = service.add_coupon(
+        7001,
+        code="CANCEL20",
+        discount_kind="percent",
+        value=20,
+        max_uses=1,
+        per_customer_limit=1,
+    )
+    order = service.create_order(7101, int(plan["id"]))
+    service.apply_coupon(
+        7101, order_id=int(order["id"]), code="CANCEL20"
+    )
+    assert int(service.coupon(int(coupon["id"]))["used_count"]) == 1
+
+    cancelled = service.cancel_order(7101, order_id=int(order["id"]))
+    assert cancelled["status"] == "cancelled"
+    assert int(service.coupon(int(coupon["id"]))["used_count"]) == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM tenant_coupon_redemptions WHERE order_id=?",
+        (int(order["id"]),),
+    ).fetchone()[0] == 0
+
+    with pytest.raises(TenantBusinessError):
+        service.cancel_order(7101, order_id=int(order["id"]))
+
