@@ -417,6 +417,116 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     _report_text(report, dashboard=True),
                     reply_markup=InlineKeyboardMarkup(rows),
                 ); return
+            if data == "biz:growth":
+                settings = business.growth_settings(actor)
+                coupons = business.list_coupons_admin(actor)
+                await update.callback_query.edit_message_text(
+                    _growth_text(settings, coupons),
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton(
+                                "🤝 روشن/خاموش Referral",
+                                callback_data="biz:growthtoggle:referral",
+                            ),
+                            InlineKeyboardButton(
+                                "🎁 روشن/خاموش تست",
+                                callback_data="biz:growthtoggle:trial",
+                            ),
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "⚙️ تنظیم مقادیر",
+                                callback_data="biz:growthconfig",
+                            ),
+                            InlineKeyboardButton(
+                                "🎟 کوپن‌ها",
+                                callback_data="biz:coupons",
+                            ),
+                        ],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
+                ); return
+            if data.startswith("biz:growthtoggle:"):
+                target = data.rsplit(":", 1)[1]
+                settings = business.growth_settings(actor)
+                if target == "referral":
+                    settings = business.update_growth_settings(
+                        actor,
+                        referral_enabled=not bool(settings["referral_enabled"]),
+                    )
+                elif target == "trial":
+                    settings = business.update_growth_settings(
+                        actor,
+                        trial_enabled=not bool(settings["trial_enabled"]),
+                    )
+                else:
+                    raise ValueError("invalid growth toggle")
+                await update.callback_query.edit_message_text(
+                    _growth_text(settings, business.list_coupons_admin(actor)),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ فروش پیشرفته", callback_data="biz:growth")]
+                    ]),
+                ); return
+            if data == "biz:growthconfig":
+                context.user_data["biz_flow"] = {"kind": "growth_config"}
+                await update.callback_query.edit_message_text(
+                    "تنظیمات را با این فرمت بفرستید:\n"
+                    "پاداش تست | پاداش اولین خرید | حداقل خرید | سقف پاداش | ارز | حجم تست GB | روز تست\n"
+                    "مثال: 10000 | 20000 | 50000 | 0 | IRR | 1 | 1",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ فروش پیشرفته", callback_data="biz:growth")]
+                    ]),
+                ); return
+            if data == "biz:coupons":
+                items = business.list_coupons_admin(actor)
+                lines = ["🎟 کوپن‌ها"]
+                rows = []
+                for item in items[:30]:
+                    kind = "%" if item["discount_kind"] == "percent" else str(item.get("currency") or "")
+                    lines.append(
+                        f"• {item['code']} · {item['value']}{kind} · "
+                        f"{item['used_count']}/{item['max_uses'] or '∞'} · {item['status']}"
+                    )
+                    rows.append([
+                        InlineKeyboardButton(
+                            f"{'⛔' if item['status']=='active' else '✅'} {item['code']}",
+                            callback_data=f"biz:couponstatus:{item['id']}:{'off' if item['status']=='active' else 'on'}",
+                        )
+                    ])
+                if not items:
+                    lines.append("موردی نیست.")
+                rows.extend([
+                    [InlineKeyboardButton("➕ کوپن جدید", callback_data="biz:addcoupon")],
+                    [InlineKeyboardButton("↩️ فروش پیشرفته", callback_data="biz:growth")],
+                ])
+                await update.callback_query.edit_message_text(
+                    "\n".join(lines),
+                    reply_markup=InlineKeyboardMarkup(rows),
+                ); return
+            if data == "biz:addcoupon":
+                context.user_data["biz_flow"] = {"kind": "coupon_add"}
+                await update.callback_query.edit_message_text(
+                    "فرمت کوپن:\n"
+                    "CODE | percent/fixed | مقدار | ارز(برای fixed) | حداقل سفارش | سقف تخفیف | حداکثر استفاده | سقف هر کاربر | انقضا اختیاری\n"
+                    "مثال درصدی: OFF15 | percent | 15 | | 0 | 0 | 100 | 1 |\n"
+                    "مثال ثابت: GIFT20 | fixed | 20000 | IRR | 50000 | 0 | 20 | 1 |",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ کوپن‌ها", callback_data="biz:coupons")]
+                    ]),
+                ); return
+            if data.startswith("biz:couponstatus:"):
+                _, _, coupon_id, state = data.split(":", 3)
+                business.set_coupon_status_admin(
+                    actor,
+                    coupon_id=int(coupon_id),
+                    enabled=state == "on",
+                )
+                await update.callback_query.edit_message_text(
+                    "✅ وضعیت کوپن تغییر کرد.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ کوپن‌ها", callback_data="biz:coupons")]
+                    ]),
+                ); return
             if data == "biz:reports":
                 rows = [
                     [
@@ -491,12 +601,56 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                         ],
                         [
                             InlineKeyboardButton(
+                                "💰 کیف پول مشتری",
+                                callback_data=f"biz:wallet:{customer_id}",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
                                 toggle_title,
                                 callback_data=f"biz:customerstatus:{customer_id}:{next_status}",
                             )
                         ],
                         [InlineKeyboardButton("🔎 جستجوی جدید", callback_data="biz:customersearch")],
                         [InlineKeyboardButton("↩️ مشتریان", callback_data="biz:customers")],
+                    ]),
+                ); return
+            if data.startswith("biz:wallet:"):
+                customer_id = int(data.rsplit(":", 1)[1])
+                profile = business.customer_profile_admin(
+                    actor, customer_id=customer_id
+                )
+                customer_actor = int(profile["telegram_user_id"])
+                wallet = business.wallet_summary(customer_actor)
+                await update.callback_query.edit_message_text(
+                    f"👤 {profile['display_name']}\n\n" + _wallet_text(wallet),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "➕/➖ تغییر موجودی",
+                            callback_data=f"biz:walletadjust:{customer_id}",
+                        )],
+                        [InlineKeyboardButton(
+                            "👤 پروفایل مشتری",
+                            callback_data=f"biz:customer:{customer_id}",
+                        )],
+                    ]),
+                ); return
+            if data.startswith("biz:walletadjust:"):
+                customer_id = int(data.rsplit(":", 1)[1])
+                business.customer_profile_admin(actor, customer_id=customer_id)
+                context.user_data["biz_flow"] = {
+                    "kind": "wallet_adjust",
+                    "customer_id": customer_id,
+                }
+                await update.callback_query.edit_message_text(
+                    "ارز | مبلغ مثبت/منفی | یادداشت اختیاری\n"
+                    "مثال شارژ: IRR | 50000 | هدیه\n"
+                    "مثال کسر: IRR | -20000 | اصلاح حساب",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "↩️ کیف پول مشتری",
+                            callback_data=f"biz:wallet:{customer_id}",
+                        )]
                     ]),
                 ); return
             if data.startswith("biz:customerstatus:"):
