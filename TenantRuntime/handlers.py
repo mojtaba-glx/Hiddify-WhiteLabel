@@ -1183,6 +1183,59 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     f"✅ سفارش #{order_id} انجام شد.\n🔗 {result.get('subscription_url') or '-'}",
                     reply_markup=_menu(spec),
                 ); return
+            if data == "shop:wallet":
+                await update.callback_query.edit_message_text(
+                    _wallet_text(business.wallet_summary(actor)),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")]
+                    ]),
+                ); return
+            if data == "shop:referral":
+                summary = business.referral_summary(actor)
+                settings = dict(summary.get("settings") or {})
+                username = str(getattr(context.bot, "username", None) or "").strip()
+                code = str(summary["referral_code"])
+                invite = (
+                    f"https://t.me/{username}?start=ref_{code}"
+                    if username
+                    else f"/start ref_{code}"
+                )
+                rewards = list(summary.get("rewards") or [])
+                reward_lines = [
+                    f"• {x.get('reward_type')}: {int(x.get('amount') or 0):,} "
+                    f"{x.get('currency') or ''} ({int(x.get('count') or 0)} مورد)"
+                    for x in rewards
+                ] or ["• هنوز پاداشی ثبت نشده است."]
+                text = "\n".join([
+                    "🤝 دعوت دوستان",
+                    f"وضعیت: {'فعال' if int(settings.get('referral_enabled') or 0) else 'خاموش'}",
+                    f"دعوت موفق ثبت‌شده: {int(summary.get('referred_count') or 0)}",
+                    f"پاداش تست: {int(settings.get('referral_trial_reward') or 0):,} {settings.get('referral_currency') or ''}",
+                    f"پاداش اولین خرید: {int(settings.get('referral_purchase_reward') or 0):,} {settings.get('referral_currency') or ''}",
+                    "",
+                    "🔗 لینک دعوت شما:",
+                    invite,
+                    "",
+                    "🎁 پاداش‌ها",
+                    *reward_lines,
+                ])
+                await update.callback_query.edit_message_text(
+                    text,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("💰 کیف پول", callback_data="shop:wallet")],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
+                ); return
+            if data == "shop:trial":
+                result = business.claim_free_trial(actor)
+                await update.callback_query.edit_message_text(
+                    "✅ تست رایگان فعال شد.\n"
+                    f"🔗 {result.get('subscription_url') or '-'}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📦 اشتراک‌های من", callback_data="shop:subs")],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
+                ); return
             if data == "shop:buy":
                 plans = business.list_plans(); rows = [[InlineKeyboardButton(f"{p['name']} · {p['price']:,} {p['currency']}", callback_data=f"shop:plan:{p['id']}")] for p in plans] or [[InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")]]
                 rows.append([InlineKeyboardButton("↩️ منو", callback_data="runtime:home")]); await update.callback_query.edit_message_text("💳 خرید اشتراک", reply_markup=InlineKeyboardMarkup(rows)); return
