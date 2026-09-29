@@ -75,6 +75,13 @@ def _report_text(report: dict, *, dashboard: bool = False) -> str:
         f"• غیرفعال: {int(current.get('subs_disabled') or 0)}",
         f"• منقضی: {int(current.get('subs_expired') or 0)}",
         f"• در انتظار ساخت: {int(current.get('subs_pending') or 0)}",
+        f"• انقضا تا ۲۴ ساعت: {int(current.get('expiring_24h') or 0)}",
+        f"• مصرف تجمیعی: {int(current.get('usage_bytes') or 0)/(1024**3):.2f}/"
+        f"{int(current.get('traffic_bytes') or 0)/(1024**3):.2f}GB",
+        "",
+        "🖥 زیرساخت",
+        f"• سرور فعال: {int(current.get('servers_active') or 0)}",
+        f"• نود فعال: {int(current.get('nodes_active') or 0)}",
         "",
         "⚠️ نیازمند توجه",
         f"• رسید در انتظار: {int(current.get('receipts_pending') or 0)}",
