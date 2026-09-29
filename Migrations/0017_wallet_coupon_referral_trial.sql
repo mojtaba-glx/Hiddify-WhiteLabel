@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS tenant_wallet_transactions (
     currency TEXT NOT NULL CHECK (length(currency) BETWEEN 3 AND 8),
     amount INTEGER NOT NULL CHECK (amount <> 0),
     kind TEXT NOT NULL CHECK (
-        kind IN ('admin_credit','admin_debit','referral_trial',
+        kind IN ('topup','admin_credit','admin_debit','referral_trial',
                  'referral_purchase','purchase','refund')
     ),
     order_id INTEGER REFERENCES tenant_orders(id) ON DELETE RESTRICT,
