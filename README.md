@@ -25,7 +25,7 @@ Hiddify-WhiteLabel/
 ├── Ops/                  # Phase 6 - health, encrypted backup, locks, systemd
 ├── Shared/               # settings, redacted logging, crypto, time, access
 ├── Database/             # connection, repositories, migration runner
-├── Migrations/           # versioned SQL (currently 0001 through 0015)
+├── Migrations/           # versioned SQL (currently 0001 through 0016)
 ├── Tests/                # offline pytest suite, fake tokens only
 ├── scripts/              # migrate helper
 ├── install.sh            # English operations menu and systemd installer
@@ -173,6 +173,19 @@ verified-expiry notice. Reminder keys are scoped to the subscription period, so
 restarts and repeated scans cannot duplicate a notice and renewal automatically
 starts a fresh reminder sequence. Failed Telegram sends use bounded exponential
 retry and never require the MasterBot token.
+
+Tenant AdminBot now has operational reporting and customer-management screens.
+The dashboard combines confirmed revenue, purchase/renewal counts, current
+service states, aggregate traffic, active infrastructure and attention queues.
+Reports support today, 7/30/90-day and all-time views using the immutable
+`tenant_orders.paid_at` timestamp, so later provisioning retries do not move
+historical revenue between reporting periods. Customer search supports name,
+username, Telegram ID and internal customer ID with strict tenant scope.
+
+Support tickets now have a full lifecycle: users can list and reopen their own
+ticket history to read replies; admins can inspect a ticket, reply, close it and
+jump to the tenant-scoped customer profile. UserBot also exposes account and
+order-history screens without allowing blocked customers to create new orders.
 
 The MasterBot JobQueue runs the Phase-3 evaluator at the configured interval.
 It advances expiry/grace states, suspends expired licenses, persists 7/3/1-day
