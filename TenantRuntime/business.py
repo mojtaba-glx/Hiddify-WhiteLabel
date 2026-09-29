@@ -1525,54 +1525,78 @@ class TenantBusinessService:
         code: str,
     ) -> dict[str, Any]:
         customer = self._customer(actor_id)
-        order = self.order(actor_id, int(order_id))
-        if order["status"] != "pending_payment":
-            raise TenantBusinessError("order is not awaiting payment")
-        if int(order.get("coupon_id") or 0) > 0:
-            raise TenantBusinessError("coupon already applied")
         coupon_code = str(code or "").strip().upper()
-        row = self.conn.execute(
-            "SELECT * FROM tenant_coupons "
-            "WHERE tenant_id=? AND code=? AND status='active'",
-            (self.tenant_id, coupon_code),
-        ).fetchone()
-        if row is None:
+        if not coupon_code:
             raise TenantBusinessError("coupon not found")
-        coupon = dict(row)
         now_dt = utcnow()
-        if coupon.get("starts_at") and parse_utc(str(coupon["starts_at"])) > now_dt:
-            raise TenantBusinessError("coupon is not active yet")
-        if coupon.get("expires_at") and parse_utc(str(coupon["expires_at"])) <= now_dt:
-            raise TenantBusinessError("coupon expired")
-        if int(coupon["max_uses"] or 0) > 0 and int(coupon["used_count"] or 0) >= int(coupon["max_uses"]):
-            raise TenantBusinessError("coupon usage limit reached")
-        per_limit = int(coupon["per_customer_limit"] or 0)
-        if per_limit > 0:
-            used = self.conn.execute(
-                "SELECT COUNT(*) FROM tenant_coupon_redemptions "
-                "WHERE tenant_id=? AND coupon_id=? AND customer_id=?",
-                (self.tenant_id, int(coupon["id"]), int(customer["id"])),
-            ).fetchone()
-            if int(used[0] or 0) >= per_limit:
-                raise TenantBusinessError("coupon customer limit reached")
-        original = int(order.get("original_amount") or order["amount"])
-        if original < int(coupon["min_amount"] or 0):
-            raise TenantBusinessError("order is below coupon minimum")
-        if coupon["discount_kind"] == "fixed":
-            if str(coupon.get("currency") or "") != str(order["currency"]):
-                raise TenantBusinessError("coupon currency mismatch")
-            discount = int(coupon["value"])
-        else:
-            discount = (original * int(coupon["value"])) // 100
-        max_discount = int(coupon["max_discount"] or 0)
-        if max_discount > 0:
-            discount = min(discount, max_discount)
-        discount = min(original, max(0, discount))
-        if discount <= 0:
-            raise TenantBusinessError("coupon has no discount")
-        final_amount = original - discount
         now = iso_utc(now_dt)
         with transaction(self.conn):
+            order_row = self.conn.execute(
+                "SELECT * FROM tenant_orders "
+                "WHERE id=? AND tenant_id=? AND customer_id=?",
+                (int(order_id), self.tenant_id, int(customer["id"])),
+            ).fetchone()
+            if order_row is None:
+                raise TenantBusinessError("order not found")
+            order = dict(order_row)
+            if order["status"] != "pending_payment":
+                raise TenantBusinessError("order is not awaiting payment")
+            if order.get("coupon_id") is not None:
+                raise TenantBusinessError("coupon already applied")
+
+            coupon_row = self.conn.execute(
+                "SELECT * FROM tenant_coupons "
+                "WHERE tenant_id=? AND code=? AND status='active'",
+                (self.tenant_id, coupon_code),
+            ).fetchone()
+            if coupon_row is None:
+                raise TenantBusinessError("coupon not found")
+            coupon = dict(coupon_row)
+            if coupon.get("starts_at") and parse_utc(
+                str(coupon["starts_at"])
+            ) > now_dt:
+                raise TenantBusinessError("coupon is not active yet")
+            if coupon.get("expires_at") and parse_utc(
+                str(coupon["expires_at"])
+            ) <= now_dt:
+                raise TenantBusinessError("coupon expired")
+            if (
+                int(coupon["max_uses"] or 0) > 0
+                and int(coupon["used_count"] or 0)
+                >= int(coupon["max_uses"])
+            ):
+                raise TenantBusinessError("coupon usage limit reached")
+            per_limit = int(coupon["per_customer_limit"] or 0)
+            if per_limit > 0:
+                used = self.conn.execute(
+                    "SELECT COUNT(*) FROM tenant_coupon_redemptions "
+                    "WHERE tenant_id=? AND coupon_id=? AND customer_id=?",
+                    (
+                        self.tenant_id,
+                        int(coupon["id"]),
+                        int(customer["id"]),
+                    ),
+                ).fetchone()
+                if int(used[0] or 0) >= per_limit:
+                    raise TenantBusinessError("coupon customer limit reached")
+
+            original = int(order.get("original_amount") or order["amount"])
+            if original < int(coupon["min_amount"] or 0):
+                raise TenantBusinessError("order is below coupon minimum")
+            if coupon["discount_kind"] == "fixed":
+                if str(coupon.get("currency") or "") != str(order["currency"]):
+                    raise TenantBusinessError("coupon currency mismatch")
+                discount = int(coupon["value"])
+            else:
+                discount = (original * int(coupon["value"])) // 100
+            max_discount = int(coupon["max_discount"] or 0)
+            if max_discount > 0:
+                discount = min(discount, max_discount)
+            discount = min(original, max(0, discount))
+            if discount <= 0:
+                raise TenantBusinessError("coupon has no discount")
+            final_amount = original - discount
+
             changed = self.conn.execute(
                 "UPDATE tenant_orders SET amount=?, discount_amount=?, coupon_id=?, "
                 "updated_at=? WHERE id=? AND tenant_id=? AND customer_id=? "
@@ -1591,8 +1615,8 @@ class TenantBusinessService:
                 raise TenantBusinessError("order state changed")
             self.conn.execute(
                 "INSERT INTO tenant_coupon_redemptions "
-                "(tenant_id, coupon_id, customer_id, order_id, discount_amount, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(tenant_id, coupon_id, customer_id, order_id, discount_amount, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     self.tenant_id,
                     int(coupon["id"]),
