@@ -67,6 +67,20 @@ expiry message only after enforcement is verified. The reminder queue has
 lease recovery, bounded exponential retry and period fingerprints, so stale
 warnings from a previous renewal are skipped rather than delivered.
 
+AdminBot reporting is tenant-local and based on `paid_at`, which is set when
+an admin approves a receipt and is not changed by later fulfillment. The
+dashboard includes confirmed revenue by currency, purchase vs renewal totals,
+new/unique customers, pending receipts and fulfillments, active/expired
+subscriptions, aggregate usage/capacity, active servers/nodes, 24-hour expiry
+risk, open tickets, enforcement-pending services and unhealthy/frozen nodes.
+
+The customer-management flow can search by display name, username, Telegram ID
+or internal customer ID, open a profile, inspect recent orders and service
+states, and block/unblock only within the bound tenant. UserBot exposes
+`حساب من`, order history, subscription management and ticket history.
+Ticket replies/closure are handled inside Tenant AdminBot and users can read the
+latest admin response from their own UserBot.
+
 Run one process for each shard index:
 
 ```bash
