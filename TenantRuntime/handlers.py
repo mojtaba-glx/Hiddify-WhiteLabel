@@ -168,6 +168,7 @@ def _wallet_text(summary: dict) -> str:
     if history:
         lines.extend(["", "🧾 آخرین تراکنش‌ها"])
         labels = {
+            "topup": "شارژ کیف پول",
             "admin_credit": "شارژ ادمین",
             "admin_debit": "کسر ادمین",
             "referral_trial": "پاداش دعوت/تست",
@@ -443,6 +444,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                                 callback_data="biz:coupons",
                             ),
                         ],
+                        [
+                            InlineKeyboardButton(
+                                "💰 شارژهای کیف پول",
+                                callback_data="biz:wallettopups",
+                            )
+                        ],
                         [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
                     ]),
                 ); return
@@ -525,6 +532,69 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     "✅ وضعیت کوپن تغییر کرد.",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("↩️ کوپن‌ها", callback_data="biz:coupons")]
+                    ]),
+                ); return
+            if data == "biz:wallettopups":
+                items = business.list_wallet_topups_admin(actor)
+                receipts = business.list_wallet_topup_receipts_admin(actor)
+                text = "💰 شارژهای کیف پول\n" + (
+                    "\n".join(
+                        f"• #{x['id']} · {x['display_name']} · "
+                        f"{int(x['amount']):,} {x['currency']} · {x['status']}"
+                        for x in items[:30]
+                    )
+                    or "موردی نیست."
+                )
+                rows = [[InlineKeyboardButton(
+                    f"✅/❌ رسید شارژ #{x['id']} · {x['display_name']}",
+                    callback_data=f"biz:wallettopupreceipt:{x['id']}",
+                )] for x in receipts]
+                rows.append([InlineKeyboardButton("↩️ فروش پیشرفته", callback_data="biz:growth")])
+                await update.callback_query.edit_message_text(
+                    text, reply_markup=InlineKeyboardMarkup(rows)
+                ); return
+            if data.startswith("biz:wallettopupreceipt:"):
+                receipt_id = int(data.rsplit(":", 1)[1])
+                receipt = next(
+                    (
+                        x for x in business.list_wallet_topup_receipts_admin(actor)
+                        if int(x["id"]) == receipt_id
+                    ),
+                    None,
+                )
+                if receipt is None:
+                    raise TenantBusinessError("wallet topup receipt not found")
+                context.user_data["wallet_topup_confirm"] = {"receipt_id": receipt_id}
+                await update.callback_query.edit_message_text(
+                    f"💰 رسید شارژ کیف پول #{receipt_id}\n"
+                    f"مشتری: {receipt['display_name']}\n"
+                    f"مبلغ: {int(receipt['amount']):,} {receipt['currency']}\n"
+                    f"پیگیری: {receipt.get('reference') or 'تصویر'}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✅ تأیید", callback_data="biz:wallettopupconfirm:yes")],
+                        [InlineKeyboardButton("❌ رد", callback_data="biz:wallettopupconfirm:no")],
+                        [InlineKeyboardButton("↩️ شارژها", callback_data="biz:wallettopups")],
+                    ]),
+                ); return
+            if data.startswith("biz:wallettopupconfirm:"):
+                pending = context.user_data.pop("wallet_topup_confirm", None)
+                if not isinstance(pending, dict):
+                    raise TenantBusinessError("confirmation expired")
+                approve = data.rsplit(":", 1)[1] == "yes"
+                reviewed = business.review_wallet_topup_receipt(
+                    actor,
+                    receipt_id=int(pending["receipt_id"]),
+                    approve=approve,
+                )
+                await update.callback_query.edit_message_text(
+                    (
+                        f"✅ کیف پول {int(reviewed['amount']):,} {reviewed['currency']} شارژ شد."
+                        if approve
+                        else "❌ رسید شارژ کیف پول رد شد."
+                    ),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ شارژها", callback_data="biz:wallettopups")],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
                     ]),
                 ); return
             if data == "biz:reports":
@@ -1190,7 +1260,33 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await update.callback_query.edit_message_text(
                     _wallet_text(business.wallet_summary(actor)),
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")]
+                        [InlineKeyboardButton("➕ شارژ کیف پول", callback_data="shop:wallettopup")],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
+                ); return
+            if data == "shop:wallettopup":
+                context.user_data["biz_flow"] = {"kind": "wallet_topup_create"}
+                await update.callback_query.edit_message_text(
+                    "💰 مبلغ | ارز را ارسال کنید.\nمثال: 100000 | IRR",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ کیف پول", callback_data="shop:wallet")]
+                    ]),
+                ); return
+            if data.startswith("shop:wallettopupmethod:"):
+                _, _, topup_id, method_id = data.split(":", 3)
+                topup = business.wallet_topup(actor, int(topup_id))
+                method = business.method(int(method_id), currency=str(topup["currency"]))
+                context.user_data["biz_flow"] = {
+                    "kind": "wallet_receipt",
+                    "topup_id": int(topup_id),
+                    "method_id": int(method_id),
+                }
+                await update.callback_query.edit_message_text(
+                    f"پرداخت شارژ کیف پول به: {method['destination']}\n"
+                    f"{method.get('instructions') or ''}\n"
+                    "کد پیگیری یا عکس رسید را ارسال کنید.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ کیف پول", callback_data="shop:wallet")]
                     ]),
                 ); return
             if data == "shop:referral":
@@ -1504,6 +1600,42 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     reply_markup=InlineKeyboardMarkup(rows),
                 )
                 return
+            if kind == "wallet_topup_create":
+                if len(fields) != 2:
+                    raise ValueError("invalid wallet topup")
+                topup = business.create_wallet_topup(
+                    actor,
+                    amount=int(fields[0]),
+                    currency=fields[1],
+                )
+                methods = business.list_methods(currency=str(topup["currency"]))
+                context.user_data.pop("biz_flow", None)
+                rows = [[InlineKeyboardButton(
+                    f"{m['title']} ({m['kind']})",
+                    callback_data=f"shop:wallettopupmethod:{topup['id']}:{m['id']}",
+                )] for m in methods]
+                if not rows:
+                    rows = [[InlineKeyboardButton("روش پرداخت موجود نیست", callback_data="noop")]]
+                rows.append([InlineKeyboardButton("↩️ کیف پول", callback_data="shop:wallet")])
+                await update.effective_message.reply_text(
+                    f"شارژ #{topup['id']} · {int(topup['amount']):,} {topup['currency']}\n"
+                    "روش پرداخت را انتخاب کنید.",
+                    reply_markup=InlineKeyboardMarkup(rows),
+                )
+                return
+            if kind == "wallet_receipt":
+                business.submit_wallet_topup_receipt(
+                    actor,
+                    topup_id=int(flow["topup_id"]),
+                    method_id=int(flow["method_id"]),
+                    reference=text,
+                )
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    "✅ رسید شارژ کیف پول برای بررسی ارسال شد.",
+                    reply_markup=_menu(spec),
+                )
+                return
             if kind == "growth_config":
                 if len(fields) != 7:
                     raise ValueError("invalid growth config")
@@ -1726,12 +1858,23 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     spec, _, _, business = _services(context)
     flow = context.user_data.get("biz_flow")
     actor = int(update.effective_user.id) if update.effective_user else 0
-    if spec.role != "user" or not isinstance(flow, dict) or flow.get("kind") != "receipt":
+    if spec.role != "user" or not isinstance(flow, dict) or flow.get("kind") not in ("receipt", "wallet_receipt"):
         await update.effective_message.reply_text("از منوی ربات استفاده کنید.", reply_markup=_menu(spec)); return
     try:
-        business.submit_receipt(actor, order_id=int(flow['order_id']), method_id=int(flow['method_id']), reference=str(update.effective_message.caption or "").strip() or None, telegram_file_id=str(update.effective_message.photo[-1].file_id))
+        if flow.get("kind") == "wallet_receipt":
+            business.submit_wallet_topup_receipt(
+                actor,
+                topup_id=int(flow["topup_id"]),
+                method_id=int(flow["method_id"]),
+                reference=str(update.effective_message.caption or "").strip() or None,
+                telegram_file_id=str(update.effective_message.photo[-1].file_id),
+            )
+            success_text = "✅ تصویر رسید شارژ کیف پول برای بررسی ارسال شد."
+        else:
+            business.submit_receipt(actor, order_id=int(flow['order_id']), method_id=int(flow['method_id']), reference=str(update.effective_message.caption or "").strip() or None, telegram_file_id=str(update.effective_message.photo[-1].file_id))
+            success_text = "✅ تصویر رسید برای بررسی ارسال شد."
         context.user_data.pop("biz_flow", None)
-        await update.effective_message.reply_text("✅ تصویر رسید برای بررسی ارسال شد.", reply_markup=_menu(spec))
+        await update.effective_message.reply_text(success_text, reply_markup=_menu(spec))
     except (ValueError, TenantBusinessError, sqlite3.IntegrityError):
         await update.effective_message.reply_text("❌ ثبت تصویر رسید انجام نشد.", reply_markup=_menu(spec))
 
