@@ -2229,6 +2229,49 @@ class TenantBusinessService:
             (self.tenant_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+    def cancel_order(self, actor_id: int, *, order_id: int) -> dict[str, Any]:
+        """Cancel one unpaid owned order and release any reserved coupon use."""
+        customer = self._customer(actor_id, active=False)
+        row = self.conn.execute(
+            "SELECT * FROM tenant_orders "
+            "WHERE id=? AND tenant_id=? AND customer_id=?",
+            (int(order_id), self.tenant_id, int(customer["id"])),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("order not found")
+        order = dict(row)
+        if order["status"] != "pending_payment":
+            raise TenantBusinessError("order cannot be cancelled")
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_orders SET status='cancelled', updated_at=? "
+                "WHERE id=? AND tenant_id=? AND customer_id=? "
+                "AND status='pending_payment'",
+                (
+                    now,
+                    int(order_id),
+                    self.tenant_id,
+                    int(customer["id"]),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("order state changed")
+            coupon_id = order.get("coupon_id")
+            if coupon_id is not None:
+                self.conn.execute(
+                    "DELETE FROM tenant_coupon_redemptions "
+                    "WHERE tenant_id=? AND order_id=?",
+                    (self.tenant_id, int(order_id)),
+                )
+                self.conn.execute(
+                    "UPDATE tenant_coupons "
+                    "SET used_count=MAX(0, used_count-1), updated_at=? "
+                    "WHERE id=? AND tenant_id=?",
+                    (now, int(coupon_id), self.tenant_id),
+                )
+        return self.order(actor_id, int(order_id))
+
     def submit_receipt(self, actor_id: int, *, order_id: int, method_id: int, reference: str | None = None, telegram_file_id: str | None = None) -> dict[str, Any]:
         order = self.order(actor_id, order_id)
         if order["status"] != "pending_payment": raise TenantBusinessError("order is not awaiting payment")
