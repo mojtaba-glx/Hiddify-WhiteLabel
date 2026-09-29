@@ -1148,31 +1148,117 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ); return
             if data == "shop:orders":
                 items = business.list_customer_orders(actor, limit=15)
+                labels = {"purchase": "خرید", "renewal": "تمدید", "trial": "تست رایگان"}
                 text = "🧾 سفارش‌های من\n" + (
                     "\n".join(
-                        f"• #{x['id']} · "
-                        f"{'تمدید' if x.get('operation') == 'renewal' else 'خرید'} · "
+                        f"• #{x['id']} · {labels.get(str(x.get('operation')), 'خرید')} · "
                         f"{x.get('plan_name') or '-'} · {x.get('status')}\n"
                         f"  {int(x.get('amount') or 0):,} {x.get('currency') or ''}"
+                        f"{' · تخفیف: '+format(int(x.get('discount_amount') or 0), ',') if int(x.get('discount_amount') or 0) else ''}"
                         f"{' · پرداخت: ' + str(x.get('paid_at')) if x.get('paid_at') else ''}"
                         for x in items
                     )
                     or "سفارشی ندارید."
                 )
+                rows = [
+                    [InlineKeyboardButton(
+                        f"🔁 تلاش فعال‌سازی سفارش #{x['id']}",
+                        callback_data=f"shop:retryorder:{x['id']}",
+                    )]
+                    for x in items
+                    if x["status"] == "paid"
+                ]
+                rows.extend([
+                    [InlineKeyboardButton("👤 حساب من", callback_data="shop:account")],
+                    [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                ])
                 await update.callback_query.edit_message_text(
                     text,
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("👤 حساب من", callback_data="shop:account")],
-                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
-                    ]),
+                    reply_markup=InlineKeyboardMarkup(rows),
+                ); return
+            if data.startswith("shop:retryorder:"):
+                order_id = int(data.rsplit(":", 1)[1])
+                result = business.retry_own_paid_order(actor, order_id=order_id)
+                await update.callback_query.edit_message_text(
+                    f"✅ سفارش #{order_id} انجام شد.\n🔗 {result.get('subscription_url') or '-'}",
+                    reply_markup=_menu(spec),
                 ); return
             if data == "shop:buy":
                 plans = business.list_plans(); rows = [[InlineKeyboardButton(f"{p['name']} · {p['price']:,} {p['currency']}", callback_data=f"shop:plan:{p['id']}")] for p in plans] or [[InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")]]
                 rows.append([InlineKeyboardButton("↩️ منو", callback_data="runtime:home")]); await update.callback_query.edit_message_text("💳 خرید اشتراک", reply_markup=InlineKeyboardMarkup(rows)); return
             if data.startswith("shop:plan:"):
-                order = business.create_order(actor, int(data.rsplit(":", 1)[1])); methods = business.list_methods(currency=str(order['currency']))
-                rows = [[InlineKeyboardButton(f"{m['title']} ({m['kind']})", callback_data=f"shop:pay:{order['id']}:{m['id']}")] for m in methods] or [[InlineKeyboardButton("روش پرداخت موجود نیست", callback_data="noop")]]
-                await update.callback_query.edit_message_text(f"سفارش #{order['id']} · {order['amount']:,} {order['currency']}\nروش پرداخت را انتخاب کنید.", reply_markup=InlineKeyboardMarkup(rows)); return
+                order = business.create_order(actor, int(data.rsplit(":", 1)[1]))
+                await update.callback_query.edit_message_text(
+                    _checkout_text(order, business.wallet_summary(actor)),
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("🎟 کد تخفیف", callback_data=f"shop:coupon:{order['id']}"),
+                            InlineKeyboardButton("💰 پرداخت کیف پول", callback_data=f"shop:walletpay:{order['id']}"),
+                        ],
+                        [InlineKeyboardButton("💳 روش‌های پرداخت", callback_data=f"shop:paymethods:{order['id']}")],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
+                ); return
+            if data.startswith("shop:checkout:"):
+                order_id = int(data.rsplit(":", 1)[1])
+                order = business.order(actor, order_id)
+                await update.callback_query.edit_message_text(
+                    _checkout_text(order, business.wallet_summary(actor)),
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("🎟 کد تخفیف", callback_data=f"shop:coupon:{order_id}"),
+                            InlineKeyboardButton("💰 پرداخت کیف پول", callback_data=f"shop:walletpay:{order_id}"),
+                        ],
+                        [InlineKeyboardButton("💳 روش‌های پرداخت", callback_data=f"shop:paymethods:{order_id}")],
+                        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                    ]),
+                ); return
+            if data.startswith("shop:coupon:"):
+                order_id = int(data.rsplit(":", 1)[1])
+                order = business.order(actor, order_id)
+                if order["status"] != "pending_payment":
+                    raise TenantBusinessError("order is not awaiting payment")
+                context.user_data["biz_flow"] = {
+                    "kind": "coupon_apply",
+                    "order_id": order_id,
+                }
+                await update.callback_query.edit_message_text(
+                    "🎟 کد تخفیف را ارسال کنید.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("↩️ سفارش", callback_data=f"shop:checkout:{order_id}")]
+                    ]),
+                ); return
+            if data.startswith("shop:walletpay:"):
+                order_id = int(data.rsplit(":", 1)[1])
+                result = business.pay_order_with_wallet(actor, order_id=order_id)
+                if result.get("fulfillment_pending"):
+                    text = (
+                        f"✅ مبلغ سفارش #{order_id} از کیف پول پرداخت شد.\n"
+                        "⚠️ فعال‌سازی پنل فعلاً انجام نشد؛ پرداخت محفوظ است و می‌توانید از «سفارش‌های من» دوباره تلاش کنید."
+                    )
+                else:
+                    text = (
+                        f"✅ سفارش #{order_id} با کیف پول پرداخت و فعال شد.\n"
+                        f"🔗 {result.get('subscription_url') or '-'}"
+                    )
+                await update.callback_query.edit_message_text(
+                    text, reply_markup=_menu(spec)
+                ); return
+            if data.startswith("shop:paymethods:"):
+                order_id = int(data.rsplit(":", 1)[1])
+                order = business.order(actor, order_id)
+                if order["status"] != "pending_payment":
+                    raise TenantBusinessError("order is not awaiting payment")
+                methods = business.list_methods(currency=str(order["currency"]))
+                rows = [[InlineKeyboardButton(
+                    f"{m['title']} ({m['kind']})",
+                    callback_data=f"shop:pay:{order_id}:{m['id']}"
+                )] for m in methods] or [[InlineKeyboardButton("روش پرداخت موجود نیست", callback_data="noop")]]
+                rows.append([InlineKeyboardButton("↩️ سفارش", callback_data=f"shop:checkout:{order_id}")])
+                await update.callback_query.edit_message_text(
+                    _checkout_text(order, business.wallet_summary(actor)) + "\n\nروش پرداخت را انتخاب کنید.",
+                    reply_markup=InlineKeyboardMarkup(rows),
+                ); return
             if data.startswith("shop:pay:"):
                 _, _, order_id, method_id = data.split(":", 3); order = business.order(actor, int(order_id)); method = business.method(int(method_id), currency=str(order['currency']))
                 context.user_data["biz_flow"] = {"kind": "receipt", "order_id": int(order_id), "method_id": int(method_id)}
@@ -1224,15 +1310,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     subscription_id=int(subscription_id),
                     plan_id=int(plan_id),
                 )
-                methods = business.list_methods(currency=str(order["currency"]))
-                rows = [[InlineKeyboardButton(
-                    f"{m['title']} ({m['kind']})",
-                    callback_data=f"shop:pay:{order['id']}:{m['id']}"
-                )] for m in methods] or [[InlineKeyboardButton("روش پرداخت موجود نیست", callback_data="noop")]]
                 await update.callback_query.edit_message_text(
-                    f"تمدید سفارش #{order['id']} · {order['plan_name']} · {order['amount']:,} {order['currency']}\n"
-                    "روش پرداخت را انتخاب کنید.",
-                    reply_markup=InlineKeyboardMarkup(rows),
+                    _checkout_text(order, business.wallet_summary(actor)),
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("🎟 کد تخفیف", callback_data=f"shop:coupon:{order['id']}"),
+                            InlineKeyboardButton("💰 پرداخت کیف پول", callback_data=f"shop:walletpay:{order['id']}"),
+                        ],
+                        [InlineKeyboardButton("💳 روش‌های پرداخت", callback_data=f"shop:paymethods:{order['id']}")],
+                        [InlineKeyboardButton("↩️ اشتراک‌های من", callback_data="shop:subs")],
+                    ]),
                 ); return
             if data == "shop:tickets":
                 items = business.list_tickets(actor)
