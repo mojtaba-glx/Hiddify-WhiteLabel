@@ -24,5 +24,6 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - run: pytest -q
+      - run: python scripts/release_drill.py --plan-only --json
       - run: bash -n install.sh
       - run: bash -n bootstrap.sh
