@@ -930,6 +930,38 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if isinstance(flow, dict):
             fields = [part.strip() for part in text.split("|")]
             kind = flow.get("kind")
+            if kind == "customer_search":
+                results = business.search_customers_admin(actor, text)
+                context.user_data.pop("biz_flow", None)
+                if not results:
+                    await update.effective_message.reply_text(
+                        "❌ مشتری پیدا نشد.",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔎 جستجوی دوباره", callback_data="biz:customersearch")],
+                            [InlineKeyboardButton("↩️ مشتریان", callback_data="biz:customers")],
+                        ]),
+                    )
+                    return
+                rows = [
+                    [InlineKeyboardButton(
+                        (
+                            f"👤 {item.get('display_name') or item.get('telegram_user_id')} · "
+                            f"فعال {int(item.get('active_subscriptions') or 0)} · "
+                            f"منقضی {int(item.get('expired_subscriptions') or 0)}"
+                        )[:60],
+                        callback_data=f"biz:customer:{item['id']}",
+                    )]
+                    for item in results
+                ]
+                rows.extend([
+                    [InlineKeyboardButton("🔎 جستجوی جدید", callback_data="biz:customersearch")],
+                    [InlineKeyboardButton("↩️ مشتریان", callback_data="biz:customers")],
+                ])
+                await update.effective_message.reply_text(
+                    f"✅ {len(results)} نتیجه پیدا شد.",
+                    reply_markup=InlineKeyboardMarkup(rows),
+                )
+                return
             if kind == "panel_secret":
                 if not text:
                     raise ValueError("empty secret")
