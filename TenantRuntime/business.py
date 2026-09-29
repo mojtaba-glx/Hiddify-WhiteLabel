@@ -2545,7 +2545,75 @@ class TenantBusinessService:
 
     def list_tickets_admin(self, actor_id: int) -> list[dict[str, Any]]:
         self._admin(actor_id)
-        rows = self.conn.execute("SELECT t.*, c.display_name FROM tenant_tickets t JOIN tenant_customers c ON c.id=t.customer_id WHERE t.tenant_id=? ORDER BY t.id DESC", (self.tenant_id,)).fetchall()
+        rows = self.conn.execute(
+            "SELECT t.*, c.display_name, c.telegram_user_id, c.username "
+            "FROM tenant_tickets t "
+            "JOIN tenant_customers c ON c.id=t.customer_id AND c.tenant_id=t.tenant_id "
+            "WHERE t.tenant_id=? ORDER BY "
+            "CASE t.status WHEN 'open' THEN 0 WHEN 'answered' THEN 1 ELSE 2 END, "
+            "t.id DESC",
+            (self.tenant_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def ticket_admin(self, actor_id: int, *, ticket_id: int) -> dict[str, Any]:
+        self._admin(actor_id)
+        row = self.conn.execute(
+            "SELECT t.*, c.display_name, c.telegram_user_id, c.username "
+            "FROM tenant_tickets t "
+            "JOIN tenant_customers c ON c.id=t.customer_id AND c.tenant_id=t.tenant_id "
+            "WHERE t.id=? AND t.tenant_id=?",
+            (int(ticket_id), self.tenant_id),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("ticket not found")
+        return dict(row)
+
+    def reply_ticket_admin(
+        self,
+        actor_id: int,
+        *,
+        ticket_id: int,
+        reply: str,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        message = _text(reply, 3000)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_tickets SET admin_reply=?, status='answered', updated_at=? "
+                "WHERE id=? AND tenant_id=? AND status IN ('open','answered')",
+                (message, now, int(ticket_id), self.tenant_id),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("ticket cannot be answered")
+        return self.ticket_admin(actor_id, ticket_id=int(ticket_id))
+
+    def close_ticket_admin(
+        self,
+        actor_id: int,
+        *,
+        ticket_id: int,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_tickets SET status='closed', updated_at=? "
+                "WHERE id=? AND tenant_id=? AND status IN ('open','answered')",
+                (now, int(ticket_id), self.tenant_id),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("ticket cannot be closed")
+        return self.ticket_admin(actor_id, ticket_id=int(ticket_id))
+
+    def list_tickets(self, actor_id: int) -> list[dict[str, Any]]:
+        customer = self._customer(actor_id, active=False)
+        rows = self.conn.execute(
+            "SELECT * FROM tenant_tickets "
+            "WHERE tenant_id=? AND customer_id=? ORDER BY id DESC LIMIT 20",
+            (self.tenant_id, int(customer["id"])),
+        ).fetchall()
         return [dict(row) for row in rows]
 
     def create_smart_link(self, actor_id: int, *, label: str, target: str) -> dict[str, Any]:
