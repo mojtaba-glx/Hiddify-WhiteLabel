@@ -49,6 +49,7 @@ class RenewRequest:
     duration_days: int
     expires_at: str
     reset_usage: bool = True
+    reset_time: bool = True
     idempotency_key: str = ""
 
 
