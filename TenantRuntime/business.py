@@ -3159,12 +3159,11 @@ class TenantBusinessService:
             policy = "advanced"
 
         now = utcnow()
+        remaining_seconds: float | None = None
         try:
             expires_at = parse_utc(str(subscription["expires_at"]))
             remaining_seconds = (expires_at - now).total_seconds()
             days_left = int(remaining_seconds // 86400)
-            if remaining_seconds > 0 and remaining_seconds % 86400:
-                days_left += 1
         except Exception:
             days_left = None
 
@@ -3177,7 +3176,10 @@ class TenantBusinessService:
         max_remaining_gb = max(
             1, int(settings.get("renew_max_remaining_gb") or 3)
         )
-        days_ok = days_left is not None and days_left < max_days
+        days_ok = (
+            remaining_seconds is not None
+            and remaining_seconds < (max_days * 86400)
+        )
         usage_ok = traffic_bytes > 0 and remaining_gb < max_remaining_gb
         allowed = (
             policy in ("default", "fair")
