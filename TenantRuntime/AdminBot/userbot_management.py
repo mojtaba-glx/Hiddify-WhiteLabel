@@ -2532,7 +2532,32 @@ async def handle_text(
             await update.effective_message.reply_text("✅ دکمه اضافه شد.",reply_markup=admin_main_keyboard())
             return True
         if kind=="setting_text":
-            business.set_userbot_setting_admin(actor,key=str(flow["key"]),value=text); context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ متن ذخیره شد.",reply_markup=admin_main_keyboard()); return True
+            key = str(flow["key"])
+            value = text
+            if key == "smart_base_url":
+                if text in {"0", "-", "—"}:
+                    value = ""
+                else:
+                    parsed = urlparse(text)
+                    if (
+                        str(parsed.scheme or "").lower() not in {"http", "https"}
+                        or not parsed.netloc
+                        or parsed.username
+                        or parsed.password
+                        or parsed.query
+                        or parsed.fragment
+                    ):
+                        raise ValueError("invalid smart subscription base url")
+                    value = text.rstrip("/")
+            business.set_userbot_setting_admin(actor, key=key, value=value)
+            return_section = str(flow.get("return_section") or "")
+            context.user_data.pop(FLOW_KEY, None)
+            await update.effective_message.reply_text(
+                "✅ متن ذخیره شد.", reply_markup=admin_main_keyboard()
+            )
+            if return_section:
+                await _settings_section(update, business, actor, return_section)
+            return True
         if kind=="trial_edit":
             value=int(text); field=str(flow["field"]); kwargs={"trial_traffic_gb":value} if field=="traffic" else {"trial_duration_days":value}; business.update_growth_settings(actor,**kwargs); context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ مشخصات تست ذخیره شد.",reply_markup=admin_main_keyboard()); return True
         if kind=="reminder_edit":
