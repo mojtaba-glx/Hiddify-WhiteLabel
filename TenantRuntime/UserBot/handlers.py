@@ -6,6 +6,7 @@ Tenant-admin management handlers are intentionally kept out of this package.
 
 from __future__ import annotations
 
+import random
 import sqlite3
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -35,14 +36,22 @@ def _money_lines(items: list[dict]) -> list[str]:
 
 
 
-def _user_account_text(summary: dict) -> str:
+def _user_account_text(
+    summary: dict, settings: dict | None = None
+) -> str:
+    settings = settings or {}
     customer = dict(summary.get("customer") or {})
     subs = dict(summary.get("subscriptions") or {})
     username = str(customer.get("username") or "").strip()
-    return "\n".join([
+    lines = [
         "👤 حساب من",
         f"نام: {customer.get('display_name') or 'کاربر'}",
-        f"یوزرنیم: {'@' + username.lstrip('@') if username else '-'}",
+    ]
+    if bool(settings.get("show_username", True)):
+        lines.append(
+            f"یوزرنیم: {'@' + username.lstrip('@') if username else '-'}"
+        )
+    lines.extend([
         f"Telegram ID: {customer.get('telegram_user_id')}",
         f"وضعیت حساب: {customer.get('status')}",
         "",
@@ -56,6 +65,7 @@ def _user_account_text(summary: dict) -> str:
         "💰 پرداخت‌های تأییدشده",
         *_money_lines(list(summary.get("paid_totals") or [])),
     ])
+    return "\n".join(lines)
 
 
 def _wallet_text(summary: dict) -> str:
@@ -332,7 +342,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data == "shop:account":
             summary = business.customer_account_summary(actor)
             await update.callback_query.edit_message_text(
-                _user_account_text(summary),
+                _user_account_text(summary, settings),
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton("📦 اشتراک‌های من", callback_data="shop:subs"),
@@ -619,7 +629,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                         callback_data=f"shop:renew:{item['id']}"
                     )])
                 if item["status"] == "active" and item.get("external_ref") and item.get("server_id"):
-                    if bool(settings.get("show_sub_link", True)) or bool(settings.get("show_smart_link", True)):
+                    if (
+                        bool(settings.get("show_user_page_link", True))
+                        and (
+                            bool(settings.get("show_sub_link", True))
+                            or bool(settings.get("show_smart_link", True))
+                        )
+                    ):
                         try:
                             link = business.subscription_link(actor, subscription_id=int(item["id"]))
                             rows.append([InlineKeyboardButton(f"🔗 لینک اشتراک #{item['id']}", url=link)])
@@ -637,6 +653,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             configs = business.subscription_configs(
                 actor, subscription_id=subscription_id
             )
+            if bool(settings.get("shuffle_configs", True)):
+                random.shuffle(configs)
             text_parts = ["📄 کانفیگ‌های مستقیم"]
             for item in configs:
                 text_parts.extend([
