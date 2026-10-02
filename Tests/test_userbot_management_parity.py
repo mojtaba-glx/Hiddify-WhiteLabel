@@ -84,6 +84,8 @@ def test_tenant_userbot_settings_roundtrip(conn, factories, cipher) -> None:
     assert defaults["shuffle_config_layout"] is True
     assert defaults["enable_discount_code"] is True
     assert defaults["show_user_status"] is True
+    assert defaults["plan_categories_enabled"] is True
+    assert defaults["plan_sort_by_priority"] is True
     assert defaults["guide_android_text"] == ""
     assert defaults["smart_base_url"] == ""
 
@@ -377,6 +379,126 @@ def test_admin_theme_screen_has_all_four_themes() -> None:
         "رنگی بودن دکمه‌ها",
     ):
         assert label in source
+
+
+def test_purchase_catalog_category_and_selected_server_are_tenant_scoped(
+    conn, factories, cipher
+) -> None:
+    tenant, service = _service(conn, factories, cipher)
+    category = service.add_plan_category_admin(
+        7001, title="یک ماهه", priority=10
+    )
+    plan = service.add_plan(
+        7001,
+        name="50 گیگ یک ماهه",
+        traffic_gb=50,
+        duration_days=30,
+        price=250000,
+        currency="IRR",
+        category_id=int(category["id"]),
+        priority=5,
+    )
+    server = service.add_server(
+        7001,
+        label="Turkey",
+        panel_kind="hiddify",
+        endpoint="https://tr.example",
+    )
+    service.set_panel_credential(
+        7001,
+        server_id=int(server["id"]),
+        secret="tr-api-key",
+    )
+    service.register_customer(
+        7101, display_name="Buyer", username="buyer"
+    )
+
+    purchase_servers = service.list_purchase_servers()
+    assert [int(item["id"]) for item in purchase_servers] == [int(server["id"])]
+
+    order = service.create_order(
+        7101,
+        int(plan["id"]),
+        server_id=int(server["id"]),
+    )
+    assert int(order["selected_server_id"]) == int(server["id"])
+    assert order["selected_server_label"] == "Turkey"
+    assert order["category_title"] == "یک ماهه"
+
+    other_tenant = factories.tenant(owner_telegram_id=8001)
+    other = TenantBusinessService(
+        conn,
+        tenant_id=int(other_tenant["id"]),
+        owner_telegram_id=8001,
+        secret_cipher=cipher,
+    )
+    with pytest.raises(TenantBusinessError):
+        other.plan_category(int(category["id"]), public=False)
+    with pytest.raises(TenantBusinessError):
+        other._purchase_server(int(server["id"]))
+
+
+def test_purchase_plan_sorting_honors_priority_then_selected_mode() -> None:
+    plans = [
+        {"id": 1, "priority": 20, "price": 100, "traffic_gb": 10},
+        {"id": 2, "priority": 10, "price": 300, "traffic_gb": 30},
+        {"id": 3, "priority": 10, "price": 200, "traffic_gb": 20},
+    ]
+    ordered = user_handlers._sorted_purchase_plans(
+        plans,
+        {
+            "plan_sort_by_priority": True,
+            "plan_sort_mode": "price_asc",
+        },
+    )
+    assert [item["id"] for item in ordered] == [3, 2, 1]
+
+    ordered = user_handlers._sorted_purchase_plans(
+        plans,
+        {
+            "plan_sort_by_priority": False,
+            "plan_sort_mode": "price_desc",
+        },
+    )
+    assert [item["id"] for item in ordered] == [2, 3, 1]
+
+
+def test_purchase_navigation_is_plan_then_server_then_order() -> None:
+    runtime = open(
+        "TenantRuntime/UserBot/handlers.py",
+        encoding="utf-8",
+    ).read()
+    for callback in (
+        'data == "shop:buy"',
+        'data.startswith("shop:buycat:")',
+        'data.startswith("shop:plan:")',
+        'data.startswith("shop:server:")',
+        'data.startswith("shop:changeserver:")',
+        'data.startswith("shop:orderserver:")',
+    ):
+        assert callback in runtime
+    assert 'settings.get("plans_list_text")' in runtime
+    assert 'settings.get("servers_list_text")' in runtime
+    assert 'settings.get("plan_columns")' in runtime
+    assert 'settings.get("server_columns")' in runtime
+    assert 'settings.get("enable_buy", True)' in runtime
+    assert "server_id=server_id" in runtime
+
+
+def test_purchase_catalog_admin_controls_are_wired() -> None:
+    source = open(
+        "TenantRuntime/AdminBot/userbot_management.py",
+        encoding="utf-8",
+    ).read()
+    for callback in (
+        "userbot:settings:tx_plans:plan_categories_enabled",
+        "userbot:settings:tx_plans:plan_sort_by_priority",
+        "userbot:settings:tx_plans:categories",
+        "userbot:settings:tx_plans:category:add",
+        "userbot:settings:tx_plans:category:plans:",
+        "userbot:settings:tx_plans:category:assign:",
+    ):
+        assert callback in source
 
 
 def test_deep_settings_callbacks_are_wired_to_real_runtime() -> None:
