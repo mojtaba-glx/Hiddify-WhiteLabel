@@ -425,6 +425,9 @@ def test_purchase_catalog_category_and_selected_server_are_tenant_scoped(
     assert order["selected_server_label"] == "Turkey"
     assert order["category_title"] == "یک ماهه"
 
+    with pytest.raises(TenantBusinessError, match="unfinished purchase orders"):
+        service.delete_server(7001, server_id=int(server["id"]))
+
     other_tenant = factories.tenant(owner_telegram_id=8001)
     other = TenantBusinessService(
         conn,
