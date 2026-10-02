@@ -281,17 +281,40 @@ def InlineKeyboardButton(
     style: str | None = None,
     **kwargs: Any,
 ) -> TelegramInlineKeyboardButton:
-    """Tenant-aware button constructor used by every UserBot inline keyboard."""
-    current = dict(settings) if settings is not None else dict(_BUTTON_SETTINGS.get())
-    api_kwargs = dict(kwargs.pop("api_kwargs", None) or {})
+    """Tenant-aware button constructor with native Telegram style support.
+
+    PTB 22.7+ exposes style directly. The fallback keeps deployments that
+    have not refreshed dependencies yet functional via api_kwargs.
+    """
+    current = (
+        dict(settings)
+        if settings is not None
+        else dict(_BUTTON_SETTINGS.get())
+    )
+    selected_style: str | None = None
     if bool(current.get("colored_buttons", True)):
         selected_style = style or _infer_button_style(
             text,
             kwargs.get("callback_data"),
             theme=str(current.get("button_theme") or "smart"),
         )
-        if selected_style and "style" not in api_kwargs:
-            api_kwargs["style"] = selected_style
+
+    api_kwargs = dict(kwargs.pop("api_kwargs", None) or {})
+    if selected_style:
+        try:
+            return TelegramInlineKeyboardButton(
+                text,
+                *args,
+                style=selected_style,
+                api_kwargs=api_kwargs or None,
+                **kwargs,
+            )
+        except TypeError:
+            # Compatibility fallback for an old PTB process that has not yet
+            # reinstalled requirements after an update.
+            if "style" not in api_kwargs:
+                api_kwargs["style"] = selected_style
+
     if api_kwargs:
         kwargs["api_kwargs"] = api_kwargs
     return TelegramInlineKeyboardButton(text, *args, **kwargs)

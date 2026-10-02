@@ -246,48 +246,59 @@ def test_user_status_visibility_is_functional(
     )
 
 
+def _serialized_style(button) -> str | None:
+    payload = button.to_dict()
+    return payload.get("style")
+
+
 def test_colored_button_themes_apply_to_all_userbot_buttons() -> None:
     smart = user_handlers.InlineKeyboardButton(
         "💳 خرید اشتراک",
         callback_data="shop:buy",
         settings={"colored_buttons": True, "button_theme": "smart"},
     )
-    assert smart.api_kwargs.get("style") == "success"
+    assert getattr(smart, "style", None) == "success"
+    assert _serialized_style(smart) == "success"
 
     shop = user_handlers.InlineKeyboardButton(
         "💰 کیف پول",
         callback_data="shop:wallet",
         settings={"colored_buttons": True, "button_theme": "shop"},
     )
-    assert shop.api_kwargs.get("style") == "success"
+    assert getattr(shop, "style", None) == "success"
+    assert _serialized_style(shop) == "success"
 
     pro = user_handlers.InlineKeyboardButton(
         "📊 وضعیت اشتراک",
         callback_data="runtime:status",
         settings={"colored_buttons": True, "button_theme": "pro"},
     )
-    assert pro.api_kwargs.get("style") == "primary"
+    assert getattr(pro, "style", None) == "primary"
+    assert _serialized_style(pro) == "primary"
 
     minimal = user_handlers.InlineKeyboardButton(
         "💳 خرید اشتراک",
         callback_data="shop:buy",
         settings={"colored_buttons": True, "button_theme": "minimal"},
     )
-    assert "style" not in minimal.api_kwargs
+    assert getattr(minimal, "style", None) is None
+    assert _serialized_style(minimal) is None
 
     danger = user_handlers.InlineKeyboardButton(
         "❌ لغو",
         callback_data="shop:cancel",
         settings={"colored_buttons": True, "button_theme": "minimal"},
     )
-    assert danger.api_kwargs.get("style") == "danger"
+    assert getattr(danger, "style", None) == "danger"
+    assert _serialized_style(danger) == "danger"
 
     plain = user_handlers.InlineKeyboardButton(
         "💳 خرید اشتراک",
         callback_data="shop:buy",
         settings={"colored_buttons": False, "button_theme": "shop"},
     )
-    assert "style" not in plain.api_kwargs
+    assert getattr(plain, "style", None) is None
+    assert _serialized_style(plain) is None
 
 
 def test_userbot_button_context_styles_direct_buttons() -> None:
@@ -298,7 +309,8 @@ def test_userbot_button_context_styles_direct_buttons() -> None:
         "🎁 دریافت هدیه",
         callback_data="shop:gift",
     )
-    assert button.api_kwargs.get("style") == "success"
+    assert getattr(button, "style", None) == "success"
+    assert _serialized_style(button) == "success"
 
     user_handlers._set_button_settings(
         {"colored_buttons": False, "button_theme": "shop"}
@@ -307,7 +319,19 @@ def test_userbot_button_context_styles_direct_buttons() -> None:
         "🎁 دریافت هدیه",
         callback_data="shop:gift",
     )
-    assert "style" not in plain.api_kwargs
+    assert getattr(plain, "style", None) is None
+    assert _serialized_style(plain) is None
+
+
+def test_colored_style_is_inside_final_inline_keyboard_payload() -> None:
+    button = user_handlers.InlineKeyboardButton(
+        "✅ تایید",
+        callback_data="confirm",
+        settings={"colored_buttons": True, "button_theme": "smart"},
+    )
+    markup = user_handlers.InlineKeyboardMarkup([[button]])
+    payload = markup.to_dict()
+    assert payload["inline_keyboard"][0][0]["style"] == "success"
 
 
 def test_layout_helpers_make_columns_and_safe_config_items(monkeypatch) -> None:
