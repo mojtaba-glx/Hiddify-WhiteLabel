@@ -112,17 +112,108 @@ def _checkout_text(order: dict, wallet: dict) -> str:
 
 
 
-def _menu(spec: RuntimeBotSpec) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton("💳 خرید اشتراک", callback_data="shop:buy"), InlineKeyboardButton("📦 اشتراک‌های من", callback_data="shop:subs")],
-        [InlineKeyboardButton("👤 حساب من", callback_data="shop:account"), InlineKeyboardButton("🧾 سفارش‌های من", callback_data="shop:orders")],
-        [InlineKeyboardButton("💰 کیف پول", callback_data="shop:wallet"), InlineKeyboardButton("🤝 دعوت دوستان", callback_data="shop:referral")],
-        [InlineKeyboardButton("🎁 تست رایگان", callback_data="shop:trial"), InlineKeyboardButton("🎫 پشتیبانی", callback_data="shop:tickets")],
-        [InlineKeyboardButton("📖 راهنما", callback_data="shop:guide")],
-        [InlineKeyboardButton("🏠 منو", callback_data="runtime:home")],
-        [InlineKeyboardButton("📊 وضعیت", callback_data="runtime:status")],
-    ]
+def _button(
+    text: str,
+    *,
+    callback_data: str | None = None,
+    url: str | None = None,
+    settings: dict | None = None,
+) -> InlineKeyboardButton:
+    settings = settings or {}
+    if not bool(settings.get("colored_buttons", True)):
+        return InlineKeyboardButton(text, callback_data=callback_data, url=url)
+    theme = str(settings.get("button_theme") or "smart").strip().lower()
+    haystack = f"{text} {callback_data or ''}".lower()
+    danger = any(token in haystack for token in ("❌", "🗑", "🚫", "لغو", "حذف"))
+    success = any(token in haystack for token in ("✅", "💳", "💰", "🎁", "خرید", "تمدید", "پرداخت"))
+    primary = any(token in haystack for token in ("📊", "📋", "⚙️", "🔗", "راهنما", "وضعیت", "لیست"))
+    style = None
+    if danger:
+        style = "danger"
+    elif theme == "minimal":
+        style = "success" if success and ("✅" in text or "پرداخت" in text) else None
+    elif theme == "pro":
+        style = "success" if success else ("primary" if primary else None)
+    elif theme == "shop":
+        style = "success" if success else "primary"
+    else:
+        style = "success" if success else ("primary" if primary else "primary")
+    api_kwargs = {"style": style} if style else None
+    return InlineKeyboardButton(
+        text,
+        callback_data=callback_data,
+        url=url,
+        api_kwargs=api_kwargs,
+    )
+
+
+def _menu(spec: RuntimeBotSpec, business) -> InlineKeyboardMarkup:
+    settings = business.runtime_userbot_settings()
+    growth = business._ensure_growth_settings()
+    rows = []
+    first = []
+    if bool(settings.get("enable_buy", True)):
+        first.append(_button("💳 خرید اشتراک", callback_data="shop:buy", settings=settings))
+    first.append(_button("📦 اشتراک‌های من", callback_data="shop:subs", settings=settings))
+    if first:
+        rows.append(first)
+    rows.append([
+        _button("👤 حساب من", callback_data="shop:account", settings=settings),
+        _button("🧾 سفارش‌های من", callback_data="shop:orders", settings=settings),
+    ])
+    referral_row = [_button("💰 کیف پول", callback_data="shop:wallet", settings=settings)]
+    if bool(growth.get("referral_enabled")):
+        referral_row.append(_button("🤝 دعوت دوستان", callback_data="shop:referral", settings=settings))
+    rows.append(referral_row)
+    support_row = []
+    if bool(growth.get("trial_enabled")):
+        support_row.append(_button("🎁 تست رایگان", callback_data="shop:trial", settings=settings))
+    support_row.append(_button("🎫 پشتیبانی", callback_data="shop:tickets", settings=settings))
+    rows.append(support_row)
+    help_row = [_button("📖 راهنما", callback_data="shop:guide", settings=settings)]
+    if str(settings.get("faq_text") or "").strip():
+        help_row.append(_button("📕 سوالات متداول", callback_data="shop:faq", settings=settings))
+    rows.append(help_row)
+    rows.append([_button("🏠 منو", callback_data="runtime:home", settings=settings)])
+    rows.append([_button("📊 وضعیت", callback_data="runtime:status", settings=settings)])
     return InlineKeyboardMarkup(rows)
+
+
+async def _force_join_allowed(update: Update, context: ContextTypes.DEFAULT_TYPE, business) -> bool:
+    settings = business.runtime_userbot_settings()
+    if not bool(settings.get("force_join_enabled", False)):
+        return True
+    channel = str(settings.get("force_join_channel") or "").strip()
+    if not channel:
+        # Misconfiguration must not lock every customer out.
+        return True
+    actor = int(update.effective_user.id) if update.effective_user else 0
+    try:
+        member = await context.bot.get_chat_member(chat_id=channel, user_id=actor)
+        status = str(getattr(member, "status", "") or "")
+        if status in ("creator", "administrator", "member", "restricted"):
+            return True
+    except Exception:
+        # Telegram can only check reliably when the bot can access the target.
+        # Fail open on API/config errors to avoid an accidental global lockout.
+        return True
+
+    text = "🔒 برای استفاده از ربات ابتدا در کانال اعلام‌شده عضو شوید."
+    rows = []
+    if channel.startswith("@"):
+        rows.append([InlineKeyboardButton("📢 عضویت در کانال", url=f"https://t.me/{channel[1:]}")])
+    rows.append([InlineKeyboardButton("✅ بررسی عضویت", callback_data="runtime:home")])
+    markup = InlineKeyboardMarkup(rows)
+    if update.callback_query:
+        await update.callback_query.answer("ابتدا عضویت را انجام دهید.", show_alert=True)
+        try:
+            await update.callback_query.edit_message_text(text, reply_markup=markup)
+        except Exception:
+            if update.effective_chat:
+                await update.effective_chat.send_message(text, reply_markup=markup)
+    elif update.effective_message:
+        await update.effective_message.reply_text(text, reply_markup=markup)
+    return False
 
 
 async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -130,6 +221,8 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if spec.role != "user":
         raise RuntimeError("UserBot handler registered for non-user role")
     user_id = int(update.effective_user.id) if update.effective_user else 0
+    if not await _force_join_allowed(update, context, business):
+        return
     state = state_store.load(user_id)
     visits = int(state.get("visits") or 0) + 1
     state_store.save(user_id, {**state, "visits": visits, "screen": "home"})
@@ -147,16 +240,18 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 business.register_referral(user_id, referral_code=payload[4:])
             except TenantBusinessError:
                 pass
-    text = (
+    settings = business.runtime_userbot_settings()
+    custom_welcome = str(settings.get("welcome_message") or "").strip()
+    text = custom_welcome or (
         f"👋 به {spec.tenant_name} خوش آمدید.\n\n"
         "ربات فروشگاهی فعال است.\n"
         f"تعداد ورود: {visits}"
     )
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(text, reply_markup=_menu(spec))
+        await update.callback_query.edit_message_text(text, reply_markup=_menu(spec, business))
     elif update.effective_message:
-        await update.effective_message.reply_text(text, reply_markup=_menu(spec))
+        await update.effective_message.reply_text(text, reply_markup=_menu(spec, business))
 
 
 async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -191,9 +286,9 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         text = base
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(text, reply_markup=_menu(spec))
+        await update.callback_query.edit_message_text(text, reply_markup=_menu(spec, business))
     elif update.effective_message:
-        await update.effective_message.reply_text(text, reply_markup=_menu(spec))
+        await update.effective_message.reply_text(text, reply_markup=_menu(spec, business))
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -210,6 +305,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if spec.role != "user":
         raise RuntimeError("UserBot callback registered for non-user role")
     actor = int(update.effective_user.id) if update.effective_user else 0
+    if not await _force_join_allowed(update, context, business):
+        return
+    settings = business.runtime_userbot_settings()
     try:
         if data == "shop:account":
             summary = business.customer_account_summary(actor)
@@ -262,7 +360,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             result = business.retry_own_paid_order(actor, order_id=order_id)
             await update.callback_query.edit_message_text(
                 f"✅ سفارش #{order_id} انجام شد.\n🔗 {result.get('subscription_url') or '-'}",
-                reply_markup=_menu(spec),
+                reply_markup=_menu(spec, business),
             ); return
         if data.startswith("shop:cancelorder:"):
             order_id = int(data.rsplit(":", 1)[1])
@@ -308,6 +406,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ]),
             ); return
         if data == "shop:referral":
+            growth = business._ensure_growth_settings()
+            if not bool(growth.get("referral_enabled")):
+                raise TenantBusinessError("referral is disabled")
             summary = business.referral_summary(actor)
             settings = dict(summary.get("settings") or {})
             username = str(getattr(context.bot, "username", None) or "").strip()
@@ -344,6 +445,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ]),
             ); return
         if data == "shop:trial":
+            growth = business._ensure_growth_settings()
+            if not bool(growth.get("trial_enabled")):
+                raise TenantBusinessError("free trial is disabled")
             result = business.claim_free_trial(actor)
             await update.callback_query.edit_message_text(
                 "✅ تست رایگان فعال شد.\n"
@@ -354,9 +458,39 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ]),
             ); return
         if data == "shop:buy":
-            plans = business.list_plans(); rows = [[InlineKeyboardButton(f"{p['name']} · {p['price']:,} {p['currency']}", callback_data=f"shop:plan:{p['id']}")] for p in plans] or [[InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")]]
-            rows.append([InlineKeyboardButton("↩️ منو", callback_data="runtime:home")]); await update.callback_query.edit_message_text("💳 خرید اشتراک", reply_markup=InlineKeyboardMarkup(rows)); return
+            if not bool(settings.get("enable_buy", True)):
+                raise TenantBusinessError("purchase is disabled")
+            plans = list(business.list_plans())
+            sort_mode = str(settings.get("plan_sort_mode") or "id")
+            if sort_mode == "price_asc":
+                plans.sort(key=lambda p: (int(p.get("price") or 0), int(p["id"])))
+            elif sort_mode == "price_desc":
+                plans.sort(key=lambda p: (-int(p.get("price") or 0), int(p["id"])))
+            elif sort_mode == "traffic_asc":
+                plans.sort(key=lambda p: (int(p.get("traffic_gb") or 0), int(p["id"])))
+            elif sort_mode == "traffic_desc":
+                plans.sort(key=lambda p: (-int(p.get("traffic_gb") or 0), int(p["id"])))
+            columns = max(1, min(int(settings.get("plan_columns") or 1), 3))
+            buttons = [
+                _button(
+                    f"{p['name']} · {p['price']:,} {p['currency']}",
+                    callback_data=f"shop:plan:{p['id']}",
+                    settings=settings,
+                )
+                for p in plans
+            ]
+            rows = [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
+            if not rows:
+                rows = [[InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")]]
+            rows.append([InlineKeyboardButton("↩️ منو", callback_data="runtime:home")])
+            await update.callback_query.edit_message_text(
+                str(settings.get("plans_list_text") or "").strip() or "💳 خرید اشتراک",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
         if data.startswith("shop:plan:"):
+            if not bool(settings.get("enable_buy", True)):
+                raise TenantBusinessError("purchase is disabled")
             order = business.create_order(actor, int(data.rsplit(":", 1)[1]))
             await update.callback_query.edit_message_text(
                 _checkout_text(order, business.wallet_summary(actor)),
@@ -412,7 +546,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     f"🔗 {result.get('subscription_url') or '-'}"
                 )
             await update.callback_query.edit_message_text(
-                text, reply_markup=_menu(spec)
+                text, reply_markup=_menu(spec, business)
             ); return
         if data.startswith("shop:paymethods:"):
             order_id = int(data.rsplit(":", 1)[1])
@@ -432,7 +566,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data.startswith("shop:pay:"):
             _, _, order_id, method_id = data.split(":", 3); order = business.order(actor, int(order_id)); method = business.method(int(method_id), currency=str(order['currency']))
             context.user_data["biz_flow"] = {"kind": "receipt", "order_id": int(order_id), "method_id": int(method_id)}
-            await update.callback_query.edit_message_text(f"پرداخت به: {method['destination']}\n{method.get('instructions') or ''}\nکد پیگیری یا عکس رسید را ارسال کنید.", reply_markup=_menu(spec)); return
+            await update.callback_query.edit_message_text(f"پرداخت به: {method['destination']}\n{method.get('instructions') or ''}\nکد پیگیری یا عکس رسید را ارسال کنید.", reply_markup=_menu(spec, business)); return
         if data == "shop:subs":
             items = business.list_subscriptions(actor)
             text = "📦 اشتراک‌های من\n" + ("\n".join(
@@ -445,20 +579,59 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ) or "اشتراکی ندارید.")
             rows = []
             for item in items:
-                if item.get("external_ref") and item.get("server_id") and item["status"] in ("active", "disabled", "expired"):
+                if (
+                    bool(settings.get("enable_renew", True))
+                    and item.get("external_ref")
+                    and item.get("server_id")
+                    and item["status"] in ("active", "disabled", "expired")
+                ):
                     rows.append([InlineKeyboardButton(
                         f"♻️ تمدید اشتراک #{item['id']}",
                         callback_data=f"shop:renew:{item['id']}"
                     )])
                 if item["status"] == "active" and item.get("external_ref") and item.get("server_id"):
-                    try:
-                        link = business.subscription_link(actor, subscription_id=int(item["id"]))
-                        rows.append([InlineKeyboardButton(f"🔗 لینک اشتراک #{item['id']}", url=link)])
-                    except TenantBusinessError:
-                        pass
-            rows.extend(_menu(spec).inline_keyboard)
+                    if bool(settings.get("show_sub_link", True)) or bool(settings.get("show_smart_link", True)):
+                        try:
+                            link = business.subscription_link(actor, subscription_id=int(item["id"]))
+                            rows.append([InlineKeyboardButton(f"🔗 لینک اشتراک #{item['id']}", url=link)])
+                        except TenantBusinessError:
+                            pass
+                    if bool(settings.get("show_direct_config", True)):
+                        rows.append([InlineKeyboardButton(
+                            f"📄 کانفیگ‌های مستقیم #{item['id']}",
+                            callback_data=f"shop:configs:{item['id']}",
+                        )])
+            rows.extend(_menu(spec, business).inline_keyboard)
             await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows)); return
+        if data.startswith("shop:configs:"):
+            subscription_id = int(data.rsplit(":", 1)[1])
+            configs = business.subscription_configs(
+                actor, subscription_id=subscription_id
+            )
+            text_parts = ["📄 کانفیگ‌های مستقیم"]
+            for item in configs:
+                text_parts.extend([
+                    "",
+                    f"🖥 {item['server']}",
+                    str(item["content"]),
+                ])
+            text = "\n".join(text_parts)
+            if len(text) > 3900:
+                text = text[:3850] + "\n…"
+            await update.callback_query.edit_message_text(
+                text,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "↩️ اشتراک‌های من", callback_data="shop:subs"
+                    )
+                ]]),
+                disable_web_page_preview=True,
+            )
+            return
+
         if data.startswith("shop:renew:"):
+            if not bool(settings.get("enable_renew", True)):
+                raise TenantBusinessError("renewal is disabled")
             subscription_id = int(data.rsplit(":", 1)[1])
             owned = next((x for x in business.list_subscriptions(actor) if int(x["id"]) == subscription_id), None)
             if owned is None or owned["status"] not in ("active", "disabled", "expired"):
@@ -474,6 +647,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 reply_markup=InlineKeyboardMarkup(rows),
             ); return
         if data.startswith("shop:renewplan:"):
+            if not bool(settings.get("enable_renew", True)):
+                raise TenantBusinessError("renewal is disabled")
             _, _, subscription_id, plan_id = data.split(":", 3)
             order = business.create_renewal_order(
                 actor,
@@ -546,12 +721,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ]),
             ); return
         if data == "shop:guide":
+            guide = str(settings.get("guide_text") or "").strip()
             await update.callback_query.edit_message_text(
-                "📖 راهنما\nبرای خرید، پلن را انتخاب کنید و در Checkout می‌توانید کد تخفیف، کیف پول یا روش پرداخت را بزنید. "
-                "برای تمدید از «اشتراک‌های من» روی ♻️ تمدید بزنید. تست رایگان فقط یک‌بار و برای کاربر بدون خرید قبلی است. "
-                "پاداش دعوت دوستان به کیف پول اضافه می‌شود. سرویس منقضی بدون تمدید دوباره فعال نمی‌شود.",
-                reply_markup=_menu(spec),
-            ); return
+                "📖 راهنما\n" + (
+                    guide
+                    or "برای خرید، پلن را انتخاب کنید و سپس روش پرداخت را مشخص کنید."
+                ),
+                reply_markup=_menu(spec, business),
+            )
+            return
+        if data == "shop:faq":
+            faq = str(settings.get("faq_text") or "").strip()
+            await update.callback_query.edit_message_text(
+                "📕 سوالات متداول\n" + (faq or "متنی تنظیم نشده است."),
+                reply_markup=_menu(spec, business),
+            )
+            return
     except (ValueError, TenantBusinessError, PermissionError, sqlite3.IntegrityError):
         await update.callback_query.answer("درخواست قابل انجام نیست.", show_alert=True)
         return
@@ -563,6 +748,8 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if spec.role != "user":
         raise RuntimeError("UserBot text handler registered for non-user role")
     actor = int(update.effective_user.id) if update.effective_user else 0
+    if not await _force_join_allowed(update, context, business):
+        return
     flow = context.user_data.get("biz_flow")
     text = str(update.effective_message.text or "").strip() if update.effective_message else ""
     try:
@@ -602,7 +789,7 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 context.user_data.pop("biz_flow", None)
                 await update.effective_message.reply_text(
                     "✅ رسید شارژ کیف پول برای بررسی ارسال شد.",
-                    reply_markup=_menu(spec),
+                    reply_markup=_menu(spec, business),
                 )
                 return
             if kind == "coupon_apply":
@@ -643,13 +830,13 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             else:
                 raise ValueError("invalid input")
             context.user_data.pop("biz_flow", None)
-            await update.effective_message.reply_text("✅ ذخیره شد.", reply_markup=_menu(spec))
+            await update.effective_message.reply_text("✅ ذخیره شد.", reply_markup=_menu(spec, business))
             return
     except (ValueError, TenantBusinessError, PermissionError, sqlite3.IntegrityError):
-        await update.effective_message.reply_text("❌ قالب یا وضعیت معتبر نیست.", reply_markup=_menu(spec))
+        await update.effective_message.reply_text("❌ قالب یا وضعیت معتبر نیست.", reply_markup=_menu(spec, business))
         return
     if update.effective_message:
-        await update.effective_message.reply_text("از منوی ربات استفاده کنید.", reply_markup=_menu(spec))
+        await update.effective_message.reply_text("از منوی ربات استفاده کنید.", reply_markup=_menu(spec, business))
 
 
 async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -659,8 +846,10 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     spec, _, _, business = _services(context)
     flow = context.user_data.get("biz_flow")
     actor = int(update.effective_user.id) if update.effective_user else 0
+    if not await _force_join_allowed(update, context, business):
+        return
     if spec.role != "user" or not isinstance(flow, dict) or flow.get("kind") not in ("receipt", "wallet_receipt"):
-        await update.effective_message.reply_text("از منوی ربات استفاده کنید.", reply_markup=_menu(spec)); return
+        await update.effective_message.reply_text("از منوی ربات استفاده کنید.", reply_markup=_menu(spec, business)); return
     try:
         if flow.get("kind") == "wallet_receipt":
             business.submit_wallet_topup_receipt(
@@ -675,9 +864,9 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             business.submit_receipt(actor, order_id=int(flow['order_id']), method_id=int(flow['method_id']), reference=str(update.effective_message.caption or "").strip() or None, telegram_file_id=str(update.effective_message.photo[-1].file_id))
             success_text = "✅ تصویر رسید برای بررسی ارسال شد."
         context.user_data.pop("biz_flow", None)
-        await update.effective_message.reply_text(success_text, reply_markup=_menu(spec))
+        await update.effective_message.reply_text(success_text, reply_markup=_menu(spec, business))
     except (ValueError, TenantBusinessError, sqlite3.IntegrityError):
-        await update.effective_message.reply_text("❌ ثبت تصویر رسید انجام نشد.", reply_markup=_menu(spec))
+        await update.effective_message.reply_text("❌ ثبت تصویر رسید انجام نشد.", reply_markup=_menu(spec, business))
 
 
 
