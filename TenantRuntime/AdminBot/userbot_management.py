@@ -415,11 +415,11 @@ async def _send_payment_detail(update: Update, business: Any, actor: int, receip
 
 
 def _gift_stats(business: Any, actor: int) -> dict[str, int]:
-    coupons = business.list_coupons_admin(actor)
-    redemptions = business.list_coupon_redemptions_admin(actor)
+    vouchers = business.list_gift_vouchers_admin(actor)
+    redemptions = business.gift_redemptions_admin(actor)
     now = utcnow()
     active = expired = full = 0
-    for item in coupons:
+    for item in vouchers:
         is_expired = False
         if item.get("expires_at"):
             try:
@@ -427,35 +427,46 @@ def _gift_stats(business: Any, actor: int) -> dict[str, int]:
                 is_expired = parse_utc(str(item["expires_at"])) <= now
             except Exception:
                 pass
-        is_full = int(item.get("max_uses") or 0) > 0 and int(item.get("used_count") or 0) >= int(item.get("max_uses") or 0)
+        is_full = int(item.get("used_count") or 0) >= int(item.get("max_uses") or 1)
         if is_expired:
             expired += 1
         elif is_full:
             full += 1
         elif item.get("status") == "active":
             active += 1
-    return {"total": len(coupons), "active": active, "expired": expired, "full": full, "redemptions": len(redemptions)}
+    return {
+        "total": len(vouchers),
+        "active": active,
+        "expired": expired,
+        "full": full,
+        "redemptions": len(redemptions),
+    }
 
 
 async def _send_gifts_menu(update: Update, business: Any, actor: int) -> None:
     stats = _gift_stats(business, actor)
+    total_amount = sum(
+        int(x.get("amount") or 0)
+        for x in business.gift_redemptions_admin(actor)
+    )
     await _edit_or_send(
         update,
         "🎁 مدیریت هدایا\n"
         "❖ ◈━━━━━━━━━━━━━━━━━━━━◈ ❖\n"
         f"🟢 کوپن‌های فعال: {stats['active']}\n"
         f"📦 کل کوپن‌ها: {stats['total']}\n"
-        f"🎯 مصرف‌شده: {stats['redemptions']} بار\n\n"
+        f"🎯 مصرف‌شده: {stats['redemptions']} بار\n"
+        f"💰 مجموع هدیه مصرف‌شده: {total_amount:,}\n\n"
         "از دکمه‌های زیر برای ساخت، گزارش و مدیریت کمپین هدیه استفاده کنید.",
         build_gifts_menu_keyboard(),
     )
 
 
 async def _send_coupons(update: Update, business: Any, actor: int) -> None:
-    items = business.list_coupons_admin(actor)
+    items = business.list_gift_vouchers_admin(actor)
     rows = [
         [InlineKeyboardButton(
-            f"{'🟢' if x['status']=='active' else '⚫'} {x['code']} | {x['used_count']}/{x['max_uses'] or '∞'}",
+            f"{'🟢' if x['status']=='active' else '⚫'} {x['code']} | {x['used_count']}/{x['max_uses']}",
             callback_data=f"userbot:gifts:coupon:{int(x['id'])}",
         )]
         for x in items
@@ -467,7 +478,7 @@ async def _send_coupons(update: Update, business: Any, actor: int) -> None:
     ])
     await _edit_or_send(
         update,
-        "💼 کوپن‌ها و کدهای هدیه\n"
+        "💼 کوپن شارژ کیف پول\n"
         f"◈ تعداد کل: {len(items)}\n"
         f"◈ فعال: {sum(1 for x in items if x['status']=='active')}\n"
         f"◈ غیرفعال: {sum(1 for x in items if x['status']!='active')}",
@@ -476,16 +487,23 @@ async def _send_coupons(update: Update, business: Any, actor: int) -> None:
 
 
 async def _send_coupon_detail(update: Update, business: Any, actor: int, coupon_id: int) -> None:
-    item = business.coupon(coupon_id)
-    redemptions = business.list_coupon_redemptions_admin(actor, coupon_id=coupon_id)
-    kind = "درصدی" if item["discount_kind"] == "percent" else "مبلغ ثابت"
-    value = f"{item['value']}%" if item["discount_kind"] == "percent" else f"{int(item['value']):,} {item.get('currency') or ''}"
+    item = business.gift_voucher_admin(actor, voucher_id=coupon_id)
+    redemptions = business.gift_redemptions_admin(actor, voucher_id=coupon_id)
+    username_row = BotRepository(business.conn).get_by_tenant_role(
+        business.tenant_id, "user"
+    ) or {}
+    username = str(username_row.get("telegram_username") or "").strip().lstrip("@")
+    deep_link = (
+        f"https://t.me/{username}?start=gift_{item['code']}"
+        if username else "یوزرنیم UserBot ثبت نشده است"
+    )
     rows = [
         [InlineKeyboardButton(
             "⏸ خاموش کردن کوپن" if item["status"] == "active" else "▶️ روشن کردن کوپن",
             callback_data=f"userbot:gifts:coupon:toggle:{coupon_id}",
         )],
         [InlineKeyboardButton("📜 گزارش مصرف این کوپن", callback_data=f"userbot:gifts:redemptions:{coupon_id}")],
+        [InlineKeyboardButton("📣 متن تبلیغ همین کوپن", callback_data=f"userbot:gifts:coupon:campaign:{coupon_id}")],
         [InlineKeyboardButton("🗑 حذف کوپن", callback_data=f"userbot:gifts:coupon:delete:{coupon_id}")],
         [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:gifts:coupons")],
     ]
@@ -494,12 +512,13 @@ async def _send_coupon_detail(update: Update, business: Any, actor: int, coupon_
         f"🏷 کد: {item['code']}\n"
         "❖ ◈━━━━━━━━━━━━━━━━━━━━◈ ❖\n"
         f"◈ وضعیت: {item['status']}\n"
-        f"◈ نوع: {kind}\n"
-        f"◈ مقدار: {value}\n"
-        f"◈ استفاده: {int(item['used_count'] or 0)} از {int(item['max_uses'] or 0) or 'نامحدود'}\n"
+        f"◈ هدیه کیف پول: {int(item['amount']):,} {item['currency']}\n"
+        f"◈ استفاده: {int(item['used_count'] or 0)} از {int(item['max_uses'])}\n"
         f"◈ مصرف ثبت‌شده: {len(redemptions)}\n"
-        f"◈ انقضا: {item.get('expires_at') or 'نامحدود'}",
+        f"◈ انقضا: {item.get('expires_at') or 'نامحدود'}\n"
+        f"◈ دیپ‌لینک: {deep_link}",
         InlineKeyboardMarkup(rows),
+        disable_web_page_preview=True,
     )
 
 
@@ -761,9 +780,11 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
     if section == "marketing":
         growth = business.growth_settings(actor)
         rows = [
+            [InlineKeyboardButton(f"🎁 نمایش دکمه هدیه | {_bool_icon(s.get('show_gift_button'))}", callback_data="userbot:settings:toggle:show_gift_button:userbot:settings:marketing")],
             [InlineKeyboardButton(f"🤝 رفرال | {_bool_icon(growth.get('referral_enabled'))}", callback_data="userbot:referral:toggle")],
             [InlineKeyboardButton(f"🎁 تست رایگان | {_bool_icon(growth.get('trial_enabled'))}", callback_data="userbot:settings:trial")],
-            [InlineKeyboardButton("🏷 مدیریت کوپن‌ها", callback_data="userbot:gifts:coupons")],
+            [InlineKeyboardButton("🎟 مدیریت کوپن تخفیف", callback_data="biz:growth")],
+            [InlineKeyboardButton("🏷 مدیریت کدهای هدیه", callback_data="userbot:gifts:coupons")],
             [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
         ]
         await _edit_or_send(update, "🎯 تنظیمات بازاریابی", InlineKeyboardMarkup(rows))
@@ -1026,16 +1047,14 @@ async def handle_callback(
     if data == "userbot:gifts:coupons":
         await _send_coupons(update,business,actor); return True
     if data == "userbot:gifts:coupons:add":
-        context.user_data[FLOW_KEY]={"kind":"coupon_add"}
+        context.user_data[FLOW_KEY]={"kind":"gift_add_code"}
         await query.message.reply_text(
-            "🏷 کوپن جدید را وارد کنید:\n"
-            "CODE | percent/fixed | VALUE | CURRENCY | MAX_USES | EXPIRES_AT(optional)\n"
-            "مثال: OFF20 | percent | 20 | IRR | 100",
+            "🏷 کد هدیه را وارد کنید؛ مثال: WELCOME50",
             reply_markup=userbot_cancel_keyboard(),
         ); return True
     if data.startswith("userbot:gifts:coupon:toggle:"):
-        cid=int(data.rsplit(":",1)[1]); item=business.coupon(cid)
-        business.set_coupon_status_admin(actor,coupon_id=cid,enabled=item["status"]!="active")
+        cid=int(data.rsplit(":",1)[1]); item=business.gift_voucher_admin(actor,voucher_id=cid)
+        business.set_gift_voucher_status_admin(actor,voucher_id=cid,enabled=item["status"]!="active")
         await _send_coupon_detail(update,business,actor,cid); return True
     if data.startswith("userbot:gifts:coupon:delete:"):
         cid=int(data.rsplit(":",1)[1])
@@ -1044,16 +1063,27 @@ async def handle_callback(
             InlineKeyboardButton("لغو❌",callback_data=f"userbot:gifts:coupon:{cid}"),
         ]])); return True
     if data.startswith("userbot:gifts:coupon:deleteok:"):
-        cid=int(data.rsplit(":",1)[1]); business.delete_coupon_admin(actor,coupon_id=cid); await _send_coupons(update,business,actor); return True
+        cid=int(data.rsplit(":",1)[1]); business.delete_gift_voucher_admin(actor,voucher_id=cid); await _send_coupons(update,business,actor); return True
+    if data.startswith("userbot:gifts:coupon:campaign:"):
+        cid=int(data.rsplit(":",1)[1]); item=business.gift_voucher_admin(actor,voucher_id=cid)
+        username_row=BotRepository(business.conn).get_by_tenant_role(business.tenant_id,"user") or {}
+        username=str(username_row.get("telegram_username") or "").strip().lstrip("@")
+        link=f"https://t.me/{username}?start=gift_{item['code']}" if username else f"کد: {item['code']}"
+        await _edit_or_send(update,
+            f"📣 هدیه ویژه\n🎁 {int(item['amount']):,} {item['currency']} هدیه کیف پول\n"
+            f"🏷 کد: {item['code']}\n🔗 {link}",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙بازگشت",callback_data=f"userbot:gifts:coupon:{cid}")]]),
+            disable_web_page_preview=True,
+        ); return True
     if data.startswith("userbot:gifts:coupon:") and data.rsplit(":",1)[1].isdigit():
         await _send_coupon_detail(update,business,actor,int(data.rsplit(":",1)[1])); return True
     if data.startswith("userbot:gifts:redemptions"):
         coupon_id=None
         parts=data.split(":")
         if len(parts)>3 and parts[-1].isdigit(): coupon_id=int(parts[-1])
-        rows=business.list_coupon_redemptions_admin(actor,coupon_id=coupon_id)
+        rows=business.gift_redemptions_admin(actor,voucher_id=coupon_id)
         text="📜 گزارش مصرف هدایا\n" + ("\n".join(
-            f"• {x['code']} · {x['display_name']} · {int(x['discount_amount']):,} · {x['created_at']}"
+            f"• {x['code']} · {x['display_name']} · {int(x['amount']):,} {x['currency']} · {x['redeemed_at']}"
             for x in rows[:50]
         ) or "هنوز مصرفی ثبت نشده است.")
         await _edit_or_send(update,text,InlineKeyboardMarkup([[InlineKeyboardButton("🔙بازگشت",callback_data="userbot:gifts_menu")]])); return True
@@ -1077,12 +1107,14 @@ async def handle_callback(
             InlineKeyboardMarkup([[InlineKeyboardButton("🔙بازگشت",callback_data="userbot:gifts_menu")]])
         ); return True
     if data == "userbot:gifts:campaign":
-        items=[x for x in business.list_coupons_admin(actor) if x["status"]=="active"]
+        items=[x for x in business.list_gift_vouchers_admin(actor) if x["status"]=="active"]
         sample=items[0]["code"] if items else "GIFT-CODE"
+        username_row=BotRepository(business.conn).get_by_tenant_role(business.tenant_id,"user") or {}
+        username=str(username_row.get("telegram_username") or "").strip().lstrip("@")
+        link=f"https://t.me/{username}?start=gift_{sample}" if username else f"کد هدیه: {sample}"
         await _edit_or_send(update,
             "📣 متن آماده کمپین هدیه\n\n"
-            f"🎁 هدیه ویژه فعال شد!\nکد: {sample}\n"
-            "کد را هنگام خرید در ربات وارد کنید.",
+            f"🎁 هدیه ویژه فعال شد!\nکد: {sample}\n🔗 {link}",
             InlineKeyboardMarkup([[InlineKeyboardButton("🔙بازگشت",callback_data="userbot:gifts_menu")]])
         ); return True
     if data == "userbot:gifts:presets":
@@ -1090,19 +1122,20 @@ async def handle_callback(
             "🎯 قالب‌های آماده کمپین هدیه\n"
             "یک قالب را انتخاب کنید؛ کد به‌صورت درصدی ساخته می‌شود.",
             InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎁 خوش‌آمدگویی 10٪",callback_data="userbot:gifts:preset:WELCOME:10")],
-                [InlineKeyboardButton("🔥 جشنواره 20٪",callback_data="userbot:gifts:preset:FEST:20")],
-                [InlineKeyboardButton("💎 VIP 30٪",callback_data="userbot:gifts:preset:VIP:30")],
+                [InlineKeyboardButton("🎁 خوش‌آمدگویی 100,000",callback_data="userbot:gifts:preset:WELCOME:10")],
+                [InlineKeyboardButton("🔥 جشنواره 200,000",callback_data="userbot:gifts:preset:FEST:20")],
+                [InlineKeyboardButton("💎 VIP 300,000",callback_data="userbot:gifts:preset:VIP:30")],
                 [InlineKeyboardButton("🔙بازگشت",callback_data="userbot:gifts_menu")],
             ])
         ); return True
     if data.startswith("userbot:gifts:preset:"):
-        parts=data.split(":"); prefix=parts[3]; value=int(parts[4]); code=f"{prefix}-{str(int(utcnow().timestamp()))[-6:]}"
-        business.add_coupon(actor,code=code,discount_kind="percent",value=value,max_uses=100,per_customer_limit=1)
+        parts=data.split(":"); prefix=parts[3]; amount=int(parts[4])*10000; code=f"{prefix}-{str(int(utcnow().timestamp()))[-6:]}"
+        business.add_gift_voucher_admin(actor,code=code,amount=amount,currency="IRR",max_uses=100)
         await _send_coupons(update,business,actor); return True
     if data == "userbot:gifts:bulk":
         context.user_data[FLOW_KEY]={"kind":"coupon_bulk"}
-        await query.message.reply_text("🧩 PREFIX | COUNT | PERCENT | MAX_USES_PER_CODE\nمثال: FEST | 10 | 20 | 1",reply_markup=userbot_cancel_keyboard()); return True
+        context.user_data[FLOW_KEY]={"kind":"gift_bulk_prefix"}
+        await query.message.reply_text("🧩 پیشوند کدها را وارد کنید؛ مثال: FEST",reply_markup=userbot_cancel_keyboard()); return True
 
     if data == "userbot:referral_menu":
         await _send_referral_menu(update,business,actor); return True
@@ -1339,24 +1372,67 @@ async def handle_text(
                 f"◈ شناسه تراکنش: {rid}\n👤 {pay['display_name']}\n💰 {int(pay['amount']):,} {pay['currency']}\nوضعیت: {pay['status']}",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("جزئیات",callback_data=f"userbot:pay:detail:{rid}")]])
             ); return True
-        if kind=="coupon_add":
-            parts=[x.strip() for x in text.split("|")]
-            if len(parts)<3: raise ValueError("coupon format")
-            code,discount_kind,value=parts[:3]; currency=parts[3] if len(parts)>3 else ""; max_uses=int(parts[4]) if len(parts)>4 and parts[4] else 0; expires=parts[5] if len(parts)>5 else ""
-            business.add_coupon(actor,code=code,discount_kind=discount_kind,value=int(value),currency=currency,max_uses=max_uses,per_customer_limit=1,expires_at=expires)
-            context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ کوپن ساخته شد.",reply_markup=admin_main_keyboard()); return True
-        if kind=="coupon_bulk":
-            parts=[x.strip() for x in text.split("|")]
-            if len(parts)!=4: raise ValueError("bulk format")
-            prefix,count,percent,max_uses=parts[0],int(parts[1]),int(parts[2]),int(parts[3])
-            if not 1<=count<=100: raise ValueError("bulk count")
-            codes=[]
+        if kind=="gift_add_code":
+            code=text.strip().upper()
+            if not code or len(code)>48: raise ValueError("gift code")
+            flow["code"]=code; flow["kind"]="gift_add_amount"
+            await update.effective_message.reply_text("💰 مبلغ هدیه را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
+        if kind=="gift_add_amount":
+            amount=int(text.replace(",",""))
+            if amount<=0: raise ValueError("gift amount")
+            flow["amount"]=amount; flow["kind"]="gift_add_currency"
+            await update.effective_message.reply_text("💱 ارز را وارد کنید؛ مثال IRR:",reply_markup=userbot_cancel_keyboard()); return True
+        if kind=="gift_add_currency":
+            currency=text.strip().upper()
+            if not 3<=len(currency)<=8: raise ValueError("gift currency")
+            flow["currency"]=currency; flow["kind"]="gift_add_uses"
+            await update.effective_message.reply_text("👥 حداکثر تعداد مصرف را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
+        if kind=="gift_add_uses":
+            uses=int(text)
+            if uses<=0: raise ValueError("gift uses")
+            flow["max_uses"]=uses; flow["kind"]="gift_add_expiry"
+            await update.effective_message.reply_text("⏰ تاریخ انقضا ISO را وارد کنید یا 0 برای نامحدود:",reply_markup=userbot_cancel_keyboard()); return True
+        if kind=="gift_add_expiry":
+            expiry="" if text.strip() in {"0","-","—"} else text.strip()
+            business.add_gift_voucher_admin(
+                actor,code=str(flow["code"]),amount=int(flow["amount"]),
+                currency=str(flow["currency"]),max_uses=int(flow["max_uses"]),
+                expires_at=expiry,
+            )
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text("✅ کد هدیه ساخته شد.",reply_markup=admin_main_keyboard()); return True
+        if kind=="gift_bulk_prefix":
+            prefix=text.strip().upper()
+            if not prefix or len(prefix)>20: raise ValueError("gift prefix")
+            flow["prefix"]=prefix; flow["kind"]="gift_bulk_count"
+            await update.effective_message.reply_text("🔢 تعداد کدها را وارد کنید (1 تا 100):",reply_markup=userbot_cancel_keyboard()); return True
+        if kind=="gift_bulk_count":
+            count=int(text)
+            if not 1<=count<=100: raise ValueError("gift count")
+            flow["count"]=count; flow["kind"]="gift_bulk_amount"
+            await update.effective_message.reply_text("💰 مبلغ هر کد هدیه را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
+        if kind=="gift_bulk_amount":
+            amount=int(text.replace(",",""))
+            if amount<=0: raise ValueError("gift amount")
+            flow["amount"]=amount; flow["kind"]="gift_bulk_currency"
+            await update.effective_message.reply_text("💱 ارز را وارد کنید؛ مثال IRR:",reply_markup=userbot_cancel_keyboard()); return True
+        if kind=="gift_bulk_currency":
+            currency=text.strip().upper()
+            if not 3<=len(currency)<=8: raise ValueError("gift currency")
             stamp=str(int(utcnow().timestamp()))[-6:]
-            for i in range(count):
-                code=f"{prefix.upper()}-{stamp}-{i+1:02d}"
-                business.add_coupon(actor,code=code,discount_kind="percent",value=percent,max_uses=max_uses,per_customer_limit=1)
+            codes=[]
+            for i in range(int(flow["count"])):
+                code=f"{flow['prefix']}-{stamp}-{i+1:02d}"
+                business.add_gift_voucher_admin(
+                    actor,code=code,amount=int(flow["amount"]),
+                    currency=currency,max_uses=1,
+                )
                 codes.append(code)
-            context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ کدها ساخته شدند:\n"+"\n".join(codes),reply_markup=admin_main_keyboard()); return True
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text(
+                "✅ کدهای یک‌بارمصرف ساخته شدند:\n"+"\n".join(codes),
+                reply_markup=admin_main_keyboard(),
+            ); return True
         if kind=="referral_edit":
             value=int(text.replace(",","")); field=str(flow["field"]); kwargs={}
             if field=="trial": kwargs["referral_trial_reward"]=value

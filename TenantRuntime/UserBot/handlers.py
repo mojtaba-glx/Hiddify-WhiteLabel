@@ -79,6 +79,7 @@ def _wallet_text(summary: dict) -> str:
             "referral_purchase": "پاداش دعوت/خرید",
             "purchase": "پرداخت سفارش",
             "refund": "برگشت",
+            "gift": "🎁 هدیه",
         }
         for tx in history[:10]:
             amount = int(tx.get("amount") or 0)
@@ -170,6 +171,8 @@ def _menu(spec: RuntimeBotSpec, business) -> InlineKeyboardMarkup:
         support_row.append(_button("🎁 تست رایگان", callback_data="shop:trial", settings=settings))
     support_row.append(_button("🎫 پشتیبانی", callback_data="shop:tickets", settings=settings))
     rows.append(support_row)
+    if bool(settings.get("show_gift_button", True)):
+        rows.append([_button("🎁 دریافت هدیه", callback_data="shop:gift", settings=settings)])
     help_row = [_button("📖 راهنما", callback_data="shop:guide", settings=settings)]
     if str(settings.get("faq_text") or "").strip():
         help_row.append(_button("📕 سوالات متداول", callback_data="shop:faq", settings=settings))
@@ -233,6 +236,7 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         username=getattr(user, "username", None),
     )
     args = list(getattr(context, "args", None) or [])
+    gift_notice = ""
     if args:
         payload = str(args[0] or "").strip()
         if payload.startswith("ref_"):
@@ -240,13 +244,29 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 business.register_referral(user_id, referral_code=payload[4:])
             except TenantBusinessError:
                 pass
+        elif payload.startswith("gift_"):
+            try:
+                gift = business.redeem_gift_voucher(
+                    user_id, code=payload[5:]
+                )
+                gift_notice = (
+                    "\n\n🎁 هدیه شما دریافت شد: "
+                    f"{int(gift['amount']):,} {gift['currency']}\n"
+                    f"💰 موجودی جدید: {int(gift['resulting_balance']):,} "
+                    f"{gift['currency']}"
+                )
+            except TenantBusinessError:
+                gift_notice = "\n\n❌ کد هدیه نامعتبر، منقضی یا قبلاً استفاده شده است."
     settings = business.runtime_userbot_settings()
     custom_welcome = str(settings.get("welcome_message") or "").strip()
-    text = custom_welcome or (
-        f"👋 به {spec.tenant_name} خوش آمدید.\n\n"
-        "ربات فروشگاهی فعال است.\n"
-        f"تعداد ورود: {visits}"
-    )
+    text = (
+        custom_welcome
+        or (
+            f"👋 به {spec.tenant_name} خوش آمدید.\n\n"
+            "ربات فروشگاهی فعال است.\n"
+            f"تعداد ورود: {visits}"
+        )
+    ) + gift_notice
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(text, reply_markup=_menu(spec, business))
@@ -405,6 +425,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     [InlineKeyboardButton("↩️ کیف پول", callback_data="shop:wallet")]
                 ]),
             ); return
+        if data == "shop:gift":
+            context.user_data["biz_flow"] = {"kind": "gift_redeem"}
+            await update.callback_query.edit_message_text(
+                "🎁 کد هدیه را ارسال کنید.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("↩️ منو", callback_data="runtime:home")
+                ]]),
+            )
+            return
         if data == "shop:referral":
             growth = business._ensure_growth_settings()
             if not bool(growth.get("referral_enabled")):
@@ -816,6 +845,16 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         ],
                         [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
                     ]),
+                )
+                return
+            if kind == "gift_redeem":
+                gift = business.redeem_gift_voucher(actor, code=text)
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    "✅ هدیه دریافت شد.\n"
+                    f"🎁 مبلغ: {int(gift['amount']):,} {gift['currency']}\n"
+                    f"💰 موجودی جدید: {int(gift['resulting_balance']):,} {gift['currency']}",
+                    reply_markup=_menu(spec, business),
                 )
                 return
             if kind == "receipt":
