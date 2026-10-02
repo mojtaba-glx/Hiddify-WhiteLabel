@@ -4946,6 +4946,8 @@ class TenantBusinessService:
             clean = int(value)
             if clean < 1:
                 raise ValueError("setting must be positive")
+            if name in ("plan_columns", "server_columns") and clean > 3:
+                raise ValueError("layout columns out of range")
             if name == "reminder_days" and clean > 30:
                 raise ValueError("reminder days out of range")
             if name == "reminder_remaining_gb" and clean > 1000:
