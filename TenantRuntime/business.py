@@ -3093,15 +3093,27 @@ class TenantBusinessService:
         if normalized not in ("advanced", "default", "fair"):
             raise ValueError("invalid renewal policy")
         volume_mode, time_mode = self._renew_modes_from_policy(normalized)
-        self.set_userbot_setting_admin(
-            actor_id, key="renew_policy", value=normalized
-        )
-        self.set_userbot_setting_admin(
-            actor_id, key="renew_volume_mode", value=volume_mode
-        )
-        return self.set_userbot_setting_admin(
-            actor_id, key="renew_time_mode", value=time_mode
-        )
+        now = iso_utc(utcnow())
+        values = {
+            "renew_policy": normalized,
+            "renew_volume_mode": volume_mode,
+            "renew_time_mode": time_mode,
+        }
+        with transaction(self.conn):
+            for key, value in values.items():
+                self.conn.execute(
+                    "INSERT INTO tenant_userbot_settings "
+                    "(tenant_id,key,value,updated_at) VALUES (?,?,?,?) "
+                    "ON CONFLICT(tenant_id,key) DO UPDATE SET "
+                    "value=excluded.value,updated_at=excluded.updated_at",
+                    (
+                        self.tenant_id,
+                        key,
+                        json.dumps(value, ensure_ascii=False),
+                        now,
+                    ),
+                )
+        return self.runtime_userbot_settings()
 
     def set_renewal_rollover_admin(
         self,
