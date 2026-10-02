@@ -14,7 +14,7 @@ from typing import Any
 from telegram import (
     InlineKeyboardButton as TelegramInlineKeyboardButton,
     InlineKeyboardMarkup,
-    ReplyKeyboardRemove,
+    ReplyKeyboardMarkup,
     Update,
 )
 from telegram.ext import (
@@ -30,6 +30,7 @@ from telegram.ext import (
 
 from Gateway.catalog import RuntimeBotSpec
 from TenantRuntime.business import TenantBusinessError
+from TenantRuntime.button_styles import keyboard_button as KeyboardButton
 from TenantRuntime.common import _deny_update, _services, runtime_access_gate, runtime_error
 
 def _money_lines(items: list[dict]) -> list[str]:
@@ -449,131 +450,409 @@ def _purchase_server_rows(
     )
 
 
-_LEGACY_REPLY_KEYBOARD_CLEANUP_KEY = "legacy_reply_keyboard_removed_v0132"
+BTN_STATUS = "📊وضعیت اشتراک"
+BTN_RENEW = "♾تمدید اشتراک"
+BTN_BUY = "💳خرید اشتراک"
+BTN_CONNECT = "🔗اتصال اشتراک"
+BTN_TRIAL = "🔥تست رایگان"
+BTN_WALLET = "💰کیف پول"
+BTN_SUPPORT = "📩پشتیبانی"
+BTN_GUIDE = "📚راهنما"
+BTN_FAQ = "❗️سوالات متداول"
+BTN_REFERRAL = "💌دعوت دوستان"
+BTN_GIFT = "🎁دریافت هدیه"
 
 
-async def _remove_legacy_reply_keyboard(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    """Remove the persistent ReplyKeyboard left by pre-inline UserBot versions."""
-    if bool(context.user_data.get(_LEGACY_REPLY_KEYBOARD_CLEANUP_KEY)):
-        return
-    chat = update.effective_chat
-    if chat is None:
-        return
-    try:
-        cleanup = await chat.send_message(
-            "\u2063",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        context.user_data[_LEGACY_REPLY_KEYBOARD_CLEANUP_KEY] = True
-        try:
-            await cleanup.delete()
-        except Exception:
-            pass
-    except Exception:
-        # Failure to clean an old client-side keyboard must never block UserBot.
-        return
-
-
-def _menu(spec: RuntimeBotSpec, business) -> InlineKeyboardMarkup:
-    """Build the customer main menu with SellBot-compatible navigation.
-
-    Visibility switches are read at render time, so an AdminBot change is
-    reflected on the next UserBot screen without restarting the tenant worker.
-    """
+def _main_keyboard(spec: RuntimeBotSpec, business) -> ReplyKeyboardMarkup:
+    """Persistent customer menu shown at the bottom of Telegram."""
     settings = business.runtime_userbot_settings()
     growth = business._ensure_growth_settings()
-    rows: list[list[InlineKeyboardButton]] = []
+    rows = []
 
     if bool(settings.get("show_user_status", True)):
         rows.append([
-            _button(
-                "📊وضعیت اشتراک",
-                callback_data="runtime:status",
-                settings=settings,
-            )
+            KeyboardButton(BTN_STATUS, settings=settings),
         ])
 
-    commerce_row: list[InlineKeyboardButton] = []
+    commerce_row = []
     if (
         bool(settings.get("enable_renew", True))
         and bool(settings.get("show_renew_in_main_menu", True))
     ):
-        commerce_row.append(
-            _button(
-                "♾تمدید اشتراک",
-                callback_data="shop:renewmenu",
-                settings=settings,
-            )
-        )
+        commerce_row.append(KeyboardButton(BTN_RENEW, settings=settings))
     if bool(settings.get("enable_buy", True)):
-        commerce_row.append(
-            _button(
-                "💳خرید اشتراک",
-                callback_data="shop:buy",
-                settings=settings,
-            )
-        )
+        commerce_row.append(KeyboardButton(BTN_BUY, settings=settings))
     if commerce_row:
         rows.append(commerce_row)
 
     rows.append([
-        _button(
-            "🔗اتصال اشتراک",
-            callback_data="shop:connect",
-            settings=settings,
-        )
+        KeyboardButton(BTN_CONNECT, settings=settings),
     ])
 
-    wallet_row: list[InlineKeyboardButton] = []
+    wallet_row = []
     if bool(growth.get("trial_enabled")):
-        wallet_row.append(
-            _button(
-                "🔥تست رایگان",
-                callback_data="shop:trial",
-                settings=settings,
-            )
-        )
-    wallet_row.append(
-        _button(
-            "💰کیف پول",
-            callback_data="shop:wallet",
-            settings=settings,
-        )
-    )
+        wallet_row.append(KeyboardButton(BTN_TRIAL, settings=settings))
+    wallet_row.append(KeyboardButton(BTN_WALLET, settings=settings))
     rows.append(wallet_row)
 
     rows.append([
-        _button("📩پشتیبانی", callback_data="shop:tickets", settings=settings),
-        _button("📚راهنما", callback_data="shop:guide", settings=settings),
-        _button("❗️سوالات متداول", callback_data="shop:faq", settings=settings),
+        KeyboardButton(BTN_SUPPORT, settings=settings),
+        KeyboardButton(BTN_GUIDE, settings=settings),
+        KeyboardButton(BTN_FAQ, settings=settings),
     ])
 
     if bool(growth.get("referral_enabled")):
         rows.append([
-            _button(
-                "💌دعوت دوستان",
-                callback_data="shop:referral",
-                settings=settings,
-            )
+            KeyboardButton(BTN_REFERRAL, settings=settings),
         ])
 
     if bool(settings.get("show_gift_button", True)):
         rows.append([
-            _button(
-                "🎁دریافت هدیه",
-                callback_data="shop:gift",
-                settings=settings,
-            )
+            KeyboardButton(BTN_GIFT, settings=settings),
         ])
 
-    return InlineKeyboardMarkup(rows)
+    return ReplyKeyboardMarkup(
+        rows,
+        resize_keyboard=True,
+        is_persistent=True,
+        selective=True,
+    )
+
+
+def _home_inline_markup(settings: dict[str, Any]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        _button(
+            "🏠 منو",
+            callback_data="runtime:home",
+            settings=settings,
+        )
+    ]])
+
+
+async def _handle_main_reply_action(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    spec: RuntimeBotSpec,
+    business: Any,
+    actor: int,
+    text: str,
+) -> bool:
+    settings = _set_button_settings(business.runtime_userbot_settings())
+
+    if text == BTN_STATUS:
+        if not bool(settings.get("show_user_status", True)):
+            raise TenantBusinessError("user status is disabled")
+        await show_status(update, context)
+        return True
+
+    if text == BTN_WALLET:
+        await update.effective_message.reply_text(
+            _wallet_text(business.wallet_summary(actor)),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "➕ شارژ کیف پول",
+                    callback_data="shop:wallettopup",
+                )],
+            ]),
+        )
+        return True
+
+    if text == BTN_GIFT:
+        if not bool(settings.get("show_gift_button", True)):
+            raise TenantBusinessError("gift is disabled")
+        context.user_data["biz_flow"] = {"kind": "gift_redeem"}
+        await update.effective_message.reply_text(
+            "🎁 کد هدیه را ارسال کنید."
+        )
+        return True
+
+    if text == BTN_REFERRAL:
+        growth = business._ensure_growth_settings()
+        if not bool(growth.get("referral_enabled")):
+            raise TenantBusinessError("referral is disabled")
+        summary = business.referral_summary(actor)
+        referral_settings = dict(summary.get("settings") or {})
+        username = str(getattr(context.bot, "username", None) or "").strip()
+        code = str(summary["referral_code"])
+        invite = (
+            f"https://t.me/{username}?start=ref_{code}"
+            if username
+            else f"/start ref_{code}"
+        )
+        rewards = list(summary.get("rewards") or [])
+        reward_lines = [
+            f"• {x.get('reward_type')}: {int(x.get('amount') or 0):,} "
+            f"{x.get('currency') or ''} ({int(x.get('count') or 0)} مورد)"
+            for x in rewards
+        ] or ["• هنوز پاداشی ثبت نشده است."]
+        body = "\n".join([
+            "🤝 دعوت دوستان",
+            f"وضعیت: {'فعال' if int(referral_settings.get('referral_enabled') or 0) else 'خاموش'}",
+            f"دعوت موفق ثبت‌شده: {int(summary.get('referred_count') or 0)}",
+            f"پاداش تست: {int(referral_settings.get('referral_trial_reward') or 0):,} "
+            f"{referral_settings.get('referral_currency') or ''}",
+            f"پاداش اولین خرید: {int(referral_settings.get('referral_purchase_reward') or 0):,} "
+            f"{referral_settings.get('referral_currency') or ''}",
+            "",
+            "🔗 لینک دعوت شما:",
+            invite,
+            "",
+            "🎁 پاداش‌ها",
+            *reward_lines,
+        ])
+        await update.effective_message.reply_text(
+            body,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "💰 کیف پول",
+                    callback_data="shop:wallet",
+                )
+            ]]),
+            disable_web_page_preview=True,
+        )
+        return True
+
+    if text == BTN_TRIAL:
+        growth = business._ensure_growth_settings()
+        if not bool(growth.get("trial_enabled")):
+            raise TenantBusinessError("free trial is disabled")
+        result = business.claim_free_trial(actor)
+        await update.effective_message.reply_text(
+            "✅ تست رایگان فعال شد.\n"
+            f"🔗 {result.get('subscription_url') or '-'}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "📦 اشتراک‌های من",
+                    callback_data="shop:subs",
+                )
+            ]]),
+            disable_web_page_preview=True,
+        )
+        return True
+
+    if text == BTN_BUY:
+        if not bool(settings.get("enable_buy", True)):
+            raise TenantBusinessError("purchase is disabled")
+        categories = (
+            business.list_plan_categories()
+            if bool(settings.get("plan_categories_enabled", True))
+            else []
+        )
+        plans = [
+            p for p in business.list_plans()
+            if not str(p.get("name") or "").startswith("__WHITELABEL_")
+        ]
+        if categories:
+            rows = [
+                [
+                    _button(
+                        f"📂 {category['title']}",
+                        callback_data=f"shop:buycat:{int(category['id'])}",
+                        settings=settings,
+                    )
+                ]
+                for category in categories
+            ]
+            if any(p.get("category_id") is None for p in plans):
+                rows.append([
+                    _button(
+                        "📋 سایر پلن‌ها",
+                        callback_data="shop:buycat:0",
+                        settings=settings,
+                    )
+                ])
+            body = (
+                str(settings.get("plans_list_text") or "").strip()
+                or "📂 دسته‌بندی پلن‌ها\nدسته موردنظر را انتخاب کنید:"
+            )
+        else:
+            rows = _plan_buttons(plans, settings)
+            if not rows:
+                rows = [[InlineKeyboardButton(
+                    "پلنی موجود نیست",
+                    callback_data="noop",
+                )]]
+            body = (
+                str(settings.get("plans_list_text") or "").strip()
+                or "📋 پلن موردنظر را انتخاب کنید:"
+            )
+        await update.effective_message.reply_text(
+            body,
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return True
+
+    if text == BTN_RENEW:
+        if not (
+            bool(settings.get("enable_renew", True))
+            and bool(settings.get("show_renew_in_main_menu", True))
+        ):
+            raise TenantBusinessError("renewal is disabled")
+        items = [
+            item
+            for item in business.list_subscriptions(actor)
+            if item.get("external_ref")
+            and item.get("server_id")
+            and item.get("status") in ("active", "disabled", "expired")
+        ]
+        rows = [
+            [InlineKeyboardButton(
+                f"♾ #{item['id']} · {item['plan_name']}",
+                callback_data=f"shop:renew:{item['id']}",
+            )]
+            for item in items
+        ]
+        if not rows:
+            rows = [[InlineKeyboardButton(
+                "اشتراک قابل تمدیدی وجود ندارد",
+                callback_data="noop",
+            )]]
+        await update.effective_message.reply_text(
+            "♾ تمدید اشتراک\nاشتراک موردنظر را انتخاب کنید:",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return True
+
+    if text == BTN_CONNECT:
+        items = [
+            item
+            for item in business.list_subscriptions(actor)
+            if item.get("status") == "active"
+            and item.get("external_ref")
+            and item.get("server_id")
+        ]
+        rows = []
+        for item in items:
+            subscription_id = int(item["id"])
+            title = str(item.get("plan_name") or f"اشتراک #{subscription_id}")
+            action_row = []
+            if (
+                bool(settings.get("show_user_page_link", True))
+                and (
+                    bool(settings.get("show_sub_link", True))
+                    or bool(settings.get("show_smart_link", True))
+                )
+            ):
+                try:
+                    link = business.subscription_link(
+                        actor,
+                        subscription_id=subscription_id,
+                    )
+                except TenantBusinessError:
+                    link = ""
+                if link:
+                    action_row.append(
+                        _button(
+                            f"🔗 {title}",
+                            url=link,
+                            settings=settings,
+                        )
+                    )
+            if bool(settings.get("show_direct_config", True)):
+                action_row.append(
+                    _button(
+                        f"📄 کانفیگ #{subscription_id}",
+                        callback_data=f"shop:configs:{subscription_id}",
+                        settings=settings,
+                    )
+                )
+            if action_row:
+                rows.append(action_row)
+        if not rows:
+            rows.append([InlineKeyboardButton(
+                "اشتراک فعالی برای اتصال وجود ندارد",
+                callback_data="noop",
+            )])
+        rows.append([InlineKeyboardButton(
+            "📦 اشتراک‌های من",
+            callback_data="shop:subs",
+        )])
+        await update.effective_message.reply_text(
+            "🔗 اتصال اشتراک\n"
+            "اشتراک موردنظر را انتخاب کنید. برای اتصال مستقیم، لینک یا "
+            "کانفیگ همان سرویس را باز کنید:",
+            reply_markup=InlineKeyboardMarkup(rows),
+            disable_web_page_preview=True,
+        )
+        return True
+
+    if text == BTN_SUPPORT:
+        items = business.list_tickets(actor)
+        body = (
+            str(settings.get("ticket_panel_text") or "").strip()
+            or "🎫 تیکت‌های من"
+        )
+        body += "\n" + (
+            "\n".join(
+                f"• #{x['id']} · {x['subject']} · {x['status']}"
+                f"{' · پاسخ داده شد' if x.get('admin_reply') else ''}"
+                for x in items
+            )
+            or "تیکتی ندارید."
+        )
+        rows = [
+            [InlineKeyboardButton(
+                f"🎫 #{x['id']} · {x['subject']}"[:60],
+                callback_data=f"shop:ticket:{x['id']}",
+            )]
+            for x in items[:15]
+        ]
+        rows.append([InlineKeyboardButton(
+            "➕ تیکت جدید",
+            callback_data="shop:newticket",
+        )])
+        await update.effective_message.reply_text(
+            body,
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return True
+
+    if text == BTN_GUIDE:
+        guide = str(settings.get("guide_text") or "").strip()
+        rows = [
+            [
+                InlineKeyboardButton(
+                    "📱 اندروید",
+                    callback_data="shop:guide:android",
+                ),
+                InlineKeyboardButton(
+                    "📱 IOS",
+                    callback_data="shop:guide:ios",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🖥️ ویندوز",
+                    callback_data="shop:guide:windows",
+                ),
+                InlineKeyboardButton(
+                    "💻 مک",
+                    callback_data="shop:guide:mac",
+                ),
+            ],
+            [InlineKeyboardButton(
+                "🖥️ لینوکس",
+                callback_data="shop:guide:linux",
+            )],
+        ]
+        await update.effective_message.reply_text(
+            "💡 راهنما\n" + (guide or "انتخاب سیستم عامل ⬇️"),
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return True
+
+    if text == BTN_FAQ:
+        faq = str(settings.get("faq_text") or "").strip()
+        await update.effective_message.reply_text(
+            "📕 سوالات متداول\n" + (faq or "متنی تنظیم نشده است.")
+        )
+        return True
+
+    return False
 
 
 async def _force_join_allowed(update: Update, context: ContextTypes.DEFAULT_TYPE, business) -> bool:
-    await _remove_legacy_reply_keyboard(update, context)
     settings = _set_button_settings(business.runtime_userbot_settings())
     if not bool(settings.get("force_join_enabled", False)):
         return True
@@ -614,7 +893,6 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     spec, _, state_store, business = _services(context)
     if spec.role != "user":
         raise RuntimeError("UserBot handler registered for non-user role")
-    await _remove_legacy_reply_keyboard(update, context)
     user_id = int(update.effective_user.id) if update.effective_user else 0
     if not await _force_join_allowed(update, context, business):
         return
@@ -659,16 +937,27 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"تعداد ورود: {visits}"
         )
     ) + gift_notice
+    keyboard = _main_keyboard(spec, business)
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(text, reply_markup=_menu(spec, business))
+        try:
+            await update.callback_query.message.delete()
+        except Exception:
+            pass
+        if update.effective_chat:
+            await update.effective_chat.send_message(
+                text,
+                reply_markup=keyboard,
+            )
     elif update.effective_message:
-        await update.effective_message.reply_text(text, reply_markup=_menu(spec, business))
+        await update.effective_message.reply_text(
+            text,
+            reply_markup=keyboard,
+        )
 
 
 async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     spec, policy, state_store, business = _services(context)
-    await _remove_legacy_reply_keyboard(update, context)
     if spec.role != "user":
         raise RuntimeError("UserBot handler registered for non-user role")
     user_id = int(update.effective_user.id) if update.effective_user else 0
@@ -810,7 +1099,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             result = business.retry_own_paid_order(actor, order_id=order_id)
             await update.callback_query.edit_message_text(
                 f"✅ سفارش #{order_id} انجام شد.\n🔗 {result.get('subscription_url') or '-'}",
-                reply_markup=_menu(spec, business),
+                reply_markup=_home_inline_markup(settings),
             ); return
         if data.startswith("shop:cancelorder:"):
             order_id = int(data.rsplit(":", 1)[1])
@@ -1216,7 +1505,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     f"🔗 {result.get('subscription_url') or '-'}"
                 )
             await update.callback_query.edit_message_text(
-                text, reply_markup=_menu(spec, business)
+                text, reply_markup=_home_inline_markup(settings)
             ); return
         if data.startswith("shop:paymethods:"):
             order_id = int(data.rsplit(":", 1)[1])
@@ -1236,7 +1525,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data.startswith("shop:pay:"):
             _, _, order_id, method_id = data.split(":", 3); order = business.order(actor, int(order_id)); method = business.method(int(method_id), currency=str(order['currency']))
             context.user_data["biz_flow"] = {"kind": "receipt", "order_id": int(order_id), "method_id": int(method_id)}
-            await update.callback_query.edit_message_text(f"پرداخت به: {method['destination']}\n{method.get('instructions') or ''}\nکد پیگیری یا عکس رسید را ارسال کنید.", reply_markup=_menu(spec, business)); return
+            await update.callback_query.edit_message_text(
+                f"پرداخت به: {method['destination']}\n"
+                f"{method.get('instructions') or ''}\n"
+                "کد پیگیری یا عکس رسید را ارسال کنید.",
+                reply_markup=_home_inline_markup(settings),
+            ); return
         if data == "shop:renewmenu":
             if not bool(settings.get("enable_renew", True)):
                 raise TenantBusinessError("renewal is disabled")
@@ -1374,8 +1668,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                             f"📄 کانفیگ‌های مستقیم #{item['id']}",
                             callback_data=f"shop:configs:{item['id']}",
                         )])
-            rows.extend(_menu(spec, business).inline_keyboard)
-            await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows)); return
+            rows.append([
+                InlineKeyboardButton("🏠 منو", callback_data="runtime:home")
+            ])
+            await update.callback_query.edit_message_text(
+                text,
+                reply_markup=InlineKeyboardMarkup(rows),
+            ); return
         if data.startswith("shop:configs:"):
             subscription_id = int(data.rsplit(":", 1)[1])
             configs = business.subscription_configs(
@@ -1692,7 +1991,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             faq = str(settings.get("faq_text") or "").strip()
             await update.callback_query.edit_message_text(
                 "📕 سوالات متداول\n" + (faq or "متنی تنظیم نشده است."),
-                reply_markup=_menu(spec, business),
+                reply_markup=_home_inline_markup(settings),
             )
             return
     except (ValueError, TenantBusinessError, PermissionError, sqlite3.IntegrityError):
@@ -1712,6 +2011,31 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     flow = context.user_data.get("biz_flow")
     text = str(update.effective_message.text or "").strip() if update.effective_message else ""
     try:
+        main_labels = {
+            BTN_STATUS,
+            BTN_RENEW,
+            BTN_BUY,
+            BTN_CONNECT,
+            BTN_TRIAL,
+            BTN_WALLET,
+            BTN_SUPPORT,
+            BTN_GUIDE,
+            BTN_FAQ,
+            BTN_REFERRAL,
+            BTN_GIFT,
+        }
+        if text in main_labels:
+            context.user_data.pop("biz_flow", None)
+            handled = await _handle_main_reply_action(
+                update,
+                context,
+                spec=spec,
+                business=business,
+                actor=actor,
+                text=text,
+            )
+            if handled:
+                return
         if isinstance(flow, dict):
             fields = [part.strip() for part in text.split("|")]
             kind = flow.get("kind")
@@ -1748,7 +2072,7 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 context.user_data.pop("biz_flow", None)
                 await update.effective_message.reply_text(
                     "✅ رسید شارژ کیف پول برای بررسی ارسال شد.",
-                    reply_markup=_menu(spec, business),
+                    reply_markup=_main_keyboard(spec, business),
                 )
                 return
             if kind == "coupon_apply":
@@ -1784,7 +2108,7 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     "✅ هدیه دریافت شد.\n"
                     f"🎁 مبلغ: {int(gift['amount']):,} {gift['currency']}\n"
                     f"💰 موجودی جدید: {int(gift['resulting_balance']):,} {gift['currency']}",
-                    reply_markup=_menu(spec, business),
+                    reply_markup=_main_keyboard(spec, business),
                 )
                 return
             if kind == "receipt":
@@ -1799,13 +2123,13 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             else:
                 raise ValueError("invalid input")
             context.user_data.pop("biz_flow", None)
-            await update.effective_message.reply_text("✅ ذخیره شد.", reply_markup=_menu(spec, business))
+            await update.effective_message.reply_text("✅ ذخیره شد.", reply_markup=_main_keyboard(spec, business))
             return
     except (ValueError, TenantBusinessError, PermissionError, sqlite3.IntegrityError):
-        await update.effective_message.reply_text("❌ قالب یا وضعیت معتبر نیست.", reply_markup=_menu(spec, business))
+        await update.effective_message.reply_text("❌ قالب یا وضعیت معتبر نیست.", reply_markup=_main_keyboard(spec, business))
         return
     if update.effective_message:
-        await update.effective_message.reply_text("از منوی ربات استفاده کنید.", reply_markup=_menu(spec, business))
+        await update.effective_message.reply_text("از منوی ربات استفاده کنید.", reply_markup=_main_keyboard(spec, business))
 
 
 async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1819,7 +2143,7 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not await _force_join_allowed(update, context, business):
         return
     if spec.role != "user" or not isinstance(flow, dict) or flow.get("kind") not in ("receipt", "wallet_receipt"):
-        await update.effective_message.reply_text("از منوی ربات استفاده کنید.", reply_markup=_menu(spec, business)); return
+        await update.effective_message.reply_text("از منوی ربات استفاده کنید.", reply_markup=_main_keyboard(spec, business)); return
     try:
         if flow.get("kind") == "wallet_receipt":
             business.submit_wallet_topup_receipt(
@@ -1834,9 +2158,9 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             business.submit_receipt(actor, order_id=int(flow['order_id']), method_id=int(flow['method_id']), reference=str(update.effective_message.caption or "").strip() or None, telegram_file_id=str(update.effective_message.photo[-1].file_id))
             success_text = "✅ تصویر رسید برای بررسی ارسال شد."
         context.user_data.pop("biz_flow", None)
-        await update.effective_message.reply_text(success_text, reply_markup=_menu(spec, business))
+        await update.effective_message.reply_text(success_text, reply_markup=_main_keyboard(spec, business))
     except (ValueError, TenantBusinessError, sqlite3.IntegrityError):
-        await update.effective_message.reply_text("❌ ثبت تصویر رسید انجام نشد.", reply_markup=_menu(spec, business))
+        await update.effective_message.reply_text("❌ ثبت تصویر رسید انجام نشد.", reply_markup=_main_keyboard(spec, business))
 
 
 
