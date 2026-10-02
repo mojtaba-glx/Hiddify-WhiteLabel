@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
+from TenantRuntime.AdminBot import handlers as admin_handlers
 from TenantRuntime.AdminBot import userbot_management as admin_userbot
 from TenantRuntime.UserBot import handlers as user_handlers
 from TenantRuntime.business import TenantBusinessError, TenantBusinessService
+from TenantRuntime.button_styles import set_button_settings
 
 
 def _service(conn, factories, cipher):
@@ -332,6 +335,58 @@ def test_colored_style_is_inside_final_inline_keyboard_payload() -> None:
     markup = user_handlers.InlineKeyboardMarkup([[button]])
     payload = markup.to_dict()
     assert payload["inline_keyboard"][0][0]["style"] == "success"
+
+
+def test_adminbot_inline_and_reply_buttons_serialize_native_styles() -> None:
+    set_button_settings(
+        {"colored_buttons": True, "button_theme": "smart"}
+    )
+    inline = admin_userbot.build_userbot_main_menu().to_dict()
+    assert inline["inline_keyboard"][0][0]["style"] == "primary"
+
+    reply = admin_handlers.admin_main_keyboard().to_dict()
+    first = reply["keyboard"][0][0]
+    assert first["style"] == "primary"
+
+    set_button_settings(
+        {"colored_buttons": True, "button_theme": "shop"}
+    )
+    cancel = admin_handlers.cancel_keyboard().to_dict()
+    assert cancel["keyboard"][0][0]["style"] == "danger"
+
+
+def test_userbot_legacy_reply_keyboard_is_removed_only_once() -> None:
+    class CleanupMessage:
+        def __init__(self):
+            self.deleted = 0
+
+        async def delete(self):
+            self.deleted += 1
+
+    class FakeChat:
+        def __init__(self):
+            self.calls = []
+            self.cleanup = CleanupMessage()
+
+        async def send_message(self, text, reply_markup=None):
+            self.calls.append((text, reply_markup))
+            return self.cleanup
+
+    chat = FakeChat()
+    update = SimpleNamespace(effective_chat=chat)
+    context = SimpleNamespace(user_data={})
+
+    asyncio.run(
+        user_handlers._remove_legacy_reply_keyboard(update, context)
+    )
+    asyncio.run(
+        user_handlers._remove_legacy_reply_keyboard(update, context)
+    )
+
+    assert len(chat.calls) == 1
+    assert chat.calls[0][0] == "\u2063"
+    assert chat.calls[0][1].__class__.__name__ == "ReplyKeyboardRemove"
+    assert chat.cleanup.deleted == 1
 
 
 def test_layout_helpers_make_columns_and_safe_config_items(monkeypatch) -> None:

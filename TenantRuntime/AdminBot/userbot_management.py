@@ -15,7 +15,7 @@ from io import BytesIO
 from typing import Any
 from urllib.parse import urlparse
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram import Bot, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ContextTypes
 
@@ -23,6 +23,11 @@ from Database.repositories import BotRepository
 from Shared.crypto import fingerprint_token
 from Shared.timeutils import iso_utc, utcnow
 from TenantRuntime.business import TenantBusinessError
+from TenantRuntime.button_styles import (
+    inline_button as InlineKeyboardButton,
+    keyboard_button as KeyboardButton,
+    set_button_settings,
+)
 
 PAGE_SIZE = 21
 FLOW_KEY = "userbot_admin_flow"
@@ -252,6 +257,26 @@ def _display_name(item: dict[str, Any]) -> str:
     if username:
         return f"@{username}"
     return str(item.get("display_name") or item.get("telegram_user_id") or item.get("id") or "کاربر")
+
+
+async def _refresh_admin_reply_keyboard(update: Update) -> None:
+    """Refresh the persistent AdminBot ReplyKeyboard after theme changes."""
+    chat = update.effective_chat
+    if chat is None:
+        return
+    try:
+        from TenantRuntime.AdminBot.handlers import admin_main_keyboard
+
+        message = await chat.send_message(
+            "\u2063",
+            reply_markup=admin_main_keyboard(),
+        )
+        try:
+            await message.delete()
+        except Exception:
+            pass
+    except Exception:
+        return
 
 
 async def _edit_or_send(update: Update, text: str, markup: InlineKeyboardMarkup | None = None, **kwargs: Any) -> None:
@@ -1511,6 +1536,7 @@ async def handle_callback(
     business: Any,
     actor: int,
 ) -> bool:
+    set_button_settings(business.runtime_userbot_settings())
     query = update.callback_query
     if query is None:
         return False
@@ -1917,14 +1943,23 @@ async def handle_callback(
     }
     if data in exact_toggles:
         key, section = exact_toggles[data]
-        business.toggle_userbot_setting_admin(actor, key=key)
+        updated_settings = business.toggle_userbot_setting_admin(
+            actor, key=key
+        )
+        set_button_settings(updated_settings)
         await _settings_section(update, business, actor, section)
+        if key == "colored_buttons":
+            await _refresh_admin_reply_keyboard(update)
         return True
 
     if data.startswith("userbot:settings:ui:theme:"):
         theme = data.rsplit(":", 1)[1]
-        business.set_userbot_setting_admin(actor, key="button_theme", value=theme)
+        updated_settings = business.set_userbot_setting_admin(
+            actor, key="button_theme", value=theme
+        )
+        set_button_settings(updated_settings)
         await _settings_section(update, business, actor, "ui")
+        await _refresh_admin_reply_keyboard(update)
         return True
 
     if data == "userbot:settings:texts:guide_menu":
@@ -2597,6 +2632,7 @@ async def handle_text(
     actor: int,
     admin_main_keyboard: Any,
 ) -> bool:
+    set_button_settings(business.runtime_userbot_settings())
     flow=context.user_data.get(FLOW_KEY)
     if not isinstance(flow,dict):
         return False
@@ -2951,6 +2987,7 @@ async def handle_media(
     actor: int,
     admin_main_keyboard: Any,
 ) -> bool:
+    set_button_settings(business.runtime_userbot_settings())
     flow=context.user_data.get(FLOW_KEY)
     if not isinstance(flow,dict):
         return False
@@ -3012,6 +3049,7 @@ async def handle_document(
     actor: int,
     admin_main_keyboard: Any,
 ) -> bool:
+    set_button_settings(business.runtime_userbot_settings())
     flow=context.user_data.get(FLOW_KEY)
     if isinstance(flow,dict) and flow.get("kind")=="broadcast" and str(flow.get("step") or "")=="wait_photo":
         return await handle_media(

@@ -14,6 +14,7 @@ from typing import Any
 from telegram import (
     InlineKeyboardButton as TelegramInlineKeyboardButton,
     InlineKeyboardMarkup,
+    ReplyKeyboardRemove,
     Update,
 )
 from telegram.ext import (
@@ -448,6 +449,34 @@ def _purchase_server_rows(
     )
 
 
+_LEGACY_REPLY_KEYBOARD_CLEANUP_KEY = "legacy_reply_keyboard_removed_v0132"
+
+
+async def _remove_legacy_reply_keyboard(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Remove the persistent ReplyKeyboard left by pre-inline UserBot versions."""
+    if bool(context.user_data.get(_LEGACY_REPLY_KEYBOARD_CLEANUP_KEY)):
+        return
+    chat = update.effective_chat
+    if chat is None:
+        return
+    try:
+        cleanup = await chat.send_message(
+            "\u2063",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        context.user_data[_LEGACY_REPLY_KEYBOARD_CLEANUP_KEY] = True
+        try:
+            await cleanup.delete()
+        except Exception:
+            pass
+    except Exception:
+        # Failure to clean an old client-side keyboard must never block UserBot.
+        return
+
+
 def _menu(spec: RuntimeBotSpec, business) -> InlineKeyboardMarkup:
     """Build the customer main menu with SellBot-compatible navigation.
 
@@ -544,6 +573,7 @@ def _menu(spec: RuntimeBotSpec, business) -> InlineKeyboardMarkup:
 
 
 async def _force_join_allowed(update: Update, context: ContextTypes.DEFAULT_TYPE, business) -> bool:
+    await _remove_legacy_reply_keyboard(update, context)
     settings = _set_button_settings(business.runtime_userbot_settings())
     if not bool(settings.get("force_join_enabled", False)):
         return True
@@ -584,6 +614,7 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     spec, _, state_store, business = _services(context)
     if spec.role != "user":
         raise RuntimeError("UserBot handler registered for non-user role")
+    await _remove_legacy_reply_keyboard(update, context)
     user_id = int(update.effective_user.id) if update.effective_user else 0
     if not await _force_join_allowed(update, context, business):
         return
@@ -637,6 +668,7 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     spec, policy, state_store, business = _services(context)
+    await _remove_legacy_reply_keyboard(update, context)
     if spec.role != "user":
         raise RuntimeError("UserBot handler registered for non-user role")
     user_id = int(update.effective_user.id) if update.effective_user else 0
