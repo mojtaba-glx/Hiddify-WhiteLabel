@@ -190,46 +190,15 @@ def _button(
 
 
 def _menu(spec: RuntimeBotSpec, business) -> InlineKeyboardMarkup:
+    """Build the customer main menu with SellBot-compatible navigation.
+
+    Visibility switches are read at render time, so an AdminBot change is
+    reflected on the next UserBot screen without restarting the tenant worker.
+    """
     settings = business.runtime_userbot_settings()
     growth = business._ensure_growth_settings()
-    rows = []
-    first = []
-    if bool(settings.get("enable_buy", True)):
-        first.append(_button("💳خرید اشتراک", callback_data="shop:buy", settings=settings))
-    first.append(_button("📦 اشتراک‌های من", callback_data="shop:subs", settings=settings))
-    if first:
-        rows.append(first)
-    if (
-        bool(settings.get("enable_renew", True))
-        and bool(settings.get("show_renew_in_main_menu", True))
-    ):
-        rows.append([
-            _button(
-                "♾تمدید اشتراک",
-                callback_data="shop:renewmenu",
-                settings=settings,
-            )
-        ])
-    rows.append([
-        _button("👤 حساب من", callback_data="shop:account", settings=settings),
-        _button("🧾 سفارش‌های من", callback_data="shop:orders", settings=settings),
-    ])
-    referral_row = [_button("💰 کیف پول", callback_data="shop:wallet", settings=settings)]
-    if bool(growth.get("referral_enabled")):
-        referral_row.append(_button("🤝 دعوت دوستان", callback_data="shop:referral", settings=settings))
-    rows.append(referral_row)
-    support_row = []
-    if bool(growth.get("trial_enabled")):
-        support_row.append(_button("🔥تست رایگان", callback_data="shop:trial", settings=settings))
-    support_row.append(_button("📩پشتیبانی", callback_data="shop:tickets", settings=settings))
-    rows.append(support_row)
-    if bool(settings.get("show_gift_button", True)):
-        rows.append([_button("🎁 دریافت هدیه", callback_data="shop:gift", settings=settings)])
-    help_row = [_button("💡راهنما", callback_data="shop:guide", settings=settings)]
-    if str(settings.get("faq_text") or "").strip():
-        help_row.append(_button("❓سوالات متداول", callback_data="shop:faq", settings=settings))
-    rows.append(help_row)
-    rows.append([_button("🏠 منو", callback_data="runtime:home", settings=settings)])
+    rows: list[list[InlineKeyboardButton]] = []
+
     if bool(settings.get("show_user_status", True)):
         rows.append([
             _button(
@@ -238,6 +207,80 @@ def _menu(spec: RuntimeBotSpec, business) -> InlineKeyboardMarkup:
                 settings=settings,
             )
         ])
+
+    commerce_row: list[InlineKeyboardButton] = []
+    if (
+        bool(settings.get("enable_renew", True))
+        and bool(settings.get("show_renew_in_main_menu", True))
+    ):
+        commerce_row.append(
+            _button(
+                "♾تمدید اشتراک",
+                callback_data="shop:renewmenu",
+                settings=settings,
+            )
+        )
+    if bool(settings.get("enable_buy", True)):
+        commerce_row.append(
+            _button(
+                "💳خرید اشتراک",
+                callback_data="shop:buy",
+                settings=settings,
+            )
+        )
+    if commerce_row:
+        rows.append(commerce_row)
+
+    rows.append([
+        _button(
+            "🔗اتصال اشتراک",
+            callback_data="shop:connect",
+            settings=settings,
+        )
+    ])
+
+    wallet_row: list[InlineKeyboardButton] = []
+    if bool(growth.get("trial_enabled")):
+        wallet_row.append(
+            _button(
+                "🔥تست رایگان",
+                callback_data="shop:trial",
+                settings=settings,
+            )
+        )
+    wallet_row.append(
+        _button(
+            "💰کیف پول",
+            callback_data="shop:wallet",
+            settings=settings,
+        )
+    )
+    rows.append(wallet_row)
+
+    rows.append([
+        _button("📩پشتیبانی", callback_data="shop:tickets", settings=settings),
+        _button("📚راهنما", callback_data="shop:guide", settings=settings),
+        _button("❗️سوالات متداول", callback_data="shop:faq", settings=settings),
+    ])
+
+    if bool(growth.get("referral_enabled")):
+        rows.append([
+            _button(
+                "💌دعوت دوستان",
+                callback_data="shop:referral",
+                settings=settings,
+            )
+        ])
+
+    if bool(settings.get("show_gift_button", True)):
+        rows.append([
+            _button(
+                "🎁دریافت هدیه",
+                callback_data="shop:gift",
+                settings=settings,
+            )
+        ])
+
     return InlineKeyboardMarkup(rows)
 
 
@@ -669,6 +712,75 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.callback_query.edit_message_text(
                 "♾ تمدید اشتراک\nاشتراک موردنظر را انتخاب کنید:",
                 reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+        if data == "shop:connect":
+            items = [
+                item
+                for item in business.list_subscriptions(actor)
+                if item.get("status") == "active"
+                and item.get("external_ref")
+                and item.get("server_id")
+            ]
+            rows: list[list[InlineKeyboardButton]] = []
+            for item in items:
+                subscription_id = int(item["id"])
+                title = str(item.get("plan_name") or f"اشتراک #{subscription_id}")
+                action_row: list[InlineKeyboardButton] = []
+                if (
+                    bool(settings.get("show_user_page_link", True))
+                    and (
+                        bool(settings.get("show_sub_link", True))
+                        or bool(settings.get("show_smart_link", True))
+                    )
+                ):
+                    try:
+                        link = business.subscription_link(
+                            actor, subscription_id=subscription_id
+                        )
+                    except TenantBusinessError:
+                        link = ""
+                    if link:
+                        action_row.append(
+                            _button(
+                                f"🔗 {title}",
+                                url=link,
+                                settings=settings,
+                            )
+                        )
+                if bool(settings.get("show_direct_config", True)):
+                    action_row.append(
+                        _button(
+                            f"📄 کانفیگ #{subscription_id}",
+                            callback_data=f"shop:configs:{subscription_id}",
+                            settings=settings,
+                        )
+                    )
+                if action_row:
+                    rows.append(action_row)
+
+            if not rows:
+                rows.append([
+                    InlineKeyboardButton(
+                        "اشتراک فعالی برای اتصال وجود ندارد",
+                        callback_data="noop",
+                    )
+                ])
+            rows.append([
+                InlineKeyboardButton(
+                    "📦 اشتراک‌های من",
+                    callback_data="shop:subs",
+                )
+            ])
+            rows.append([
+                InlineKeyboardButton("🔙بازگشت", callback_data="runtime:home")
+            ])
+            await update.callback_query.edit_message_text(
+                "🔗 اتصال اشتراک\n"
+                "اشتراک موردنظر را انتخاب کنید. برای اتصال مستقیم، لینک یا "
+                "کانفیگ همان سرویس را باز کنید:",
+                reply_markup=InlineKeyboardMarkup(rows),
+                disable_web_page_preview=True,
             )
             return
         if data == "shop:subs":
