@@ -4229,6 +4229,7 @@ class TenantBusinessService:
                     duration_days=panel_duration_days,
                     expires_at=expires_at,
                     reset_usage=reset_usage,
+                    reset_time=clean_time_mode == "reset",
                     idempotency_key=base_key,
                 ),
             )
@@ -4305,6 +4306,7 @@ class TenantBusinessService:
                         duration_days=panel_duration_days,
                         expires_at=expires_at,
                         reset_usage=reset_usage,
+                        reset_time=clean_time_mode == "reset",
                         idempotency_key=(
                             f"{base_key}:server:{int(row['server_id'])}"
                             if base_key
