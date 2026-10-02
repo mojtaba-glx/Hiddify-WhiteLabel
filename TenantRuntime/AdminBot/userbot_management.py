@@ -129,10 +129,10 @@ def build_users_search_menu_keyboard() -> InlineKeyboardMarkup:
 
 def build_payments_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅لیست تراکنشات تایید شده", callback_data="userbot:payments:list:approved:1")],
-        [InlineKeyboardButton("🚫لیست تراکنشات رد شده", callback_data="userbot:payments:list:rejected:1")],
-        [InlineKeyboardButton("⏳لیست تراکنشات در انتظار", callback_data="userbot:payments:list:pending:1")],
-        [InlineKeyboardButton("💳لیست تراکنشات کارت به کارت", callback_data="userbot:payments:list:card:1")],
+        [InlineKeyboardButton("✅لیست تراکنشات تایید شده", callback_data="userbot:payments:list:approved")],
+        [InlineKeyboardButton("🚫لیست تراکنشات رد شده", callback_data="userbot:payments:list:rejected")],
+        [InlineKeyboardButton("⏳لیست تراکنشات در انتظار", callback_data="userbot:payments:list:pending")],
+        [InlineKeyboardButton("💳لیست تراکنشات کارت به کارت", callback_data="userbot:payments:list:card")],
         [InlineKeyboardButton("🔍جستجوی تراکنش", callback_data="userbot:payments:search")],
         [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:menu")],
     ])
@@ -327,6 +327,79 @@ async def _send_user_profile(update: Update, business: Any, actor: int, customer
         _user_profile_text(business, actor, customer_id),
         _user_profile_keyboard(customer_id, back=back),
     )
+
+
+async def _send_service_detail(
+    update: Update,
+    business: Any,
+    actor: int,
+    subscription_id: int,
+) -> None:
+    item = business.subscription_admin(actor, subscription_id=int(subscription_id))
+    usage = int(item.get("usage_bytes") or 0) / (1024 ** 3)
+    limit = int(item.get("traffic_bytes") or 0) / (1024 ** 3)
+    status = str(item.get("status") or "")
+    status_text = {
+        "active": "🟢وضعیت حساب: فعال",
+        "disabled": "⚫وضعیت حساب: غیرفعال",
+        "expired": "🔴وضعیت حساب: منقضی",
+        "pending_provisioning": "🟡وضعیت حساب: در انتظار ساخت",
+    }.get(status, f"وضعیت: {status}")
+    text = (
+        f"👤 کاربر:  {item.get('display_name') or 'کاربر'}\n"
+        "❖⬩╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍⬩❖\n"
+        f"⬖ سرور:  {item.get('server_label') or 'ثبت نشده'}\n"
+        f"📊مصرف: {usage:.2f} از {limit:.2f} گیگابایت\n"
+        f"📆انقضا: {item.get('expires_at') or 'نامشخص'}\n"
+        f"{status_text}\n"
+        f"📶آخرین اتصال: {item.get('last_online') or 'ثبت نشده'}\n"
+        f"📝یادداشت: —\n"
+        f"🔑 شناسه سرویس: {int(item['id'])}"
+    )
+    customer_id = int(item["customer_id"])
+    if status == "pending_provisioning":
+        rows = [
+            [InlineKeyboardButton(
+                "🔁 تلاش ساخت/تحویل",
+                callback_data=f"biz:fulfill:{int(item['order_id'])}",
+            )],
+            [InlineKeyboardButton(
+                "🗑 پاک‌سازی رکورد شروع‌نشده",
+                callback_data=f"search:drop:{subscription_id}",
+            )],
+            [InlineKeyboardButton(
+                "📋بازگشت به سرویس‌ها",
+                callback_data=f"userbot:user:{customer_id}:services",
+            )],
+        ]
+    else:
+        rows = [
+            [InlineKeyboardButton(
+                "📄کانفیگ ها",
+                callback_data=f"userbot:svc:{subscription_id}:configs",
+            )],
+            [InlineKeyboardButton(
+                "✏️ویرایش کاربر",
+                callback_data=f"search:edit:{subscription_id}",
+            )],
+            [InlineKeyboardButton(
+                "∞تمدید اشتراک",
+                callback_data=f"search:renew:{subscription_id}",
+            )],
+            [InlineKeyboardButton(
+                "🗑حذف کاربر",
+                callback_data=f"search:delete:{subscription_id}",
+            )],
+            [InlineKeyboardButton(
+                "👤پروفایل کاربر",
+                callback_data=f"userbot:user:{customer_id}",
+            )],
+            [InlineKeyboardButton(
+                "📋بازگشت به سرویس‌ها",
+                callback_data=f"userbot:user:{customer_id}:services",
+            )],
+        ]
+    await _edit_or_send(update, text, InlineKeyboardMarkup(rows))
 
 
 def _orders_stats(items: list[dict[str, Any]]) -> tuple[int, int, dict[str, int]]:
@@ -1376,6 +1449,37 @@ async def handle_callback(
         )
         return True
 
+    if data.startswith("userbot:svc:"):
+        parts = data.split(":")
+        subscription_id = int(parts[2])
+        if len(parts) == 3:
+            await _send_service_detail(
+                update, business, actor, subscription_id
+            )
+            return True
+        action = parts[3]
+        if action == "configs":
+            item = business.subscription_admin(
+                actor, subscription_id=subscription_id
+            )
+            link = business.admin_subscription_link(
+                actor, subscription_id=subscription_id
+            )
+            await _edit_or_send(
+                update,
+                "📄کانفیگ ها\n\n"
+                f"👤 {item.get('display_name') or 'کاربر'}\n"
+                f"🔗 لینک اشتراک:\n{link}",
+                InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "🔙بازگشت",
+                        callback_data=f"userbot:svc:{subscription_id}",
+                    )
+                ]]),
+                disable_web_page_preview=True,
+            )
+            return True
+
     if data.startswith("userbot:user:"):
         parts = data.split(":")
         customer_id = int(parts[2])
@@ -1383,13 +1487,23 @@ async def handle_callback(
             await _send_user_profile(update,business,actor,customer_id); return True
         action = parts[3]
         if action == "services":
-            items = business.subscriptions_for_customer_admin(actor, customer_id=customer_id)
+            items = business.subscriptions_for_customer_admin(
+                actor, customer_id=customer_id
+            )
             rows = [[InlineKeyboardButton(
                 f"📦 #{x['id']} · {x['plan_name']} · {x['status']}",
-                callback_data=f"search:sel:{int(x['id'])}",
+                callback_data=f"userbot:svc:{int(x['id'])}",
             )] for x in items]
-            rows.append([InlineKeyboardButton("👤بازگشت به پروفایل", callback_data=f"userbot:user:{customer_id}")])
-            await _edit_or_send(update, f"📋 لیست سرویس‌ها\nتعداد: {len(items)}", InlineKeyboardMarkup(rows)); return True
+            rows.append([InlineKeyboardButton(
+                "👤بازگشت به پروفایل",
+                callback_data=f"userbot:user:{customer_id}",
+            )])
+            await _edit_or_send(
+                update,
+                f"📋 لیست سرویس‌ها\nتعداد: {len(items)}",
+                InlineKeyboardMarkup(rows),
+            )
+            return True
         if action == "orders":
             items = business.customer_orders_admin(actor, customer_id=customer_id)
             rows = [[InlineKeyboardButton(f"#{x['id']} · {x['status']}", callback_data=f"userbot:order:{int(x['id'])}")] for x in items[:50]]
