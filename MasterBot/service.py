@@ -347,6 +347,10 @@ class MasterService:
         )
         return Page(items[:page_size], page, page_size, page > 0, len(items) > page_size)
 
+    def list_active_plans(self, actor_id: int) -> list[dict[str, Any]]:
+        self.authorize(actor_id)
+        return PlanRepository(self.conn).list_active()
+
     def get_plan(self, actor_id: int, plan_id: int) -> dict[str, Any]:
         self.authorize(actor_id)
         row = PlanRepository(self.conn).get_by_id(int(plan_id))

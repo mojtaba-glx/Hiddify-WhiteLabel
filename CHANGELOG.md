@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.10.1 — License Assignment Picker
+
+- Replaced manual Telegram-ID entry during license creation with explicit tenant selection buttons.
+- Tenant buttons display the internal tenant ID and name, so multiple customer bots may safely share the same Telegram owner ID.
+- After choosing a tenant, only active license plans are shown as buttons; the selected plan then proceeds to the grace-period step.
+- Added regression coverage for two tenants sharing the same owner Telegram ID and issuing a license to the intended tenant.
+- Promoted versioning from release-candidate suffixes to normal patch releases.
+
 ## v0.10.0-rc.3 — Guided Flow Input Fixes
 
 - License creation now resolves the customer/shop using the owner's numeric Telegram ID instead of incorrectly treating that value as the internal tenant database ID.

@@ -176,6 +176,106 @@ async def _remove_flow_keyboard(update: Update, text: str = "✅ انجام شد
         )
 
 
+async def _show_license_tenant_picker(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    page_number: int = 0,
+) -> None:
+    actor = int(_actor_id(update) or 0)
+    page = _service(context).list_tenants(
+        actor, page=page_number, page_size=8
+    )
+    rows: list[list[InlineKeyboardButton]] = []
+    for tenant in page.items:
+        rows.append([
+            InlineKeyboardButton(
+                f"🤖 #{int(tenant['id'])} · {str(tenant['name'])[:28]}",
+                callback_data=f"license:new:tenant:{int(tenant['id'])}",
+            )
+        ])
+    nav: list[InlineKeyboardButton] = []
+    if page.has_previous:
+        nav.append(
+            InlineKeyboardButton(
+                "⬅️",
+                callback_data=f"license:new:tenant-page:{page.page - 1}",
+            )
+        )
+    if page.has_next:
+        nav.append(
+            InlineKeyboardButton(
+                "➡️",
+                callback_data=f"license:new:tenant-page:{page.page + 1}",
+            )
+        )
+    if nav:
+        rows.append(nav)
+    if not rows:
+        rows.append([
+            InlineKeyboardButton(
+                "↩️ لایسنس‌ها",
+                callback_data="flow:cancel:licenses",
+            )
+        ])
+    text = (
+        "👤 مشتری/رباتی که می‌خواهید لایسنس برایش صادر شود را انتخاب کنید:"
+        if page.items
+        else "❌ هنوز مشتری‌ای ثبت نشده است. ابتدا یک ربات مشتری ایجاد کنید."
+    )
+    keyboard = InlineKeyboardMarkup(rows)
+    if update.callback_query is not None:
+        await update.callback_query.edit_message_text(
+            text=text, reply_markup=keyboard
+        )
+    elif update.effective_chat is not None:
+        await update.effective_chat.send_message(
+            text, reply_markup=keyboard
+        )
+
+
+async def _show_license_plan_picker(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    tenant: dict[str, Any],
+) -> None:
+    actor = int(_actor_id(update) or 0)
+    plans = _service(context).list_active_plans(actor)
+    rows: list[list[InlineKeyboardButton]] = []
+    for plan in plans:
+        rows.append([
+            InlineKeyboardButton(
+                f"📦 #{int(plan['id'])} · {str(plan['name'])[:24]} · "
+                f"{int(plan['duration_days'])} روز",
+                callback_data=f"license:new:plan:{int(plan['id'])}",
+            )
+        ])
+    rows.append([
+        InlineKeyboardButton(
+            "⬅️ تغییر مشتری",
+            callback_data="license:new:tenant-page:0",
+        )
+    ])
+    text = (
+        f"✅ مشتری انتخاب شد: {tenant['name']} (#{int(tenant['id'])})\n\n"
+        + (
+            "📦 پلن لایسنس را انتخاب کنید:"
+            if plans
+            else "❌ هیچ پلن فعالی وجود ندارد. ابتدا یک پلن فعال بسازید."
+        )
+    )
+    keyboard = InlineKeyboardMarkup(rows)
+    if update.callback_query is not None:
+        await update.callback_query.edit_message_text(
+            text=text, reply_markup=keyboard
+        )
+    elif update.effective_chat is not None:
+        await update.effective_chat.send_message(
+            text, reply_markup=keyboard
+        )
+
+
 async def _show_orders(
     update: Update, context: ContextTypes.DEFAULT_TYPE, page_number: int = 0
 ) -> None:
@@ -795,7 +895,53 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             }
             await _prompt_flow(
                 update,
-                "👤 شناسه عددی تلگرام مالک فروشگاه را وارد کنید:",
+                "برای خروج از ساخت لایسنس، «❌ لغو» را بزنید.",
+            )
+            await _show_license_tenant_picker(update, context)
+            return
+        if data.startswith("license:new:tenant-page:"):
+            flow = context.user_data.get("flow")
+            if not isinstance(flow, dict) or not str(flow.get("kind") or "").startswith(
+                "license_new_"
+            ):
+                raise ValueError("license creation flow expired")
+            page_number = _parse_int(data.rsplit(":", 1)[1], "page")
+            flow["kind"] = "license_new_tenant"
+            flow.pop("tenant_id", None)
+            flow.pop("plan_id", None)
+            await _show_license_tenant_picker(
+                update, context, page_number=page_number
+            )
+            return
+        if data.startswith("license:new:tenant:"):
+            flow = context.user_data.get("flow")
+            if not isinstance(flow, dict) or str(flow.get("kind") or "") != "license_new_tenant":
+                raise ValueError("license tenant selection expired")
+            tenant_id = _parse_int(data.rsplit(":", 1)[1], "tenant id")
+            tenant = service.get_tenant(actor, tenant_id)
+            flow["tenant_id"] = tenant_id
+            flow["kind"] = "license_new_plan"
+            await _show_license_plan_picker(
+                update, context, tenant=tenant
+            )
+            return
+        if data.startswith("license:new:plan:"):
+            flow = context.user_data.get("flow")
+            if not isinstance(flow, dict) or str(flow.get("kind") or "") != "license_new_plan":
+                raise ValueError("license plan selection expired")
+            plan_id = _parse_int(data.rsplit(":", 1)[1], "plan id")
+            plan = service.get_plan(actor, plan_id)
+            if str(plan.get("status") or "") != "active":
+                raise ValueError("plan must be active")
+            tenant = service.get_tenant(actor, int(flow["tenant_id"]))
+            flow["plan_id"] = plan_id
+            flow["kind"] = "license_new_grace"
+            await query.edit_message_text(
+                "✅ مشتری: "
+                f"{tenant['name']} (#{int(tenant['id'])})\n"
+                f"✅ پلن: {plan['name']} · {int(plan['duration_days'])} روز\n\n"
+                "⏱ تعداد روز مهلت بعد از پایان لایسنس را وارد کنید.\n"
+                "برای بدون مهلت، 0 بفرستید:"
             )
             return
         if data == "license:search":
@@ -1382,37 +1528,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data.pop("flow", None)
             await _show_settings(update, context)
             return
-        if kind == "license_new_tenant":
-            owner_telegram_id = _parse_int(text, "owner Telegram id")
-            if owner_telegram_id <= 0:
-                raise ValueError("owner Telegram id must be positive")
-            tenant = service.get_tenant_by_owner_telegram_id(
-                actor, owner_telegram_id
-            )
-            tenant_id = int(tenant["id"])
-            flow["tenant_id"] = tenant_id
-            flow["owner_telegram_id"] = owner_telegram_id
-            flow["kind"] = "license_new_plan"
+        if kind in ("license_new_tenant", "license_new_plan"):
             await update.effective_message.reply_text(
-                f"✅ فروشگاه انتخاب شد: {tenant['name']}\n"
-                f"👤 شناسه تلگرام: {owner_telegram_id}\n\n"
-                "📦 شناسه عددی پلن را وارد کنید:",
-                reply_markup=_flow_cancel_keyboard(),
-            )
-            return
-        if kind == "license_new_plan":
-            plan_id = _parse_int(text, "plan id")
-            if plan_id <= 0:
-                raise ValueError("plan id must be positive")
-            plan = service.get_plan(actor, plan_id)
-            if str(plan.get("status") or "") != "active":
-                raise ValueError("plan must be active")
-            flow["plan_id"] = plan_id
-            flow["kind"] = "license_new_grace"
-            await update.effective_message.reply_text(
-                f"✅ پلن انتخاب شد: {plan['name']} · {int(plan['duration_days'])} روز\n\n"
-                "⏱ تعداد روز مهلت بعد از پایان لایسنس را وارد کنید.\n"
-                "برای بدون مهلت، 0 بفرستید:",
+                "👆 مشتری و پلن را فقط با دکمه‌های پیام بالا انتخاب کنید.",
                 reply_markup=_flow_cancel_keyboard(),
             )
             return

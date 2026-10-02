@@ -40,6 +40,21 @@ def _update(text: str):
     )
 
 
+def _callback_update(data: str):
+    query = SimpleNamespace(
+        data=data,
+        answer=AsyncMock(),
+        edit_message_text=AsyncMock(),
+    )
+    chat = SimpleNamespace(send_message=AsyncMock())
+    return SimpleNamespace(
+        effective_user=SimpleNamespace(id=9001),
+        effective_message=None,
+        effective_chat=chat,
+        callback_query=query,
+    )
+
+
 def test_staged_full_provision_keeps_only_encrypted_admin_draft(conn) -> None:
     verifier = MutableVerifier()
     service = MasterService(
@@ -131,7 +146,7 @@ def test_failed_second_token_leaves_no_partial_tenant(conn) -> None:
     assert conn.execute("SELECT COUNT(*) FROM tenant_bots").fetchone()[0] == 0
 
 
-def test_license_flow_accepts_owner_telegram_id_and_uses_bottom_cancel_keyboard(conn) -> None:
+def test_license_flow_uses_tenant_and_plan_buttons_with_duplicate_owner_ids(conn) -> None:
     verifier = MutableVerifier()
     service = MasterService(
         conn,
@@ -139,38 +154,74 @@ def test_license_flow_accepts_owner_telegram_id_and_uses_bottom_cancel_keyboard(
         cipher=FernetTokenCipher(generate_key()),
         bot_verifier=verifier,
     )
-    tenant = service.create_tenant(
+    first = service.create_tenant(
         9001,
-        name="Speed Test",
-        slug="speed-test",
+        name="Test",
+        slug="test-one",
+        owner_telegram_id=6119169885,
+    )
+    second = service.create_tenant(
+        9001,
+        name="Test Two",
+        slug="test-two",
         owner_telegram_id=6119169885,
     )
     plan = service.create_plan(
         9001,
-        name="Silver",
+        name="Panel Test",
         duration_days=30,
-        price=100,
+        price=0,
         max_servers=3,
-        max_users=2,
+        max_users=500,
     )
     context = SimpleNamespace(
         application=SimpleNamespace(bot_data={"master_service": service}),
-        user_data={"flow": {"kind": "license_new_tenant", "cancel_target": "licenses"}},
+        user_data={},
     )
 
-    owner_update = _update("6119169885")
-    asyncio.run(on_text(owner_update, context))
-    assert context.user_data["flow"]["kind"] == "license_new_plan"
-    assert int(context.user_data["flow"]["tenant_id"]) == int(tenant["id"])
-    owner_markup = owner_update.effective_message.reply_text.await_args.kwargs["reply_markup"]
-    assert isinstance(owner_markup, ReplyKeyboardMarkup)
-    assert owner_markup.keyboard[0][0].text == "❌ لغو"
+    start_update = _callback_update("license:new")
+    asyncio.run(on_callback(start_update, context))
+    assert context.user_data["flow"]["kind"] == "license_new_tenant"
+    assert context.user_data["flow"]["cancel_target"] == "licenses"
+    start_update.effective_chat.send_message.assert_awaited_once()
+    cancel_markup = start_update.effective_chat.send_message.await_args.kwargs["reply_markup"]
+    assert isinstance(cancel_markup, ReplyKeyboardMarkup)
+    assert cancel_markup.keyboard[0][0].text == "❌ لغو"
+    picker_markup = start_update.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+    picker_callbacks = [
+        button.callback_data
+        for row in picker_markup.inline_keyboard
+        for button in row
+    ]
+    assert f"license:new:tenant:{int(first['id'])}" in picker_callbacks
+    assert f"license:new:tenant:{int(second['id'])}" in picker_callbacks
 
-    asyncio.run(on_text(_update(str(plan["id"])), context))
+    tenant_update = _callback_update(f"license:new:tenant:{int(first['id'])}")
+    asyncio.run(on_callback(tenant_update, context))
+    assert context.user_data["flow"]["kind"] == "license_new_plan"
+    assert int(context.user_data["flow"]["tenant_id"]) == int(first["id"])
+    plan_markup = tenant_update.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+    plan_callbacks = [
+        button.callback_data
+        for row in plan_markup.inline_keyboard
+        for button in row
+    ]
+    assert f"license:new:plan:{int(plan['id'])}" in plan_callbacks
+
+    plan_update = _callback_update(f"license:new:plan:{int(plan['id'])}")
+    asyncio.run(on_callback(plan_update, context))
+    assert context.user_data["flow"]["kind"] == "license_new_grace"
+    assert int(context.user_data["flow"]["plan_id"]) == int(plan["id"])
+
     final_update = _update("0")
     asyncio.run(on_text(final_update, context))
     assert "flow" not in context.user_data
-    assert conn.execute("SELECT COUNT(*) FROM licenses").fetchone()[0] == 1
+    license_row = conn.execute(
+        "SELECT tenant_id, plan_id, status FROM licenses"
+    ).fetchone()
+    assert int(license_row["tenant_id"]) == int(first["id"])
+    assert int(license_row["plan_id"]) == int(plan["id"])
+    assert license_row["status"] == "active"
     remove_calls = [
         call for call in final_update.effective_chat.send_message.await_args_list
         if isinstance(call.kwargs.get("reply_markup"), ReplyKeyboardRemove)
