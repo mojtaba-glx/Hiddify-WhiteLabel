@@ -244,6 +244,141 @@ def test_user_status_visibility_is_functional(
     )
 
 
+def test_colored_button_themes_apply_to_all_userbot_buttons() -> None:
+    smart = user_handlers.InlineKeyboardButton(
+        "💳 خرید اشتراک",
+        callback_data="shop:buy",
+        settings={"colored_buttons": True, "button_theme": "smart"},
+    )
+    assert smart.api_kwargs.get("style") == "success"
+
+    shop = user_handlers.InlineKeyboardButton(
+        "💰 کیف پول",
+        callback_data="shop:wallet",
+        settings={"colored_buttons": True, "button_theme": "shop"},
+    )
+    assert shop.api_kwargs.get("style") == "success"
+
+    pro = user_handlers.InlineKeyboardButton(
+        "📊 وضعیت اشتراک",
+        callback_data="runtime:status",
+        settings={"colored_buttons": True, "button_theme": "pro"},
+    )
+    assert pro.api_kwargs.get("style") == "primary"
+
+    minimal = user_handlers.InlineKeyboardButton(
+        "💳 خرید اشتراک",
+        callback_data="shop:buy",
+        settings={"colored_buttons": True, "button_theme": "minimal"},
+    )
+    assert "style" not in minimal.api_kwargs
+
+    danger = user_handlers.InlineKeyboardButton(
+        "❌ لغو",
+        callback_data="shop:cancel",
+        settings={"colored_buttons": True, "button_theme": "minimal"},
+    )
+    assert danger.api_kwargs.get("style") == "danger"
+
+    plain = user_handlers.InlineKeyboardButton(
+        "💳 خرید اشتراک",
+        callback_data="shop:buy",
+        settings={"colored_buttons": False, "button_theme": "shop"},
+    )
+    assert "style" not in plain.api_kwargs
+
+
+def test_userbot_button_context_styles_direct_buttons() -> None:
+    user_handlers._set_button_settings(
+        {"colored_buttons": True, "button_theme": "shop"}
+    )
+    button = user_handlers.InlineKeyboardButton(
+        "🎁 دریافت هدیه",
+        callback_data="shop:gift",
+    )
+    assert button.api_kwargs.get("style") == "success"
+
+    user_handlers._set_button_settings(
+        {"colored_buttons": False, "button_theme": "shop"}
+    )
+    plain = user_handlers.InlineKeyboardButton(
+        "🎁 دریافت هدیه",
+        callback_data="shop:gift",
+    )
+    assert "style" not in plain.api_kwargs
+
+
+def test_layout_helpers_make_columns_and_safe_config_items(monkeypatch) -> None:
+    buttons = [
+        user_handlers.TelegramInlineKeyboardButton(str(i), callback_data=f"x:{i}")
+        for i in range(5)
+    ]
+    rows = user_handlers._column_rows(buttons, 3)
+    assert [len(row) for row in rows] == [3, 2]
+
+    calls = []
+
+    def reverse(items):
+        calls.append(len(items))
+        items.reverse()
+
+    monkeypatch.setattr(user_handlers.random, "shuffle", reverse)
+    ordered = user_handlers._ordered_indexed(
+        ["a", "b", "c"], shuffle_enabled=True
+    )
+    assert [index for index, _item in ordered] == [2, 1, 0]
+    assert calls == [3]
+
+    configs = user_handlers._extract_config_items(
+        "vless://one\nvmess://two\ntrojan://three"
+    )
+    assert configs == ["vless://one", "vmess://two", "trojan://three"]
+
+    opaque = user_handlers._extract_config_items("YWJjZGVmZw==\nmetadata")
+    assert opaque == ["YWJjZGVmZw==\nmetadata"]
+
+
+def test_plan_server_and_config_layout_settings_are_runtime_wired() -> None:
+    runtime = open(
+        "TenantRuntime/UserBot/handlers.py",
+        encoding="utf-8",
+    ).read()
+    assert 'settings.get("plan_columns")' in runtime
+    assert 'settings.get("server_columns")' in runtime
+    assert 'settings.get("shuffle_server_layout", True)' in runtime
+    assert 'settings.get("shuffle_configs", True)' in runtime
+    assert 'settings.get("shuffle_config_layout", True)' in runtime
+    assert 'data.startswith("shop:configserver:")' in runtime
+    assert 'data.startswith("shop:configitem:")' in runtime
+
+
+def test_layout_column_settings_reject_out_of_range(
+    conn, factories, cipher
+) -> None:
+    _tenant, service = _service(conn, factories, cipher)
+    service.set_userbot_setting_admin(7001, key="plan_columns", value=3)
+    service.set_userbot_setting_admin(7001, key="server_columns", value=3)
+    with pytest.raises(ValueError):
+        service.set_userbot_setting_admin(7001, key="plan_columns", value=4)
+    with pytest.raises(ValueError):
+        service.set_userbot_setting_admin(7001, key="server_columns", value=4)
+
+
+def test_admin_theme_screen_has_all_four_themes() -> None:
+    source = open(
+        "TenantRuntime/AdminBot/userbot_management.py",
+        encoding="utf-8",
+    ).read()
+    for label in (
+        "✨ هوشمند",
+        "🛒 فروشگاهی",
+        "💼 حرفه‌ای",
+        "🕊 مینیمال",
+        "رنگی بودن دکمه‌ها",
+    ):
+        assert label in source
+
+
 def test_deep_settings_callbacks_are_wired_to_real_runtime() -> None:
     source = open(
         "TenantRuntime/AdminBot/userbot_management.py",
