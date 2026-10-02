@@ -3510,7 +3510,8 @@ class TenantBusinessService:
         self._admin(actor_id)
         row = self.conn.execute(
             "SELECT o.*, p.traffic_gb, p.duration_days, "
-            "ro.subscription_id AS renewal_subscription_id "
+            "ro.subscription_id AS renewal_subscription_id, "
+            "ro.renew_volume_mode, ro.renew_time_mode "
             "FROM tenant_orders o "
             "JOIN tenant_sale_plans p ON p.id=o.plan_id "
             "LEFT JOIN tenant_renewal_orders ro ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
@@ -3527,6 +3528,8 @@ class TenantBusinessService:
                 traffic_gb=int(order["traffic_gb"]),
                 duration_days=int(order["duration_days"]),
                 plan_id=int(order["plan_id"]),
+                volume_mode=str(order.get("renew_volume_mode") or "reset"),
+                time_mode=str(order.get("renew_time_mode") or "reset"),
                 idempotency_key=f"tenant:{self.tenant_id}:renewal-order:{int(order_id)}",
                 fulfillment_order_id=int(order_id),
             )
@@ -4162,6 +4165,8 @@ class TenantBusinessService:
         traffic_gb: int,
         duration_days: int,
         plan_id: int | None = None,
+        volume_mode: str = "reset",
+        time_mode: str = "reset",
         idempotency_key: str = "",
         fulfillment_order_id: int | None = None,
     ) -> dict[str, Any]:
@@ -4174,8 +4179,42 @@ class TenantBusinessService:
         next_plan_id = int(plan_id or subscription["plan_id"])
         if plan_id is not None:
             self.plan(next_plan_id, public=False)
-        traffic_bytes = int(traffic_gb) * 1024 * 1024 * 1024
-        expires_at = iso_utc(utcnow() + timedelta(days=int(duration_days)))
+        clean_volume_mode = str(volume_mode or "reset").strip().lower()
+        clean_time_mode = str(time_mode or "reset").strip().lower()
+        if clean_volume_mode not in ("add", "reset"):
+            raise ValueError("invalid renewal volume mode")
+        if clean_time_mode not in ("add", "reset"):
+            raise ValueError("invalid renewal time mode")
+
+        plan_traffic_bytes = int(traffic_gb) * 1024 * 1024 * 1024
+        current_traffic_bytes = max(
+            0, int(subscription.get("traffic_bytes") or 0)
+        )
+        traffic_bytes = (
+            current_traffic_bytes + plan_traffic_bytes
+            if clean_volume_mode == "add"
+            else plan_traffic_bytes
+        )
+        reset_usage = clean_volume_mode == "reset"
+
+        now_dt = utcnow()
+        if clean_time_mode == "add":
+            try:
+                current_expiry = parse_utc(str(subscription["expires_at"]))
+            except Exception:
+                current_expiry = now_dt
+            expiry_base = max(now_dt, current_expiry)
+        else:
+            expiry_base = now_dt
+        target_expiry = expiry_base + timedelta(days=int(duration_days))
+        expires_at = iso_utc(target_expiry)
+        panel_duration_days = max(
+            1,
+            int(
+                ((target_expiry - now_dt).total_seconds() + 86399)
+                // 86400
+            ),
+        )
         base_key = str(idempotency_key or "")
         _, target, secret = self._panel_material(int(subscription["server_id"]))
         try:
@@ -4185,9 +4224,9 @@ class TenantBusinessService:
                 external_ref=str(subscription["external_ref"]),
                 request=RenewRequest(
                     traffic_bytes=traffic_bytes,
-                    duration_days=int(duration_days),
+                    duration_days=panel_duration_days,
                     expires_at=expires_at,
-                    reset_usage=True,
+                    reset_usage=reset_usage,
                     idempotency_key=base_key,
                 ),
             )
@@ -4261,9 +4300,9 @@ class TenantBusinessService:
                     external_ref=str(row["external_ref"]),
                     request=RenewRequest(
                         traffic_bytes=traffic_bytes,
-                        duration_days=int(duration_days),
+                        duration_days=panel_duration_days,
                         expires_at=expires_at,
-                        reset_usage=True,
+                        reset_usage=reset_usage,
                         idempotency_key=(
                             f"{base_key}:server:{int(row['server_id'])}"
                             if base_key
@@ -4316,6 +4355,9 @@ class TenantBusinessService:
                 "status": "active",
                 "traffic_bytes": traffic_bytes,
                 "expires_at": expires_at,
+                "renew_volume_mode": clean_volume_mode,
+                "renew_time_mode": clean_time_mode,
+                "reset_usage": reset_usage,
                 "node_errors": secondary_errors,
                 "subscription_url": self._smart_url(
                     subscription_id=int(subscription_id)
