@@ -505,3 +505,33 @@ def test_unstarted_cleanup_preserves_receipt_history(conn, factories, cipher) ->
         "SELECT status FROM tenant_receipts WHERE order_id=?",
         (int(reviewed["order_id"]),),
     ).fetchone()["status"] == "approved"
+
+
+
+def test_admin_smart_search_accepts_uuid_inside_config_link(
+    conn, factories, cipher
+) -> None:
+    _tenant, service, _panel, plan, method = _service(
+        conn, factories, cipher
+    )
+    order, reviewed = _approve_purchase(
+        service,
+        customer=7101,
+        plan_id=int(plan["id"]),
+        method_id=int(method["id"]),
+        reference="link-search",
+    )
+    activated = service.fulfill_paid_order(
+        7001, order_id=int(reviewed["order_id"])
+    )
+    sid = int(activated["id"])
+    uuid = "12345678-1234-4234-8234-123456789abc"
+    conn.execute(
+        "UPDATE tenant_subscriptions SET external_ref=? WHERE id=?",
+        (uuid, sid),
+    )
+    results = service.search_subscriptions_admin(
+        7001,
+        f"vless://{uuid}@example.com:443?security=tls#test",
+    )
+    assert [int(item["id"]) for item in results] == [sid]

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -3769,7 +3770,15 @@ class TenantBusinessService:
         self._admin(actor_id)
         term = _text(query, 200)
         plain = term.strip().lstrip("@").strip()
-        like = f"%{plain}%"
+        uuid_match = re.search(
+            r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+            plain,
+        )
+        # Hiddify-SellBot accepts a full config/subscription link.  When the
+        # message contains a UUID, search the UUID itself rather than requiring
+        # the entire URL to equal a stored panel reference.
+        search_term = uuid_match.group(1) if uuid_match else plain
+        like = f"%{search_term}%"
         args: list[Any] = [
             self.tenant_id,
             like,
@@ -3779,7 +3788,7 @@ class TenantBusinessService:
         ]
         numeric = 0
         try:
-            numeric = int(plain.lstrip("#"))
+            numeric = int(search_term.lstrip("#"))
         except (TypeError, ValueError):
             numeric = 0
         id_clause = ""
