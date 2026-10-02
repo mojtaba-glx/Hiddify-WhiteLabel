@@ -259,6 +259,26 @@ def _display_name(item: dict[str, Any]) -> str:
     return str(item.get("display_name") or item.get("telegram_user_id") or item.get("id") or "کاربر")
 
 
+async def _refresh_admin_reply_keyboard(update: Update) -> None:
+    """Refresh the persistent AdminBot ReplyKeyboard after theme changes."""
+    chat = update.effective_chat
+    if chat is None:
+        return
+    try:
+        from TenantRuntime.AdminBot.handlers import admin_main_keyboard
+
+        message = await chat.send_message(
+            "\u2063",
+            reply_markup=admin_main_keyboard(),
+        )
+        try:
+            await message.delete()
+        except Exception:
+            pass
+    except Exception:
+        return
+
+
 async def _edit_or_send(update: Update, text: str, markup: InlineKeyboardMarkup | None = None, **kwargs: Any) -> None:
     query = update.callback_query
     if query is not None and query.message is not None:
@@ -1923,14 +1943,23 @@ async def handle_callback(
     }
     if data in exact_toggles:
         key, section = exact_toggles[data]
-        business.toggle_userbot_setting_admin(actor, key=key)
+        updated_settings = business.toggle_userbot_setting_admin(
+            actor, key=key
+        )
+        set_button_settings(updated_settings)
         await _settings_section(update, business, actor, section)
+        if key == "colored_buttons":
+            await _refresh_admin_reply_keyboard(update)
         return True
 
     if data.startswith("userbot:settings:ui:theme:"):
         theme = data.rsplit(":", 1)[1]
-        business.set_userbot_setting_admin(actor, key="button_theme", value=theme)
+        updated_settings = business.set_userbot_setting_admin(
+            actor, key="button_theme", value=theme
+        )
+        set_button_settings(updated_settings)
         await _settings_section(update, business, actor, "ui")
+        await _refresh_admin_reply_keyboard(update)
         return True
 
     if data == "userbot:settings:texts:guide_menu":
