@@ -541,6 +541,8 @@ async def _handle_main_reply_action(
     settings = _set_button_settings(business.runtime_userbot_settings())
 
     if text == BTN_STATUS:
+        if not bool(settings.get("show_user_status", True)):
+            raise TenantBusinessError("user status is disabled")
         await show_status(update, context)
         return True
 
