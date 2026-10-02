@@ -118,14 +118,21 @@ def _checkout_text(order: dict, wallet: dict) -> str:
     final = int(order.get("amount") or 0)
     operation = str(order.get("operation") or "purchase")
     op_title = "تمدید" if operation == "renewal" else "خرید"
-    return "\n".join([
+    lines = [
         f"🧾 {op_title} سفارش #{order['id']}",
         f"پلن: {order.get('plan_name') or '-'}",
+    ]
+    if str(order.get("category_title") or "").strip():
+        lines.append(f"دسته‌بندی: {order.get('category_title')}")
+    if str(order.get("selected_server_label") or "").strip():
+        lines.append(f"سرور: {order.get('selected_server_label')}")
+    lines.extend([
         f"مبلغ اصلی: {original:,} {order.get('currency') or ''}",
         f"تخفیف: {discount:,} {order.get('currency') or ''}",
         f"مبلغ نهایی: {final:,} {order.get('currency') or ''}",
         f"کیف پول: {balance:,} {order.get('currency') or ''}",
     ])
+    return "\n".join(lines)
 
 
 
@@ -350,6 +357,72 @@ def _extract_config_items(content: str) -> list[str]:
     if len(uri_lines) >= 2 and len(uri_lines) == len(lines):
         return uri_lines
     return [raw]
+
+
+def _sorted_purchase_plans(
+    plans: list[dict[str, Any]],
+    settings: dict[str, Any],
+) -> list[dict[str, Any]]:
+    items = list(plans)
+    sort_mode = str(settings.get("plan_sort_mode") or "id")
+    if sort_mode == "price_asc":
+        items.sort(key=lambda p: (int(p.get("price") or 0), int(p["id"])))
+    elif sort_mode == "price_desc":
+        items.sort(key=lambda p: (-int(p.get("price") or 0), int(p["id"])))
+    elif sort_mode == "traffic_asc":
+        items.sort(key=lambda p: (int(p.get("traffic_gb") or 0), int(p["id"])))
+    elif sort_mode == "traffic_desc":
+        items.sort(key=lambda p: (-int(p.get("traffic_gb") or 0), int(p["id"])))
+    else:
+        items.sort(key=lambda p: int(p["id"]))
+    if bool(settings.get("plan_sort_by_priority", True)):
+        items.sort(key=lambda p: int(p.get("priority") or 0))
+    return items
+
+
+def _plan_buttons(
+    plans: list[dict[str, Any]],
+    settings: dict[str, Any],
+) -> list[list[TelegramInlineKeyboardButton]]:
+    buttons = [
+        _button(
+            (
+                f"{p['name']} · {int(p.get('traffic_gb') or 0)}GB · "
+                f"{int(p.get('duration_days') or 0)} روز · "
+                f"{int(p.get('price') or 0):,} {p.get('currency') or ''}"
+            ),
+            callback_data=f"shop:plan:{int(p['id'])}",
+            settings=settings,
+        )
+        for p in _sorted_purchase_plans(plans, settings)
+    ]
+    return _column_rows(
+        buttons,
+        int(settings.get("plan_columns") or 1),
+    )
+
+
+def _purchase_server_rows(
+    servers: list[dict[str, Any]],
+    *,
+    plan_id: int,
+    settings: dict[str, Any],
+) -> list[list[TelegramInlineKeyboardButton]]:
+    items = list(servers)
+    if bool(settings.get("shuffle_server_layout", True)) and len(items) > 1:
+        random.shuffle(items)
+    buttons = [
+        _button(
+            str(server.get("label") or f"سرور #{server['id']}"),
+            callback_data=f"shop:server:{int(plan_id)}:{int(server['id'])}",
+            settings=settings,
+        )
+        for server in items
+    ]
+    return _column_rows(
+        buttons,
+        int(settings.get("server_columns") or 1),
+    )
 
 
 def _menu(spec: RuntimeBotSpec, business) -> InlineKeyboardMarkup:
@@ -791,42 +864,172 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data == "shop:buy":
             if not bool(settings.get("enable_buy", True)):
                 raise TenantBusinessError("purchase is disabled")
-            plans = list(business.list_plans())
-            sort_mode = str(settings.get("plan_sort_mode") or "id")
-            if sort_mode == "price_asc":
-                plans.sort(key=lambda p: (int(p.get("price") or 0), int(p["id"])))
-            elif sort_mode == "price_desc":
-                plans.sort(key=lambda p: (-int(p.get("price") or 0), int(p["id"])))
-            elif sort_mode == "traffic_asc":
-                plans.sort(key=lambda p: (int(p.get("traffic_gb") or 0), int(p["id"])))
-            elif sort_mode == "traffic_desc":
-                plans.sort(key=lambda p: (-int(p.get("traffic_gb") or 0), int(p["id"])))
-            columns = max(1, min(int(settings.get("plan_columns") or 1), 3))
-            buttons = [
-                _button(
-                    f"{p['name']} · {p['price']:,} {p['currency']}",
-                    callback_data=f"shop:plan:{p['id']}",
-                    settings=settings,
-                )
-                for p in plans
+            categories = (
+                business.list_plan_categories()
+                if bool(settings.get("plan_categories_enabled", True))
+                else []
+            )
+            plans = [
+                p for p in business.list_plans()
+                if not str(p.get("name") or "").startswith("__WHITELABEL_")
             ]
-            rows = _column_rows(buttons, columns)
+            if categories:
+                rows = [
+                    [
+                        _button(
+                            f"📂 {category['title']}",
+                            callback_data=f"shop:buycat:{int(category['id'])}",
+                            settings=settings,
+                        )
+                    ]
+                    for category in categories
+                ]
+                if any(p.get("category_id") is None for p in plans):
+                    rows.append([
+                        _button(
+                            "📋 سایر پلن‌ها",
+                            callback_data="shop:buycat:0",
+                            settings=settings,
+                        )
+                    ])
+                rows.append([
+                    _button(
+                        "🔙بازگشت",
+                        callback_data="runtime:home",
+                        settings=settings,
+                    )
+                ])
+                await update.callback_query.edit_message_text(
+                    str(settings.get("plans_list_text") or "").strip()
+                    or "📂 دسته‌بندی پلن‌ها\nدسته موردنظر را انتخاب کنید:",
+                    reply_markup=InlineKeyboardMarkup(rows),
+                )
+                return
+
+            rows = _plan_buttons(plans, settings)
             if not rows:
                 rows = [[InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")]]
-            rows.append([InlineKeyboardButton("↩️ منو", callback_data="runtime:home")])
+            rows.append([
+                _button(
+                    "🔙بازگشت",
+                    callback_data="runtime:home",
+                    settings=settings,
+                )
+            ])
             await update.callback_query.edit_message_text(
-                str(settings.get("plans_list_text") or "").strip() or "💳 خرید اشتراک",
+                str(settings.get("plans_list_text") or "").strip()
+                or "📋 پلن موردنظر را انتخاب کنید:",
                 reply_markup=InlineKeyboardMarkup(rows),
             )
             return
+
+        if data.startswith("shop:buycat:"):
+            if not bool(settings.get("enable_buy", True)):
+                raise TenantBusinessError("purchase is disabled")
+            category_id = int(data.rsplit(":", 1)[1])
+            if category_id > 0:
+                category = business.plan_category(category_id)
+                plans = business.list_plans(category_id=category_id)
+                title = f"📂 {category['title']}"
+            else:
+                plans = [
+                    p for p in business.list_plans()
+                    if p.get("category_id") is None
+                ]
+                title = "📋 سایر پلن‌ها"
+            plans = [
+                p for p in plans
+                if not str(p.get("name") or "").startswith("__WHITELABEL_")
+            ]
+            rows = _plan_buttons(plans, settings)
+            if not rows:
+                rows = [[InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")]]
+            rows.append([
+                _button(
+                    "🔙 دسته‌بندی‌ها",
+                    callback_data="shop:buy",
+                    settings=settings,
+                )
+            ])
+            await update.callback_query.edit_message_text(
+                f"{title}\n\n"
+                + (
+                    str(settings.get("plans_list_text") or "").strip()
+                    or "پلن موردنظر را انتخاب کنید:"
+                ),
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+
         if data.startswith("shop:plan:"):
             if not bool(settings.get("enable_buy", True)):
                 raise TenantBusinessError("purchase is disabled")
-            order = business.create_order(actor, int(data.rsplit(":", 1)[1]))
+            plan_id = int(data.rsplit(":", 1)[1])
+            plan = business.plan(plan_id, public=True)
+            servers = business.list_purchase_servers()
+            rows = _purchase_server_rows(
+                servers,
+                plan_id=plan_id,
+                settings=settings,
+            )
+            if not rows:
+                rows = [[
+                    InlineKeyboardButton(
+                        "سرور قابل خریدی موجود نیست",
+                        callback_data="noop",
+                    )
+                ]]
+            category_id = int(plan.get("category_id") or 0)
+            back_callback = (
+                f"shop:buycat:{category_id}"
+                if bool(settings.get("plan_categories_enabled", True))
+                and category_id > 0
+                else "shop:buy"
+            )
+            rows.append([
+                _button(
+                    "🔙 بازگشت به پلن‌ها",
+                    callback_data=back_callback,
+                    settings=settings,
+                )
+            ])
+            await update.callback_query.edit_message_text(
+                (
+                    str(settings.get("servers_list_text") or "").strip()
+                    or "🛰 سرور موردنظر را انتخاب کنید:"
+                )
+                + "\n\n"
+                + f"📦 {plan['name']} · {int(plan['traffic_gb'])}GB · "
+                + f"{int(plan['duration_days'])} روز · "
+                + f"{int(plan['price']):,} {plan['currency']}",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+
+        if data.startswith("shop:server:"):
+            if not bool(settings.get("enable_buy", True)):
+                raise TenantBusinessError("purchase is disabled")
+            parts = data.split(":")
+            if len(parts) != 4:
+                raise TenantBusinessError("invalid purchase server")
+            plan_id = int(parts[2])
+            server_id = int(parts[3])
+            order = business.create_order(
+                actor,
+                plan_id,
+                server_id=server_id,
+            )
             await update.callback_query.edit_message_text(
                 _checkout_text(order, business.wallet_summary(actor)),
-                reply_markup=_checkout_markup(int(order["id"]), settings),
-            ); return
+                reply_markup=_checkout_markup(
+                    int(order["id"]),
+                    settings,
+                    back_callback=f"shop:plan:{plan_id}",
+                    back_label="↩️ تغییر سرور",
+                ),
+            )
+            return
+
         if data.startswith("shop:checkout:"):
             order_id = int(data.rsplit(":", 1)[1])
             order = business.order(actor, order_id)
