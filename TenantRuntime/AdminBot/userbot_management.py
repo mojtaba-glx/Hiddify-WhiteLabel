@@ -837,6 +837,7 @@ def _tenant_backup_payload(business: Any) -> dict[str, Any]:
         "tenant_payment_methods",
         "tenant_coupons",
         "tenant_sales_growth_settings",
+        "tenant_gift_vouchers",
     ]
     payload: dict[str, Any] = {"format": "hiddify-whitelabel-tenant-userbot-v1", "tenant_id": business.tenant_id, "tables": {}}
     for table in tables:
@@ -870,6 +871,7 @@ async def _restore_backup(business: Any, data: bytes) -> None:
         "tenant_payment_methods",
         "tenant_coupons",
         "tenant_sales_growth_settings",
+        "tenant_gift_vouchers",
     }
     tables = payload.get("tables")
     if not isinstance(tables, dict) or set(tables) - allowed:
@@ -885,7 +887,7 @@ async def _restore_backup(business: Any, data: bytes) -> None:
                 continue
             if not isinstance(rows, list):
                 raise ValueError("invalid backup rows")
-            if table in ("tenant_sale_plans", "tenant_payment_methods", "tenant_coupons"):
+            if table in ("tenant_sale_plans", "tenant_payment_methods", "tenant_coupons", "tenant_gift_vouchers"):
                 # IDs are global primary keys. Reject a crafted/foreign backup
                 # before an UPSERT could ever overwrite another tenant's row.
                 for row in rows:
@@ -915,7 +917,7 @@ async def _restore_backup(business: Any, data: bytes) -> None:
                 vals = [row[k] for k in cols]
                 marks = ",".join("?" for _ in cols)
                 names = ",".join(cols)
-                if table in ("tenant_sale_plans", "tenant_payment_methods", "tenant_coupons"):
+                if table in ("tenant_sale_plans", "tenant_payment_methods", "tenant_coupons", "tenant_gift_vouchers"):
                     updates = ",".join(f"{k}=excluded.{k}" for k in cols if k not in ("id", "tenant_id"))
                     business.conn.execute(
                         f"INSERT INTO {table} ({names}) VALUES ({marks}) "
@@ -1133,7 +1135,6 @@ async def handle_callback(
         business.add_gift_voucher_admin(actor,code=code,amount=amount,currency="IRR",max_uses=100)
         await _send_coupons(update,business,actor); return True
     if data == "userbot:gifts:bulk":
-        context.user_data[FLOW_KEY]={"kind":"coupon_bulk"}
         context.user_data[FLOW_KEY]={"kind":"gift_bulk_prefix"}
         await query.message.reply_text("🧩 پیشوند کدها را وارد کنید؛ مثال: FEST",reply_markup=userbot_cancel_keyboard()); return True
 
