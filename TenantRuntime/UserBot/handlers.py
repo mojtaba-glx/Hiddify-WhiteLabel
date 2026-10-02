@@ -384,6 +384,69 @@ def _extract_config_items(content: str) -> list[str]:
     return [raw]
 
 
+def _subscription_limit_lines(
+    item: dict[str, Any],
+    settings: dict[str, Any],
+) -> tuple[str, str]:
+    usage_gb = max(0.0, float(item.get("usage_bytes") or 0) / (1024 ** 3))
+    limit_gb = max(0.0, float(item.get("traffic_bytes") or 0) / (1024 ** 3))
+    unlimited_volume = (
+        bool(settings.get("renew_unlimited_volume", False))
+        and limit_gb >= float(settings.get("renew_unlimited_volume_from_gb") or 1000)
+    )
+    usage_text = (
+        f"{usage_gb:.2f}/نامحدود"
+        if unlimited_volume
+        else f"{usage_gb:.2f}/{limit_gb:.0f}GB"
+    )
+
+    expires_raw = str(item.get("expires_at") or "").strip()
+    days_left: int | None = None
+    try:
+        expiry = parse_utc(expires_raw)
+        seconds = (expiry - utcnow()).total_seconds()
+        days_left = int(seconds // 86400)
+        if seconds > 0 and seconds % 86400:
+            days_left += 1
+    except Exception:
+        pass
+    unlimited_time = (
+        bool(settings.get("renew_unlimited_time", False))
+        and days_left is not None
+        and days_left >= int(settings.get("renew_unlimited_time_from_days") or 365)
+    )
+    expiry_text = "نامحدود" if unlimited_time else (expires_raw or "-")
+    return usage_text, expiry_text
+
+
+def _renewable_subscriptions(
+    business: Any,
+    actor: int,
+) -> tuple[list[dict[str, Any]], int]:
+    eligible: list[dict[str, Any]] = []
+    blocked = 0
+    for item in business.list_subscriptions(actor):
+        if (
+            not item.get("external_ref")
+            or not item.get("server_id")
+            or item.get("status") not in ("active", "disabled", "expired")
+        ):
+            continue
+        try:
+            result = business.renewal_eligibility(
+                actor,
+                subscription_id=int(item["id"]),
+            )
+        except TenantBusinessError:
+            blocked += 1
+            continue
+        if bool(result.get("allowed")):
+            eligible.append(item)
+        else:
+            blocked += 1
+    return eligible, blocked
+
+
 def _sorted_purchase_plans(
     plans: list[dict[str, Any]],
     settings: dict[str, Any],
@@ -689,13 +752,7 @@ async def _handle_main_reply_action(
             and bool(settings.get("show_renew_in_main_menu", True))
         ):
             raise TenantBusinessError("renewal is disabled")
-        items = [
-            item
-            for item in business.list_subscriptions(actor)
-            if item.get("external_ref")
-            and item.get("server_id")
-            and item.get("status") in ("active", "disabled", "expired")
-        ]
+        items, blocked = _renewable_subscriptions(business, actor)
         rows = [
             [InlineKeyboardButton(
                 f"♾ #{item['id']} · {item['plan_name']}",
@@ -703,13 +760,16 @@ async def _handle_main_reply_action(
             )]
             for item in items
         ]
+        body = "♾ تمدید اشتراک\nاشتراک موردنظر را انتخاب کنید:"
         if not rows:
             rows = [[InlineKeyboardButton(
                 "اشتراک قابل تمدیدی وجود ندارد",
                 callback_data="noop",
             )]]
+            if blocked:
+                body = business.renewal_not_allowed_text()
         await update.effective_message.reply_text(
-            "♾ تمدید اشتراک\nاشتراک موردنظر را انتخاب کنید:",
+            body,
             reply_markup=InlineKeyboardMarkup(rows),
         )
         return True
@@ -1534,13 +1594,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data == "shop:renewmenu":
             if not bool(settings.get("enable_renew", True)):
                 raise TenantBusinessError("renewal is disabled")
-            items = [
-                item
-                for item in business.list_subscriptions(actor)
-                if item.get("external_ref")
-                and item.get("server_id")
-                and item.get("status") in ("active", "disabled", "expired")
-            ]
+            items, blocked = _renewable_subscriptions(business, actor)
             rows = [
                 [InlineKeyboardButton(
                     f"♾ #{item['id']} · {item['plan_name']}",
@@ -1548,14 +1602,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )]
                 for item in items
             ]
+            body = "♾ تمدید اشتراک\nاشتراک موردنظر را انتخاب کنید:"
             if not rows:
                 rows = [[InlineKeyboardButton(
                     "اشتراک قابل تمدیدی وجود ندارد",
                     callback_data="noop",
                 )]]
+                if blocked:
+                    body = business.renewal_not_allowed_text()
             rows.append([InlineKeyboardButton("↩️ منو", callback_data="runtime:home")])
             await update.callback_query.edit_message_text(
-                "♾ تمدید اشتراک\nاشتراک موردنظر را انتخاب کنید:",
+                body,
                 reply_markup=InlineKeyboardMarkup(rows),
             )
             return
@@ -1630,14 +1687,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         if data == "shop:subs":
             items = business.list_subscriptions(actor)
-            text = "📦 اشتراک‌های من\n" + ("\n".join(
-                f"• #{x['id']} · {x['plan_name']} · "
-                f"{'در حال قطع خودکار' if int(x.get('enforcement_pending') or 0) else x['status']}\n"
-                f"  مصرف: {int(x['usage_bytes']) / (1024**3):.2f}/{int(x['traffic_bytes']) / (1024**3):.0f}GB · "
-                f"انقضا: {x['expires_at']}\n"
-                f"  آخرین اتصال: {x.get('last_online') or '-'}"
-                for x in items
-            ) or "اشتراکی ندارید.")
+            detail_lines = []
+            for x in items:
+                usage_text, expiry_text = _subscription_limit_lines(x, settings)
+                detail_lines.append(
+                    f"• #{x['id']} · {x['plan_name']} · "
+                    f"{'در حال قطع خودکار' if int(x.get('enforcement_pending') or 0) else x['status']}\n"
+                    f"  مصرف: {usage_text} · انقضا: {expiry_text}\n"
+                    f"  آخرین اتصال: {x.get('last_online') or '-'}"
+                )
+            text = "📦 اشتراک‌های من\n" + (
+                "\n".join(detail_lines) or "اشتراکی ندارید."
+            )
             rows = []
             for item in items:
                 if (
@@ -1646,10 +1707,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     and item.get("server_id")
                     and item["status"] in ("active", "disabled", "expired")
                 ):
-                    rows.append([InlineKeyboardButton(
-                        f"♻️ تمدید اشتراک #{item['id']}",
-                        callback_data=f"shop:renew:{item['id']}"
-                    )])
+                    try:
+                        renew_ok = bool(
+                            business.renewal_eligibility(
+                                actor,
+                                subscription_id=int(item["id"]),
+                            ).get("allowed")
+                        )
+                    except TenantBusinessError:
+                        renew_ok = False
+                    if renew_ok:
+                        rows.append([InlineKeyboardButton(
+                            f"♻️ تمدید اشتراک #{item['id']}",
+                            callback_data=f"shop:renew:{item['id']}"
+                        )])
                 if item["status"] == "active" and item.get("external_ref") and item.get("server_id"):
                     if (
                         bool(settings.get("show_user_page_link", True))
@@ -1849,6 +1920,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             owned = next((x for x in business.list_subscriptions(actor) if int(x["id"]) == subscription_id), None)
             if owned is None or owned["status"] not in ("active", "disabled", "expired"):
                 raise TenantBusinessError("subscription cannot be renewed")
+            eligibility = business.renewal_eligibility(
+                actor,
+                subscription_id=subscription_id,
+            )
+            if not bool(eligibility.get("allowed")):
+                await update.callback_query.edit_message_text(
+                    business.renewal_not_allowed_text(),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "↩️ اشتراک‌های من",
+                            callback_data="shop:subs",
+                        )
+                    ]]),
+                )
+                return
             plans = business.list_plans()
             plan_buttons = [
                 InlineKeyboardButton(
