@@ -48,12 +48,20 @@ def test_staged_full_provision_keeps_only_encrypted_admin_draft(conn) -> None:
     )
     context = SimpleNamespace(
         application=SimpleNamespace(bot_data={"master_service": service}),
-        user_data={"flow": {"kind": "provision_details"}},
+        user_data={"flow": {"kind": "provision_name"}},
     )
 
-    details = _update("Customer | customer-one | 88001")
-    asyncio.run(on_text(details, context))
+    asyncio.run(on_text(_update("Customer"), context))
+    assert context.user_data["flow"]["kind"] == "provision_owner"
+    assert context.user_data["flow"]["name"] == "Customer"
+
+    asyncio.run(on_text(_update("88001"), context))
+    assert context.user_data["flow"]["kind"] == "provision_slug"
+    assert context.user_data["flow"]["owner_telegram_id"] == 88001
+
+    asyncio.run(on_text(_update("customer-one"), context))
     assert context.user_data["flow"]["kind"] == "provision_admin_token"
+    assert context.user_data["flow"]["slug"] == "customer-one"
 
     admin_token = make_fake_token("handler-admin")
     admin_update = _update(admin_token)
