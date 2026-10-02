@@ -929,6 +929,7 @@ async def handle_callback(
     if data == "userbot:noop":
         await query.answer()
         return True
+    await query.answer()
     if data == "userbot:menu":
         await send_userbot_main_menu(update, context); return True
 
@@ -979,13 +980,11 @@ async def handle_callback(
             await query.message.reply_text(text, reply_markup=userbot_cancel_keyboard()); return True
         if action == "reset_trial":
             business.reset_customer_trial_admin(actor, customer_id=customer_id)
-            await query.answer("✅ اشتراک تستی بازنشانی شد.", show_alert=True)
             await _send_user_profile(update,business,actor,customer_id); return True
         if action == "ban":
             profile=business.customer_profile_admin(actor,customer_id=customer_id)
             new_status="blocked" if profile["status"]=="active" else "active"
             business.set_customer_status_admin(actor,customer_id=customer_id,status=new_status)
-            await query.answer("⛔️ کاربر مسدود شد." if new_status=="blocked" else "✅ کاربر آزاد شد.", show_alert=True)
             await _send_user_profile(update,business,actor,customer_id); return True
         if action == "message":
             context.user_data[FLOW_KEY]={"kind":"user_message","customer_id":customer_id}
@@ -1018,7 +1017,6 @@ async def handle_callback(
         if approve and result.get("status")=="paid":
             try: business.fulfill_paid_order(actor,order_id=int(result["order_id"]))
             except TenantBusinessError: pass
-        await query.answer("✅ وضعیت تراکنش بروزرسانی شد.",show_alert=True)
         await _send_payment_detail(update,business,actor,rid); return True
 
     if data == "userbot:gifts_menu":
@@ -1101,7 +1099,7 @@ async def handle_callback(
     if data.startswith("userbot:gifts:preset:"):
         parts=data.split(":"); prefix=parts[3]; value=int(parts[4]); code=f"{prefix}-{str(int(utcnow().timestamp()))[-6:]}"
         business.add_coupon(actor,code=code,discount_kind="percent",value=value,max_uses=100,per_customer_limit=1)
-        await query.answer(f"✅ {code} ساخته شد.",show_alert=True); await _send_coupons(update,business,actor); return True
+        await _send_coupons(update,business,actor); return True
     if data == "userbot:gifts:bulk":
         context.user_data[FLOW_KEY]={"kind":"coupon_bulk"}
         await query.message.reply_text("🧩 PREFIX | COUNT | PERCENT | MAX_USES_PER_CODE\nمثال: FEST | 10 | 20 | 1",reply_markup=userbot_cancel_keyboard()); return True
@@ -1173,7 +1171,7 @@ async def handle_callback(
         parts=data.split(":"); context.user_data[FLOW_KEY]={"kind":"ticket_reply","ticket_id":int(parts[3]),"status":parts[4],"page":int(parts[5])}
         await query.message.reply_text("📩 پاسخ تیکت را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
     if data.startswith("userbot:ticket:close:"):
-        parts=data.split(":"); business.close_ticket_admin(actor,ticket_id=int(parts[3])); await query.answer("✅ تیکت بسته شد.",show_alert=True); await _send_tickets(update,business,actor,status=parts[4],page=int(parts[5])); return True
+        parts=data.split(":"); business.close_ticket_admin(actor,ticket_id=int(parts[3])); await _send_tickets(update,business,actor,status=parts[4],page=int(parts[5])); return True
 
     if data == "userbot:broadcast_menu":
         await _edit_or_send(update,
@@ -1234,7 +1232,22 @@ async def handle_callback(
         ); return True
     if data.startswith("userbot:settings:trial:"):
         action=data.rsplit(":",1)[1]; g=business.growth_settings(actor)
-        if action=="toggle": business.update_growth_settings(actor,trial_enabled=not bool(g["trial_enabled"])); await handle_callback(update,context,business=business,actor=actor); return True
+        if action=="toggle":
+            g=business.update_growth_settings(
+                actor,trial_enabled=not bool(g["trial_enabled"])
+            )
+            await _edit_or_send(
+                update,
+                f"🎊 مشخصات اشتراک تستی\nوضعیت: {_bool_icon(g.get('trial_enabled'))}\n"
+                f"حجم: {g.get('trial_traffic_gb')}GB\nمدت: {g.get('trial_duration_days')} روز",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔥 روشن/خاموش تست",callback_data="userbot:settings:trial:toggle")],
+                    [InlineKeyboardButton("📊 حجم تست",callback_data="userbot:settings:trial:traffic")],
+                    [InlineKeyboardButton("📆 مدت تست",callback_data="userbot:settings:trial:days")],
+                    [InlineKeyboardButton("🔙بازگشت",callback_data="userbot:settings:subscription")],
+                ]),
+            )
+            return True
         context.user_data[FLOW_KEY]={"kind":"trial_edit","field":action}
         await query.message.reply_text("مقدار عددی جدید را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
     if data == "userbot:settings:reminders":
@@ -1406,7 +1419,8 @@ async def handle_document(
     document=update.effective_message.document
     if document is None or not str(document.file_name or "").lower().endswith(".json"):
         await update.effective_message.reply_text("❌ فقط فایل JSON بکاپ معتبر است.",reply_markup=userbot_cancel_keyboard()); return True
-    file=await document.get_file(); data=bytes(await file.download_as_bytearray())
+    file=await context.bot.get_file(document.file_id)
+    data=bytes(await file.download_as_bytearray())
     try:
         await _restore_backup(business,data)
     except Exception:

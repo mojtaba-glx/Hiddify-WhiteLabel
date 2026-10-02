@@ -4663,7 +4663,7 @@ class TenantBusinessService:
             if len(clean) > 4000:
                 raise ValueError("setting text is too long")
             if name == "button_theme" and clean not in (
-                "smart", "classic", "minimal"
+                "smart", "shop", "pro", "minimal"
             ):
                 raise ValueError("invalid button theme")
             if name == "plan_sort_mode" and clean not in (
