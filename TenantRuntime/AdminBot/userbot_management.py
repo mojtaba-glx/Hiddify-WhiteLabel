@@ -1285,9 +1285,32 @@ async def handle_callback(
         context.user_data[FLOW_KEY]={"kind":"trial_edit","field":action}
         await query.message.reply_text("مقدار عددی جدید را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
     if data == "userbot:settings:reminders":
-        await _edit_or_send(update,
-            "🔔 یادآور وضعیت اشتراک\nیادآورها توسط Runtime مشترک WhiteLabel اجرا می‌شوند و برای هر Tenant ایزوله هستند.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("🔙بازگشت",callback_data="userbot:settings:subscription")]])
+        s=business.userbot_settings_admin(actor)
+        await _edit_or_send(
+            update,
+            "🔔 یادآور وضعیت اشتراک\n"
+            f"وضعیت: {_bool_icon(s.get('reminder_enabled'))}\n"
+            f"یادآوری زمانی: {int(s.get('reminder_days') or 3)} روز مانده\n"
+            f"یادآوری حجمی: {int(s.get('reminder_remaining_gb') or 3)} گیگ مانده",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    f"🔔 روشن/خاموش | {_bool_icon(s.get('reminder_enabled'))}",
+                    callback_data="userbot:settings:toggle:reminder_enabled:userbot:settings:reminders",
+                )],
+                [InlineKeyboardButton("📅 ویرایش روز یادآوری",callback_data="userbot:settings:reminder:days")],
+                [InlineKeyboardButton("📊 ویرایش حجم یادآوری",callback_data="userbot:settings:reminder:gb")],
+                [InlineKeyboardButton("🔙بازگشت",callback_data="userbot:settings:subscription")],
+            ]),
+        ); return True
+    if data.startswith("userbot:settings:reminder:"):
+        field=data.rsplit(":",1)[1]
+        if field not in {"days","gb"}: raise ValueError("invalid reminder setting")
+        context.user_data[FLOW_KEY]={"kind":"reminder_edit","field":field}
+        await query.message.reply_text(
+            "📅 تعداد روز مانده را وارد کنید (1 تا 30):"
+            if field=="days"
+            else "📊 حجم باقی‌مانده را به گیگ وارد کنید (1 تا 1000):",
+            reply_markup=userbot_cancel_keyboard(),
         ); return True
     if data == "userbot:settings:force_join:set_channel":
         context.user_data[FLOW_KEY]={"kind":"force_join_channel"}
@@ -1469,6 +1492,13 @@ async def handle_text(
             business.set_userbot_setting_admin(actor,key=str(flow["key"]),value=text); context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ متن ذخیره شد.",reply_markup=admin_main_keyboard()); return True
         if kind=="trial_edit":
             value=int(text); field=str(flow["field"]); kwargs={"trial_traffic_gb":value} if field=="traffic" else {"trial_duration_days":value}; business.update_growth_settings(actor,**kwargs); context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ مشخصات تست ذخیره شد.",reply_markup=admin_main_keyboard()); return True
+        if kind=="reminder_edit":
+            value=int(text)
+            field=str(flow["field"])
+            key="reminder_days" if field=="days" else "reminder_remaining_gb"
+            business.set_userbot_setting_admin(actor,key=key,value=value)
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text("✅ تنظیم یادآور ذخیره شد.",reply_markup=admin_main_keyboard()); return True
         if kind=="force_join_channel":
             business.set_userbot_setting_admin(actor,key="force_join_channel",value=text); context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ کانال عضویت اجباری ذخیره شد.",reply_markup=admin_main_keyboard()); return True
         if kind=="payment_add":

@@ -61,6 +61,9 @@ USERBOT_SETTING_DEFAULTS: dict[str, Any] = {
     "plan_sort_mode": "id",
     "plan_columns": 1,
     "server_columns": 1,
+    "reminder_enabled": True,
+    "reminder_days": 3,
+    "reminder_remaining_gb": 3,
 }
 
 
@@ -4909,6 +4912,10 @@ class TenantBusinessService:
             clean = int(value)
             if clean < 1:
                 raise ValueError("setting must be positive")
+            if name == "reminder_days" and clean > 30:
+                raise ValueError("reminder days out of range")
+            if name == "reminder_remaining_gb" and clean > 1000:
+                raise ValueError("reminder volume out of range")
         else:
             clean = str(value or "").strip()
             if len(clean) > 4000:
