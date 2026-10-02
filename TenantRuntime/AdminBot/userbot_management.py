@@ -976,99 +976,218 @@ def _setting_toggle_keyboard(title: str, settings: dict[str, Any], keys: list[tu
 
 
 async def _settings_section(update: Update, business: Any, actor: int, section: str) -> None:
+    """Render the tenant-safe subset of SellBot UserBot settings.
+
+    Button labels and callback namespaces intentionally follow Hiddify-SellBot.
+    Provider-specific features that do not exist in WhiteLabel (for example
+    ZarinPal/PerfectMoney/SMS webhook credentials) are not exposed as dead
+    buttons; card and crypto are managed through the generic tenant payment
+    model below.
+    """
     s = business.userbot_settings_admin(actor)
+
     if section == "subscription":
-        kb = _setting_toggle_keyboard(
-            "اشتراک", s,
-            [
-                ("show_user_page_link", "نمایش لینک صفحه یوزر هیدیفای"),
-                ("show_username", "نمایش نام کاربری"),
-                ("shuffle_configs", "تصادفی کردن کانفیگ‌ها"),
-            ],
-            "userbot:settings_menu",
-        )
-        kb.inline_keyboard.insert(-1, [InlineKeyboardButton("🔔یادآور وضعیت اشتراک", callback_data="userbot:settings:reminders")])
-        kb.inline_keyboard.insert(-1, [InlineKeyboardButton("🎊مشخصات اشتراک تستی", callback_data="userbot:settings:trial")])
-        await _edit_or_send(update, "🛍 تنظیمات اشتراک", kb)
-        return
-    if section == "sub_link_status":
-        await _edit_or_send(
-            update,
-            "📁 وضعیت نمایش لینک اشتراک",
-            _setting_toggle_keyboard(
-                "لینک", s,
-                [
-                    ("show_direct_config", "کانفیگ مستقیم"),
-                    ("show_sub_link", "لینک اشتراک"),
-                    ("show_smart_link", "لینک اشتراک هوشمند"),
-                ],
-                "userbot:settings_menu",
-            ),
-        )
-        return
-    if section == "buy_renew":
-        await _edit_or_send(
-            update,
-            "🛒 تنظیمات خرید و تمدید",
-            _setting_toggle_keyboard(
-                "خرید", s,
-                [
-                    ("enable_buy", "امکان خرید اشتراک"),
-                    ("enable_renew", "امکان تمدید اشتراک"),
-                    ("show_renew_in_main_menu", "دکمه تمدید اشتراک در منوی اصلی"),
-                ],
-                "userbot:settings_menu",
-            ),
-        )
-        return
-    if section == "ui":
         rows = [
-            [InlineKeyboardButton(f"رنگی بودن دکمه‌ها | {_bool_icon(s.get('colored_buttons'))}", callback_data="userbot:settings:toggle:colored_buttons:userbot:settings:ui")],
-            [InlineKeyboardButton("✨ هوشمند", callback_data="userbot:settings:value:button_theme:smart:userbot:settings:ui")],
-            [InlineKeyboardButton("🛒 فروشگاهی", callback_data="userbot:settings:value:button_theme:shop:userbot:settings:ui")],
-            [InlineKeyboardButton("💼 حرفه‌ای", callback_data="userbot:settings:value:button_theme:pro:userbot:settings:ui")],
-            [InlineKeyboardButton("🕊 مینیمال", callback_data="userbot:settings:value:button_theme:minimal:userbot:settings:ui")],
+            [InlineKeyboardButton(
+                f"نمایش لینک صفحه یوزر هیدیفای | {_bool_icon(s.get('show_user_page_link'))}",
+                callback_data="userbot:settings:subscription:show_user_page_link",
+            )],
+            [InlineKeyboardButton(
+                f"نمایش نام کاربری | {_bool_icon(s.get('show_username'))}",
+                callback_data="userbot:settings:subscription:show_username",
+            )],
+            [InlineKeyboardButton(
+                f"تصادفی کردن کانفیگ‌ها | {_bool_icon(s.get('shuffle_configs'))}",
+                callback_data="userbot:settings:subscription:shuffle_configs",
+            )],
+            [InlineKeyboardButton(
+                f"تصادفی کردن چینش سرورها | {_bool_icon(s.get('shuffle_server_layout'))}",
+                callback_data="userbot:settings:subscription:shuffle_server_layout",
+            )],
+            [InlineKeyboardButton(
+                f"تصادفی کردن چینش کانفیگ‌ها | {_bool_icon(s.get('shuffle_config_layout'))}",
+                callback_data="userbot:settings:subscription:shuffle_config_layout",
+            )],
+            [InlineKeyboardButton(
+                "🔔یادآور وضعیت اشتراک",
+                callback_data="userbot:settings:subscription:sub_status_reminder",
+            )],
+            [InlineKeyboardButton(
+                "🎊مشخصات اشتراک تستی",
+                callback_data="userbot:settings:subscription:trial_spec",
+            )],
+            [InlineKeyboardButton(
+                "🔄بازنشانی تست رایگان",
+                callback_data="userbot:settings:subscription:reset_free_trial",
+            )],
             [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
         ]
-        await _edit_or_send(update, f"🎨 تنظیم ظاهر دکمه‌ها\nطرح فعلی: {s.get('button_theme')}", InlineKeyboardMarkup(rows))
+        await _edit_or_send(update, "🛍 تنظیمات اشتراک", InlineKeyboardMarkup(rows))
         return
+
+    if section == "sub_link_status":
+        rows = [
+            [InlineKeyboardButton(
+                f"کانفیگ مستقیم | {_bool_icon(s.get('show_direct_config'))}",
+                callback_data="userbot:settings:sub_link_status:show_direct_config",
+            )],
+            [InlineKeyboardButton(
+                f"لینک اشتراک | {_bool_icon(s.get('show_sub_link'))}",
+                callback_data="userbot:settings:sub_link_status:show_sub_link",
+            )],
+            [InlineKeyboardButton(
+                f"لینک اشتراک هوشمند | {_bool_icon(s.get('show_smart_link'))}",
+                callback_data="userbot:settings:sub_link_status:show_smart_link",
+            )],
+            [InlineKeyboardButton(
+                "🌐 تنظیم دامنه لینک اشتراک هوشمند",
+                callback_data="userbot:settings:sub_link_status:set_base_url",
+            )],
+            [InlineKeyboardButton(
+                "🔐 راهنمای SSL دامنه",
+                callback_data="userbot:settings:sub_link_status:ssl_help",
+            )],
+            [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
+        ]
+        base_url = str(s.get("smart_base_url") or "").strip() or "پیش‌فرض سرور"
+        await _edit_or_send(
+            update,
+            f"📁 وضعیت نمایش لینک اشتراک\n🌐 دامنه فعلی: {base_url}",
+            InlineKeyboardMarkup(rows),
+        )
+        return
+
+    if section == "buy_renew":
+        rows = [
+            [InlineKeyboardButton(
+                f"امکان خرید اشتراک | {_bool_icon(s.get('enable_buy'))}",
+                callback_data="userbot:settings:buy_renew:enable_buy",
+            )],
+            [InlineKeyboardButton(
+                f"امکان تمدید اشتراک | {_bool_icon(s.get('enable_renew'))}",
+                callback_data="userbot:settings:buy_renew:enable_renew",
+            )],
+            [InlineKeyboardButton(
+                f"دکمه تمدید اشتراک در منوی اصلی | {_bool_icon(s.get('show_renew_in_main_menu'))}",
+                callback_data="userbot:settings:buy_renew:show_renew_in_main_menu",
+            )],
+            [
+                InlineKeyboardButton(
+                    "ستون‌های پلن‌ها",
+                    callback_data="userbot:settings:buy_renew:plan_columns:menu",
+                ),
+                InlineKeyboardButton(
+                    "ستون‌های سرورها",
+                    callback_data="userbot:settings:buy_renew:server_columns:menu",
+                ),
+            ],
+            [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
+        ]
+        await _edit_or_send(update, "🛒 تنظیمات خرید و تمدید", InlineKeyboardMarkup(rows))
+        return
+
+    if section == "ui":
+        rows = [
+            [InlineKeyboardButton(
+                f"رنگی بودن دکمه‌ها | {_bool_icon(s.get('colored_buttons'))}",
+                callback_data="userbot:settings:ui:colored_buttons",
+            )],
+            [InlineKeyboardButton("✨ هوشمند", callback_data="userbot:settings:ui:theme:smart")],
+            [InlineKeyboardButton("🛒 فروشگاهی", callback_data="userbot:settings:ui:theme:shop")],
+            [InlineKeyboardButton("💼 حرفه‌ای", callback_data="userbot:settings:ui:theme:pro")],
+            [InlineKeyboardButton("🕊 مینیمال", callback_data="userbot:settings:ui:theme:minimal")],
+            [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
+        ]
+        await _edit_or_send(
+            update,
+            f"🎨 تنظیم ظاهر دکمه‌ها\nطرح فعلی: {s.get('button_theme')}",
+            InlineKeyboardMarkup(rows),
+        )
+        return
+
     if section == "tx_plans":
         rows = [
-            [InlineKeyboardButton(f"🔢 ترتیب پلن‌ها | {s.get('plan_sort_mode')}", callback_data="userbot:settings:plansort")],
-            [InlineKeyboardButton(f"📋 ستون‌های پلن‌ها | {s.get('plan_columns')}", callback_data="userbot:settings:plancol")],
-            [InlineKeyboardButton(f"🛰 ستون‌های سرورها | {s.get('server_columns')}", callback_data="userbot:settings:servercol")],
+            [InlineKeyboardButton(
+                f"🔢ترتیب پلن‌ها | {s.get('plan_sort_mode')}",
+                callback_data="userbot:settings:tx_plans:plan_sort_mode:menu",
+            )],
+            [InlineKeyboardButton(
+                f"📋 ستون‌های پلن‌ها | {s.get('plan_columns')}",
+                callback_data="userbot:settings:buy_renew:plan_columns:menu",
+            )],
+            [InlineKeyboardButton(
+                f"🛰 ستون‌های سرورها | {s.get('server_columns')}",
+                callback_data="userbot:settings:buy_renew:server_columns:menu",
+            )],
             [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
         ]
         await _edit_or_send(update, "🧮 تنظیمات تراکنشات و پلن ها", InlineKeyboardMarkup(rows))
         return
+
     if section == "texts":
         rows = [
-            [InlineKeyboardButton("🔔پیام خوش آمدگویی", callback_data="userbot:settings:text:welcome_message")],
-            [InlineKeyboardButton("📕متن سوالات متداول", callback_data="userbot:settings:text:faq_text")],
-            [InlineKeyboardButton("💡متن راهنما", callback_data="userbot:settings:text:guide_text")],
-            [InlineKeyboardButton("🛰️متن لیست سرورها", callback_data="userbot:settings:text:servers_list_text")],
-            [InlineKeyboardButton("📋متن لیست پلن‌ها", callback_data="userbot:settings:text:plans_list_text")],
-            [InlineKeyboardButton("📬متن پنل تیکت", callback_data="userbot:settings:text:ticket_panel_text")],
+            [InlineKeyboardButton("🔔پیام خوش آمدگویی", callback_data="userbot:settings:texts:edit:welcome_message")],
+            [InlineKeyboardButton("📕متن سوالات متداول", callback_data="userbot:settings:texts:edit:faq_text")],
+            [InlineKeyboardButton("💡متن راهنما", callback_data="userbot:settings:texts:guide_menu")],
+            [InlineKeyboardButton("🛰️متن لیست سرورها", callback_data="userbot:settings:texts:edit:servers_list_text")],
+            [InlineKeyboardButton("📋متن لیست پلن‌ها", callback_data="userbot:settings:texts:edit:plans_list_text")],
+            [InlineKeyboardButton("📬متن پنل تیکت", callback_data="userbot:settings:texts:edit:ticket_panel_text")],
             [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
         ]
         await _edit_or_send(update, "🧾 تنظیمات متون", InlineKeyboardMarkup(rows))
         return
+
+    if section == "guide_texts":
+        rows = [
+            [InlineKeyboardButton("📝 متن ابتدای راهنما", callback_data="userbot:settings:texts:edit:guide_text")],
+            [InlineKeyboardButton("📱 راهنمای اندروید", callback_data="userbot:settings:texts:edit:guide_android_text")],
+            [InlineKeyboardButton("📱 راهنمای IOS", callback_data="userbot:settings:texts:edit:guide_ios_text")],
+            [InlineKeyboardButton("🖥️ راهنمای ویندوز", callback_data="userbot:settings:texts:edit:guide_windows_text")],
+            [InlineKeyboardButton("💻 راهنمای مک", callback_data="userbot:settings:texts:edit:guide_mac_text")],
+            [InlineKeyboardButton("🖥️ راهنمای لینوکس", callback_data="userbot:settings:texts:edit:guide_linux_text")],
+            [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:texts")],
+        ]
+        await _edit_or_send(update, "💡 تنظیم متن‌های راهنما", InlineKeyboardMarkup(rows))
+        return
+
     if section == "marketing":
         growth = business.growth_settings(actor)
         rows = [
-            [InlineKeyboardButton(f"🎁 نمایش دکمه هدیه | {_bool_icon(s.get('show_gift_button'))}", callback_data="userbot:settings:toggle:show_gift_button:userbot:settings:marketing")],
-            [InlineKeyboardButton(f"🤝 رفرال | {_bool_icon(growth.get('referral_enabled'))}", callback_data="userbot:referral:toggle")],
-            [InlineKeyboardButton(f"🎁 تست رایگان | {_bool_icon(growth.get('trial_enabled'))}", callback_data="userbot:settings:trial")],
+            [InlineKeyboardButton(
+                f"🎟 کد تخفیف | {_bool_icon(s.get('enable_discount_code'))}",
+                callback_data="userbot:settings:marketing:toggle:enable_discount_code",
+            )],
+            [InlineKeyboardButton(
+                f"🎁 نمایش دکمه هدیه | {_bool_icon(s.get('show_gift_button'))}",
+                callback_data="userbot:settings:marketing:toggle:show_gift_button",
+            )],
+            [InlineKeyboardButton(
+                f"📊 نمایش وضعیت | {_bool_icon(s.get('show_user_status'))}",
+                callback_data="userbot:settings:marketing:toggle:show_user_status",
+            )],
+            [InlineKeyboardButton(
+                f"🤝 رفرال | {_bool_icon(growth.get('referral_enabled'))}",
+                callback_data="userbot:referral:toggle",
+            )],
+            [InlineKeyboardButton(
+                f"🔥 تست رایگان | {_bool_icon(growth.get('trial_enabled'))}",
+                callback_data="userbot:settings:subscription:trial_spec",
+            )],
             [InlineKeyboardButton("🎟 مدیریت کوپن تخفیف", callback_data="biz:growth")],
             [InlineKeyboardButton("🏷 مدیریت کدهای هدیه", callback_data="userbot:gifts:coupons")],
             [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
         ]
         await _edit_or_send(update, "🎯 تنظیمات بازاریابی", InlineKeyboardMarkup(rows))
         return
+
     if section == "force_join":
         rows = [
-            [InlineKeyboardButton(f"🔒 عضویت اجباری | {_bool_icon(s.get('force_join_enabled'))}", callback_data="userbot:settings:toggle:force_join_enabled:userbot:settings:force_join")],
+            [InlineKeyboardButton(
+                f"🔒 عضویت اجباری | {_bool_icon(s.get('force_join_enabled'))}",
+                callback_data="userbot:settings:force_join:toggle",
+            )],
             [InlineKeyboardButton("📢 تنظیم کانال", callback_data="userbot:settings:force_join:set_channel")],
+            [InlineKeyboardButton("❓ راهنما", callback_data="userbot:settings:force_join:help")],
             [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
         ]
         await _edit_or_send(
@@ -1077,9 +1196,10 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
             InlineKeyboardMarkup(rows),
         )
         return
+
     if section == "payment":
         methods = business.list_payment_methods_admin(actor)
-        rows = [
+        rows: list[list[InlineKeyboardButton]] = [
             [InlineKeyboardButton(
                 f"{'✅' if x['status']=='active' else '❌'} {x['title']} · {x['currency']}",
                 callback_data=f"userbot:settings:payment:method:{int(x['id'])}",
@@ -1087,19 +1207,28 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
             for x in methods
         ]
         rows.extend([
-            [InlineKeyboardButton("➕ افزودن روش پرداخت", callback_data="userbot:settings:payment:add")],
+            [
+                InlineKeyboardButton("💳 افزودن کارت به کارت", callback_data="userbot:settings:payment:addkind:card"),
+                InlineKeyboardButton("🔗 افزودن ارز دیجیتال", callback_data="userbot:settings:payment:addkind:crypto"),
+            ],
             [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
         ])
-        await _edit_or_send(update, "💳 تنظیمات پرداخت", InlineKeyboardMarkup(rows))
+        await _edit_or_send(
+            update,
+            "💳 تنظیمات پرداخت\n"
+            "روش‌های پرداخت هر Tenant مستقل هستند و فقط روش‌های واقعاً پشتیبانی‌شده نمایش داده می‌شوند.",
+            InlineKeyboardMarkup(rows),
+        )
         return
+
     if section == "backup_restore":
         await _edit_or_send(
             update,
             "🗂️ تنظیمات بکاپ و بازیابی\n"
             "بکاپ Tenant شامل تنظیمات ربات کاربران، پلن‌ها، روش‌های پرداخت و کوپن‌هاست.",
             InlineKeyboardMarkup([
-                [InlineKeyboardButton("📥 دریافت بکاپ Tenant", callback_data="userbot:settings:backup:download")],
-                [InlineKeyboardButton("📤 بازیابی بکاپ Tenant", callback_data="userbot:settings:backup:restore")],
+                [InlineKeyboardButton("📩دریافت فایل بکاپ", callback_data="userbot:settings:backup:download")],
+                [InlineKeyboardButton("📤بازیابی فایل بکاپ", callback_data="userbot:settings:backup:restore")],
                 [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
             ]),
         )
