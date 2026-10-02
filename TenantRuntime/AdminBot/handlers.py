@@ -644,6 +644,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         raise RuntimeError("AdminBot callback registered for non-admin role")
     actor = int(update.effective_user.id) if update.effective_user else 0
     try:
+        if data.startswith(("userbot:", "channelpost:")):
+            from TenantRuntime.AdminBot import userbot_management
+            if await userbot_management.handle_callback(
+                update, context, business=business, actor=actor
+            ):
+                return
+
         if data.startswith("searchmenu:"):
             await update.callback_query.answer()
             action = data.split(":", 1)[1]
@@ -2194,6 +2201,7 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             # Main-menu navigation always leaves any unfinished text wizard,
             # matching the proven SellBot behavior.
             context.user_data.pop("biz_flow", None)
+            context.user_data.pop("userbot_admin_flow", None)
 
             if text == BTN_SERVERS:
                 server_text, server_keyboard = _server_list_view(business)
@@ -2222,12 +2230,8 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 return
 
             if text == BTN_USERBOT:
-                await update.effective_message.reply_text(
-                    "🤖 مدیریت ربات کاربران\n\n"
-                    "امکانات مدیریتی فعلی WhiteLabel از این بخش در دسترس است. "
-                    "در مراحل بعدی این صفحه نیز با ساختار SellBot یکسان می‌شود.",
-                    reply_markup=_menu(spec),
-                )
+                from TenantRuntime.AdminBot import userbot_management
+                await userbot_management.send_userbot_main_menu(update, context)
                 return
 
             if text == BTN_AGENCIES:
@@ -2243,6 +2247,16 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     "بکاپ سراسری Master به ادمین Tenant نمایش داده نمی‌شود."
                 )
                 return
+
+        from TenantRuntime.AdminBot import userbot_management
+        if await userbot_management.handle_text(
+            update,
+            context,
+            business=business,
+            actor=actor,
+            admin_main_keyboard=admin_main_keyboard,
+        ):
+            return
 
         if isinstance(flow, dict) and str(flow.get("kind") or "").startswith("search_"):
             kind = str(flow.get("kind") or "")
@@ -2904,6 +2918,28 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
 
 
+async def userbot_admin_document(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    spec, _, _, business = _services(context)
+    if spec.role != "admin":
+        raise RuntimeError("AdminBot media handler registered for non-admin role")
+    actor = int(update.effective_user.id) if update.effective_user else 0
+    from TenantRuntime.AdminBot import userbot_management
+    handled = await userbot_management.handle_document(
+        update,
+        context,
+        business=business,
+        actor=actor,
+        admin_main_keyboard=admin_main_keyboard,
+    )
+    if not handled and update.effective_message:
+        await update.effective_message.reply_text(
+            "از منوی ربات استفاده کنید.",
+            reply_markup=admin_main_keyboard(),
+        )
+
+
 def register_admin_handlers(application: Application) -> None:
     spec = application.bot_data.get("runtime_spec")
     if not isinstance(spec, RuntimeBotSpec) or spec.role != "admin":
@@ -2913,6 +2949,9 @@ def register_admin_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("menu", show_home), group=0)
     application.add_handler(CommandHandler("status", show_status), group=0)
     application.add_handler(CallbackQueryHandler(on_callback), group=0)
+    application.add_handler(
+        MessageHandler(filters.Document.ALL, userbot_admin_document), group=0
+    )
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, unknown_text), group=0
     )
