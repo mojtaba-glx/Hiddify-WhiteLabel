@@ -573,6 +573,7 @@ def _menu(spec: RuntimeBotSpec, business) -> InlineKeyboardMarkup:
 
 
 async def _force_join_allowed(update: Update, context: ContextTypes.DEFAULT_TYPE, business) -> bool:
+    await _remove_legacy_reply_keyboard(update, context)
     settings = _set_button_settings(business.runtime_userbot_settings())
     if not bool(settings.get("force_join_enabled", False)):
         return True
@@ -667,6 +668,7 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     spec, policy, state_store, business = _services(context)
+    await _remove_legacy_reply_keyboard(update, context)
     if spec.role != "user":
         raise RuntimeError("UserBot handler registered for non-user role")
     user_id = int(update.effective_user.id) if update.effective_user else 0
