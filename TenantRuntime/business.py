@@ -3690,6 +3690,58 @@ class TenantBusinessService:
             if changed.rowcount != 1:
                 raise TenantBusinessError("subscription state changed")
         return {"id": int(subscription_id), "status": "disabled"}
+    def subscription_configs(
+        self, actor_id: int, *, subscription_id: int
+    ) -> list[dict[str, str]]:
+        customer = self._customer(actor_id)
+        row = self.conn.execute(
+            "SELECT * FROM tenant_subscriptions "
+            "WHERE id=? AND tenant_id=? AND customer_id=?",
+            (int(subscription_id), self.tenant_id, int(customer["id"])),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("subscription not found")
+        subscription = dict(row)
+        if subscription["status"] != "active" or self._subscription_is_due(subscription):
+            raise TenantBusinessError("subscription is not active")
+        self._ensure_primary_subscription_node(subscription)
+        mappings = self.conn.execute(
+            "SELECT n.*, s.label AS server_label "
+            "FROM tenant_subscription_nodes n "
+            "JOIN tenant_servers s ON s.id=n.server_id AND s.tenant_id=n.tenant_id "
+            "WHERE n.tenant_id=? AND n.subscription_id=? "
+            "AND n.external_ref IS NOT NULL AND n.status='active' "
+            "ORDER BY n.is_primary DESC, n.id",
+            (self.tenant_id, int(subscription_id)),
+        ).fetchall()
+        results: list[dict[str, str]] = []
+        for mapping in mappings:
+            secret = ""
+            try:
+                _, target, secret = self._panel_material(int(mapping["server_id"]))
+                content = str(
+                    self.panel_adapter.subscription_content(
+                        target=target,
+                        secret=secret,
+                        external_ref=str(mapping["external_ref"]),
+                    )
+                    or ""
+                ).strip()
+                if content:
+                    results.append(
+                        {
+                            "server": str(mapping["server_label"]),
+                            "content": content,
+                        }
+                    )
+            except PanelError:
+                continue
+            finally:
+                secret = ""
+        if not results:
+            raise TenantBusinessError("subscription configs are unavailable")
+        return results
+
     def subscription_link(self, actor_id: int, *, subscription_id: int) -> str:
         customer = self._customer(actor_id)
         row = self.conn.execute(
