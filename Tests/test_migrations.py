@@ -25,7 +25,7 @@ EXPECTED_TABLES = {
     "tenant_servers", "tenant_nodes", "tenant_sale_plans", "tenant_customers",
     "tenant_payment_methods", "tenant_orders", "tenant_receipts", "tenant_subscriptions",
     "tenant_tickets", "tenant_smart_links",
-    "tenant_panel_credentials",
+    "tenant_panel_credentials", "tenant_plan_categories",
 }
 
 
@@ -56,6 +56,7 @@ def test_migration_is_idempotent(db_path) -> None:
     assert "0006_panel_credentials" in versions
     assert "0007_platform_settings" in versions
     assert "0008_order_paid_at" in versions
+    assert "0021_purchase_catalog" in versions
 
 
 def test_foreign_keys_enforced(conn, factories) -> None:
@@ -88,6 +89,7 @@ def test_checksums_recorded(db_path) -> None:
     assert len(recorded["0006_panel_credentials"]) == 64
     assert len(recorded["0007_platform_settings"]) == 64
     assert len(recorded["0008_order_paid_at"]) == 64
+    assert len(recorded["0021_purchase_catalog"]) == 64
 
 
 def test_checksum_mismatch_detected(db_path, tmp_path) -> None:
