@@ -1518,6 +1518,34 @@ class TenantBusinessService:
                 (self.tenant_id, int(customer["id"])),
             ).fetchall()
         ]
+        gifts = [
+            {
+                "id": int(row["id"]),
+                "tenant_id": self.tenant_id,
+                "customer_id": int(customer["id"]),
+                "currency": str(row["currency"]),
+                "amount": int(row["amount"]),
+                "kind": "gift",
+                "order_id": None,
+                "idempotency_key": f"gift:{int(row['id'])}",
+                "note": f"gift voucher {row['code']}",
+                "resulting_balance": int(row["resulting_balance"]),
+                "created_at": str(row["redeemed_at"]),
+            }
+            for row in self.conn.execute(
+                "SELECT r.*, v.code FROM tenant_gift_redemptions r "
+                "JOIN tenant_gift_vouchers v "
+                "ON v.id=r.voucher_id AND v.tenant_id=r.tenant_id "
+                "WHERE r.tenant_id=? AND r.customer_id=? "
+                "ORDER BY r.id DESC LIMIT 15",
+                (self.tenant_id, int(customer["id"])),
+            ).fetchall()
+        ]
+        history = sorted(
+            history + gifts,
+            key=lambda item: str(item.get("created_at") or ""),
+            reverse=True,
+        )[:15]
         return {"accounts": accounts, "history": history}
 
     def create_wallet_topup(
@@ -1744,6 +1772,229 @@ class TenantBusinessService:
                 ),
                 note=note,
             )
+
+    def add_gift_voucher_admin(
+        self,
+        actor_id: int,
+        *,
+        code: str,
+        amount: int,
+        currency: str = "IRR",
+        max_uses: int = 1,
+        expires_at: str = "",
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        clean_code = str(code or "").strip().upper()
+        value = int(amount)
+        uses = int(max_uses)
+        clean_currency = _text(currency, 8).upper()
+        if not clean_code or len(clean_code) > 48 or value <= 0 or uses <= 0:
+            raise ValueError("invalid gift voucher")
+        expiry = _text(expires_at, 80, required=False) or None
+        if expiry:
+            parse_utc(expiry)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            cursor = self.conn.execute(
+                "INSERT INTO tenant_gift_vouchers "
+                "(tenant_id, code, amount, currency, max_uses, used_count, "
+                "expires_at, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 0, ?, 'active', ?, ?)",
+                (
+                    self.tenant_id,
+                    clean_code,
+                    value,
+                    clean_currency,
+                    uses,
+                    expiry,
+                    now,
+                    now,
+                ),
+            )
+        return self.gift_voucher_admin(
+            actor_id, voucher_id=int(cursor.lastrowid or 0)
+        )
+
+    def gift_voucher_admin(
+        self, actor_id: int, *, voucher_id: int
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        row = self.conn.execute(
+            "SELECT * FROM tenant_gift_vouchers "
+            "WHERE tenant_id=? AND id=?",
+            (self.tenant_id, int(voucher_id)),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("gift voucher not found")
+        return dict(row)
+
+    def list_gift_vouchers_admin(
+        self, actor_id: int
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        rows = self.conn.execute(
+            "SELECT * FROM tenant_gift_vouchers "
+            "WHERE tenant_id=? ORDER BY id DESC",
+            (self.tenant_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def gift_redemptions_admin(
+        self, actor_id: int, *, voucher_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        sql = (
+            "SELECT r.*, v.code, c.display_name, c.username, "
+            "c.telegram_user_id FROM tenant_gift_redemptions r "
+            "JOIN tenant_gift_vouchers v "
+            "ON v.id=r.voucher_id AND v.tenant_id=r.tenant_id "
+            "JOIN tenant_customers c "
+            "ON c.id=r.customer_id AND c.tenant_id=r.tenant_id "
+            "WHERE r.tenant_id=?"
+        )
+        args: list[Any] = [self.tenant_id]
+        if voucher_id is not None:
+            sql += " AND r.voucher_id=?"
+            args.append(int(voucher_id))
+        sql += " ORDER BY r.id DESC LIMIT 500"
+        return [
+            dict(row)
+            for row in self.conn.execute(sql, tuple(args)).fetchall()
+        ]
+
+    def set_gift_voucher_status_admin(
+        self, actor_id: int, *, voucher_id: int, enabled: bool
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_gift_vouchers SET status=?, updated_at=? "
+                "WHERE tenant_id=? AND id=?",
+                (
+                    "active" if enabled else "disabled",
+                    iso_utc(utcnow()),
+                    self.tenant_id,
+                    int(voucher_id),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("gift voucher not found")
+        return self.gift_voucher_admin(actor_id, voucher_id=int(voucher_id))
+
+    def delete_gift_voucher_admin(
+        self, actor_id: int, *, voucher_id: int
+    ) -> None:
+        self._admin(actor_id)
+        used = self.conn.execute(
+            "SELECT COUNT(*) FROM tenant_gift_redemptions "
+            "WHERE tenant_id=? AND voucher_id=?",
+            (self.tenant_id, int(voucher_id)),
+        ).fetchone()
+        if int(used[0] or 0) > 0:
+            raise TenantBusinessError(
+                "used gift voucher cannot be deleted; disable it instead"
+            )
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "DELETE FROM tenant_gift_vouchers "
+                "WHERE tenant_id=? AND id=?",
+                (self.tenant_id, int(voucher_id)),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("gift voucher not found")
+
+    def redeem_gift_voucher(
+        self, actor_id: int, *, code: str
+    ) -> dict[str, Any]:
+        customer = self._customer(actor_id)
+        clean_code = str(code or "").strip().upper()
+        if not clean_code:
+            raise TenantBusinessError("gift voucher not found")
+        now_dt = utcnow()
+        now = iso_utc(now_dt)
+        with transaction(self.conn):
+            row = self.conn.execute(
+                "SELECT * FROM tenant_gift_vouchers "
+                "WHERE tenant_id=? AND code=? AND status='active'",
+                (self.tenant_id, clean_code),
+            ).fetchone()
+            if row is None:
+                raise TenantBusinessError("gift voucher not found")
+            voucher = dict(row)
+            if voucher.get("expires_at") and parse_utc(
+                str(voucher["expires_at"])
+            ) <= now_dt:
+                raise TenantBusinessError("gift voucher expired")
+            if int(voucher["used_count"] or 0) >= int(voucher["max_uses"]):
+                raise TenantBusinessError("gift voucher is fully used")
+            previous = self.conn.execute(
+                "SELECT 1 FROM tenant_gift_redemptions "
+                "WHERE tenant_id=? AND voucher_id=? AND customer_id=?",
+                (
+                    self.tenant_id,
+                    int(voucher["id"]),
+                    int(customer["id"]),
+                ),
+            ).fetchone()
+            if previous is not None:
+                raise TenantBusinessError("gift voucher already used")
+            balance_row = self.conn.execute(
+                "SELECT balance FROM tenant_wallet_accounts "
+                "WHERE tenant_id=? AND customer_id=? AND currency=?",
+                (
+                    self.tenant_id,
+                    int(customer["id"]),
+                    str(voucher["currency"]),
+                ),
+            ).fetchone()
+            current = int(balance_row["balance"] or 0) if balance_row else 0
+            resulting = current + int(voucher["amount"])
+            self.conn.execute(
+                "INSERT INTO tenant_wallet_accounts "
+                "(tenant_id, customer_id, currency, balance, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(tenant_id, customer_id, currency) DO UPDATE SET "
+                "balance=excluded.balance, updated_at=excluded.updated_at",
+                (
+                    self.tenant_id,
+                    int(customer["id"]),
+                    str(voucher["currency"]),
+                    resulting,
+                    now,
+                ),
+            )
+            cursor = self.conn.execute(
+                "INSERT INTO tenant_gift_redemptions "
+                "(tenant_id, voucher_id, customer_id, amount, currency, "
+                "resulting_balance, redeemed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    self.tenant_id,
+                    int(voucher["id"]),
+                    int(customer["id"]),
+                    int(voucher["amount"]),
+                    str(voucher["currency"]),
+                    resulting,
+                    now,
+                ),
+            )
+            changed = self.conn.execute(
+                "UPDATE tenant_gift_vouchers "
+                "SET used_count=used_count+1, "
+                "status=CASE WHEN used_count+1>=max_uses THEN 'disabled' ELSE status END, "
+                "updated_at=? "
+                "WHERE tenant_id=? AND id=? AND status='active' "
+                "AND used_count<max_uses",
+                (now, self.tenant_id, int(voucher["id"])),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("gift voucher state changed")
+        return {
+            "id": int(cursor.lastrowid or 0),
+            "code": clean_code,
+            "amount": int(voucher["amount"]),
+            "currency": str(voucher["currency"]),
+            "resulting_balance": resulting,
+        }
 
     def add_coupon(
         self,
