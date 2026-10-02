@@ -29,6 +29,7 @@ from telegram.ext import (
 )
 
 from Gateway.catalog import RuntimeBotSpec
+from Shared.timeutils import parse_utc, utcnow
 from TenantRuntime.business import TenantBusinessError
 from TenantRuntime.common import _deny_update, _services, runtime_access_gate, runtime_error
 
@@ -192,6 +193,176 @@ def _growth_text(settings: dict, coupons: list[dict]) -> str:
         f"🎟 کوپن‌ها: {len(coupons)}",
     ])
 
+
+
+SEARCH_PAGE_SIZE = 21
+
+
+def _search_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔍 جستجوی هوشمند کاربر", callback_data="searchmenu:smart")],
+        [InlineKeyboardButton("📊پیگیری اشتراک", callback_data="searchmenu:tracking")],
+        [InlineKeyboardButton("⚠️ لیست کاربران منقضی شده", callback_data="searchmenu:expired")],
+        [InlineKeyboardButton("♻️ اشتراک‌های منقضی‌شده", callback_data="searchmenu:expired_profiles")],
+        [InlineKeyboardButton("🧹 بررسی رکوردهای مشکوک/قدیمی", callback_data="searchmenu:review_old")],
+        [InlineKeyboardButton("بازگشت🔙", callback_data="searchmenu:back_main")],
+    ])
+
+
+def _search_status_emoji(status: str) -> str:
+    value = str(status or "").strip().lower()
+    if value == "active":
+        return "🔵"
+    if value == "expired":
+        return "🔴"
+    return "🟡"
+
+
+def _search_results_view(
+    results: list[dict], *, page: int = 1, title: str = "[📥 نتیجه جستجو]"
+) -> tuple[str, InlineKeyboardMarkup]:
+    total = len(results)
+    pages = max(1, (total + SEARCH_PAGE_SIZE - 1) // SEARCH_PAGE_SIZE)
+    page = max(1, min(int(page), pages))
+    start = (page - 1) * SEARCH_PAGE_SIZE
+    selected = results[start:start + SEARCH_PAGE_SIZE]
+
+    active = sum(1 for x in results if str(x.get("status")) == "active")
+    expired = sum(1 for x in results if str(x.get("status")) == "expired")
+    inactive = max(0, total - active - expired)
+    text = (
+        f"{title}\n"
+        "#️⃣ لیست کاربران\n"
+        "شما می‌توانید لیست کاربران و اطلاعات آن‌ها را اینجا مشاهده کنید\n"
+        f"👤 تعداد کاربران: {total}\n"
+        f"🔵 کاربران فعال: {active}\n"
+        f"🟡 کاربران غیرفعال/درانتظار: {inactive}\n"
+        f"🔴 کاربران منقضی: {expired}"
+    )
+
+    buttons = [
+        InlineKeyboardButton(
+            f"{str(item.get('display_name') or 'کاربر')[:20]}{_search_status_emoji(str(item.get('status') or ''))}",
+            callback_data=f"search:sel:{int(item['id'])}",
+        )
+        for item in selected
+    ]
+    rows = [
+        list(reversed(buttons[i:i + 3]))
+        for i in range(0, len(buttons), 3)
+    ]
+    if pages > 1:
+        nav = []
+        if page > 1:
+            nav.append(InlineKeyboardButton("➡️", callback_data=f"search:page:{page-1}"))
+        nav.append(InlineKeyboardButton(f"{page}/{pages}", callback_data="search:noop"))
+        if page < pages:
+            nav.append(InlineKeyboardButton("⬅️", callback_data=f"search:page:{page+1}"))
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("بازگشت🔙", callback_data="search:back")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _subscription_detail_view(
+    business, actor: int, subscription_id: int
+) -> tuple[str, InlineKeyboardMarkup]:
+    item = business.subscription_admin(actor, subscription_id=int(subscription_id))
+    usage = int(item.get("usage_bytes") or 0) / (1024 ** 3)
+    limit = int(item.get("traffic_bytes") or 0) / (1024 ** 3)
+    status = str(item.get("status") or "")
+    status_text = {
+        "active": "🟢وضعیت حساب: فعال",
+        "disabled": "⚫وضعیت حساب: غیرفعال",
+        "expired": "🔴وضعیت حساب: منقضی",
+        "pending_provisioning": "🟡وضعیت حساب: در انتظار ساخت",
+    }.get(status, f"وضعیت: {status}")
+    expiry = str(item.get("expires_at") or "")
+    expire_text = "نامشخص"
+    if expiry:
+        try:
+            delta = parse_utc(expiry) - utcnow()
+            days = int(delta.total_seconds() // 86400)
+            expire_text = (
+                f"منقضی شده ({abs(days)} روز پیش)"
+                if delta.total_seconds() < 0
+                else f"{max(0, days)} روز دیگر"
+            )
+        except Exception:
+            expire_text = expiry
+    last_online = str(item.get("last_online") or "ثبت نشده")
+    text = (
+        f"👤 کاربر:  {item.get('display_name') or 'کاربر'}\n"
+        "❖⬩╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍⬩❖\n"
+        f"⬖ سرور:  {item.get('server_label') or 'ثبت نشده'}\n"
+        f"📊مصرف: {usage:.2f} از {limit:.2f} گیگابایت\n"
+        f"📆انقضا: {expire_text}\n"
+        f"{status_text}\n"
+        f"📶آخرین اتصال: {last_online}\n"
+        f"📝یادداشت: —\n"
+        f"🔑 شناسه سرویس: {int(item['id'])}"
+    )
+    rows = [
+        [InlineKeyboardButton("کانفیگ ها📄", callback_data=f"search:cfg:{subscription_id}")],
+        [InlineKeyboardButton("ویرایش کاربر✏️", callback_data=f"search:edit:{subscription_id}")],
+        [InlineKeyboardButton("تمدید اشتراک♾️", callback_data=f"search:renew:{subscription_id}")],
+        [InlineKeyboardButton("حذف کاربر🗑️", callback_data=f"search:delete:{subscription_id}")],
+        [InlineKeyboardButton("پروفایل کاربر👤", callback_data=f"biz:customer:{int(item['customer_id'])}")],
+        [InlineKeyboardButton("بازگشت به نتایج🔙", callback_data="search:results")],
+    ]
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _daily_report_text(report: dict) -> str:
+    cash = list(report.get("cash") or [])
+    services = list(report.get("services") or [])
+    cash_count = sum(int(x.get("count") or 0) for x in cash)
+    buy_count = sum(int(x.get("buy_count") or 0) for x in services)
+    renew_count = sum(int(x.get("renew_count") or 0) for x in services)
+    lines = [
+        "📊 <b>گزارش کامل روزانه فروش</b>",
+        f"📅 تاریخ: <b>{report.get('report_day') or '-'}</b>",
+        "",
+        "💰 <b>دریافتی واقعی به سیستم</b>",
+        f"• رسید خرید/تمدید تأییدشده: {int(report.get('approved_receipts') or 0)} مورد",
+        f"• شارژ کیف پول تأییدشده: {int(report.get('approved_topups') or 0)} مورد",
+    ]
+    if cash:
+        for item in cash:
+            lines.append(
+                f"• {item.get('currency') or ''}: {int(item.get('amount') or 0):,} "
+                f"({int(item.get('count') or 0)} پرداخت)"
+            )
+    else:
+        lines.append("• جمع ورودی نقدی: 0")
+    lines.extend([
+        f"• جمع پرداخت‌های خارجی: <b>{cash_count}</b>",
+        f"• رد/ناموفق: {int(report.get('rejected_receipts') or 0) + int(report.get('rejected_topups') or 0)}",
+        "",
+        "🛒 <b>عملیات موفق سرویس</b>",
+        f"• ساخت سرویس: <b>{buy_count}</b> مورد",
+        f"• تمدید سرویس: <b>{renew_count}</b> مورد",
+        "",
+        "👤 <b>فروش مستقیم UserBot</b>",
+    ])
+    if services:
+        for item in services:
+            currency = item.get("currency") or ""
+            lines.extend([
+                f"• خرید: {int(item.get('buy_count') or 0)} مورد — {int(item.get('buy_amount') or 0):,} {currency}",
+                f"• تمدید: {int(item.get('renew_count') or 0)} مورد — {int(item.get('renew_amount') or 0):,} {currency}",
+                f"• پرداخت از کیف پول: {int(item.get('wallet_count') or 0)} مورد — {int(item.get('wallet_amount') or 0):,} {currency}",
+            ])
+    else:
+        lines.append("• فروش ثبت‌شده: 0")
+    lines.extend([
+        "",
+        f"👥 کاربران جدید: {int(report.get('new_customers') or 0)}",
+        "",
+        "ℹ️ پرداخت از کیف پول «فروش سرویس» است، اما ورودی نقدی جدید محسوب نمی‌شود.",
+        "ℹ️ شارژ کیف پول در دریافتی واقعی ثبت می‌شود و مصرف همان اعتبار دوباره به ورودی نقدی اضافه نمی‌شود.",
+        f"🕛 گزارش پایان روز ({report.get('timezone') or 'Asia/Tehran'})",
+    ])
+    return "\n".join(lines)
 
 
 BTN_SERVERS = "🖥 مدیریت سرورها"
@@ -450,6 +621,226 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         raise RuntimeError("AdminBot callback registered for non-admin role")
     actor = int(update.effective_user.id) if update.effective_user else 0
     try:
+        if data.startswith("searchmenu:"):
+            action = data.split(":", 1)[1]
+            if action == "smart":
+                context.user_data["biz_flow"] = {"kind": "search_smart"}
+                await update.callback_query.edit_message_text(
+                    "🔍 جستجوی هوشمند کاربر در کل ربات\n"
+                    "نام کاربر، یوزرنیم، Telegram ID، شناسه سرویس یا شناسه پنل را ارسال کنید."
+                )
+                return
+            if action == "tracking":
+                items = business.list_subscriptions_tracking_admin(actor)
+                context.user_data["smart_search_results"] = items
+                context.user_data["search_results_title"] = "📊 پیگیری اشتراک"
+                text, kb = _search_results_view(items, title="📊 پیگیری اشتراک")
+                await update.callback_query.edit_message_text(text, reply_markup=kb)
+                return
+            if action in ("expired", "expired_profiles"):
+                items = business.list_subscriptions_tracking_admin(
+                    actor, status="expired"
+                )
+                context.user_data["smart_search_results"] = items
+                title = (
+                    "[⚠️لیست کاربران منقضی شده]"
+                    if action == "expired"
+                    else "♻️ اشتراک‌های منقضی‌شده"
+                )
+                context.user_data["search_results_title"] = title
+                text, kb = _search_results_view(items, title=title)
+                await update.callback_query.edit_message_text(text, reply_markup=kb)
+                return
+            if action == "review_old":
+                await update.callback_query.edit_message_text(
+                    "🧹 بررسی رکوردهای مشکوک/قدیمی\n\n"
+                    "این بخش فقط برای بررسی دستی است و چیزی را خودکار حذف نمی‌کند.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "🟠 روز صفر / وضعیت مشکوک",
+                            callback_data="search:old:stale_zero",
+                        )],
+                        [InlineKeyboardButton(
+                            "🟡 اشتراک‌های قدیمیِ شروع‌نشده",
+                            callback_data="search:old:unstarted",
+                        )],
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data="search:back")],
+                    ]),
+                )
+                return
+            if action == "back_main":
+                try:
+                    await update.callback_query.message.delete()
+                except Exception:
+                    pass
+                await update.effective_chat.send_message(
+                    "به منوی اصلی برگشتید.",
+                    reply_markup=admin_main_keyboard(),
+                )
+                return
+
+        if data.startswith("search:"):
+            parts = data.split(":")
+            action = parts[1] if len(parts) > 1 else ""
+            if action == "noop":
+                await update.callback_query.answer()
+                return
+            if action == "back":
+                context.user_data.pop("smart_search_results", None)
+                await update.callback_query.edit_message_text(
+                    "🔍 جستجوی کاربر", reply_markup=_search_menu_keyboard()
+                )
+                return
+            if action == "results":
+                items = list(context.user_data.get("smart_search_results") or [])
+                title = str(context.user_data.get("search_results_title") or "[📥 نتیجه جستجو]")
+                text, kb = _search_results_view(items, title=title)
+                await update.callback_query.edit_message_text(text, reply_markup=kb)
+                return
+            if action == "page" and len(parts) == 3:
+                items = list(context.user_data.get("smart_search_results") or [])
+                title = str(context.user_data.get("search_results_title") or "[📥 نتیجه جستجو]")
+                text, kb = _search_results_view(items, page=int(parts[2]), title=title)
+                await update.callback_query.edit_message_text(text, reply_markup=kb)
+                return
+            if action == "old" and len(parts) == 3:
+                items = business.review_old_subscriptions_admin(
+                    actor, kind=parts[2]
+                )
+                context.user_data["smart_search_results"] = items
+                title = (
+                    "🟠 روز صفر / وضعیت مشکوک"
+                    if parts[2] == "stale_zero"
+                    else "🟡 اشتراک‌های قدیمیِ شروع‌نشده"
+                )
+                context.user_data["search_results_title"] = title
+                text, kb = _search_results_view(items, title=title)
+                await update.callback_query.edit_message_text(text, reply_markup=kb)
+                return
+            if action == "sel" and len(parts) == 3:
+                text, kb = _subscription_detail_view(
+                    business, actor, int(parts[2])
+                )
+                await update.callback_query.edit_message_text(text, reply_markup=kb)
+                return
+            if action == "cfg" and len(parts) == 3:
+                sid = int(parts[2])
+                link = business.admin_subscription_link(
+                    actor, subscription_id=sid
+                )
+                await update.callback_query.edit_message_text(
+                    f"کانفیگ ها📄\n\n🔗 لینک اشتراک:\n{link}",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "بازگشت🔙", callback_data=f"search:sel:{sid}"
+                        )
+                    ]]),
+                    disable_web_page_preview=True,
+                )
+                return
+            if action == "edit" and len(parts) == 3:
+                sid = int(parts[2])
+                item = business.subscription_admin(actor, subscription_id=sid)
+                toggle = "✅ فعال‌سازی" if item["status"] == "disabled" else "⛔ غیرفعال‌سازی"
+                await update.callback_query.edit_message_text(
+                    _subscription_detail_view(business, actor, sid)[0],
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(toggle, callback_data=f"search:editact:{sid}:toggle")],
+                        [
+                            InlineKeyboardButton("بازنشانی حجم🔄", callback_data=f"search:editact:{sid}:reset_usage"),
+                            InlineKeyboardButton("ویرایش حجم📊", callback_data=f"search:editact:{sid}:volume"),
+                        ],
+                        [
+                            InlineKeyboardButton("بازنشانی مدت🔄", callback_data=f"search:editact:{sid}:reset_days"),
+                            InlineKeyboardButton("ویرایش مدت📅", callback_data=f"search:editact:{sid}:days"),
+                        ],
+                        [InlineKeyboardButton("بازگشت🔙", callback_data=f"search:sel:{sid}")],
+                    ]),
+                )
+                return
+            if action == "editact" and len(parts) == 4:
+                sid = int(parts[2])
+                edit_action = parts[3]
+                item = business.subscription_admin(actor, subscription_id=sid)
+                if edit_action == "toggle":
+                    enabled = item["status"] != "active"
+                    result = business.set_subscription_enabled(
+                        actor, subscription_id=sid, enabled=enabled
+                    )
+                    await update.callback_query.edit_message_text(
+                        f"✅ وضعیت کاربر: {result['status']}",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("بازگشت🔙", callback_data=f"search:edit:{sid}")
+                        ]]),
+                    )
+                    return
+                if edit_action == "reset_usage":
+                    business.edit_subscription_terms_admin(
+                        actor, subscription_id=sid, reset_usage=True
+                    )
+                    await update.callback_query.edit_message_text(
+                        "✅ حجم مصرف‌شده بازنشانی شد.",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("بازگشت🔙", callback_data=f"search:edit:{sid}")
+                        ]]),
+                    )
+                    return
+                if edit_action == "reset_days":
+                    business.edit_subscription_terms_admin(
+                        actor, subscription_id=sid, reset_days=True
+                    )
+                    await update.callback_query.edit_message_text(
+                        "✅ مدت اشتراک بر اساس پلن بازنشانی شد.",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("بازگشت🔙", callback_data=f"search:edit:{sid}")
+                        ]]),
+                    )
+                    return
+                if edit_action in ("volume", "days"):
+                    context.user_data["biz_flow"] = {
+                        "kind": f"search_edit_{edit_action}",
+                        "subscription_id": sid,
+                    }
+                    await _reply_server_prompt(
+                        update,
+                        "📊 حجم جدید را به گیگابایت وارد کنید:"
+                        if edit_action == "volume"
+                        else "📅 مدت جدید را به روز وارد کنید:",
+                    )
+                    return
+            if action == "renew" and len(parts) == 3:
+                sid = int(parts[2])
+                context.user_data["biz_flow"] = {
+                    "kind": "search_renew_traffic",
+                    "subscription_id": sid,
+                }
+                await _reply_server_prompt(
+                    update, "📊 حجم تمدید را به گیگابایت وارد کنید:"
+                )
+                return
+            if action == "delete" and len(parts) == 3:
+                sid = int(parts[2])
+                await update.callback_query.edit_message_text(
+                    "❓ از حذف کاربر از پنل و تمام نودهای سرویس مطمئن هستید؟",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ بله، حذف شود", callback_data=f"search:deleteok:{sid}"),
+                        InlineKeyboardButton("لغو❌", callback_data=f"search:sel:{sid}"),
+                    ]]),
+                )
+                return
+            if action == "deleteok" and len(parts) == 3:
+                sid = int(parts[2])
+                business.delete_subscription_from_panel(
+                    actor, subscription_id=sid
+                )
+                await update.callback_query.edit_message_text(
+                    "✅ کاربر از پنل‌ها حذف شد و رکورد سرویس برای تاریخچه حفظ شد.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("بازگشت🔙", callback_data="search:results")
+                    ]]),
+                )
+                return
+
         if data == "biz:dashboard":
             report = business.dashboard_summary(actor)
             rows = [
@@ -1735,15 +2126,18 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 return
 
             if text == BTN_SEARCH_USER:
-                context.user_data["biz_flow"] = {"kind": "customer_search"}
+                context.user_data.pop("smart_search_results", None)
                 await update.effective_message.reply_text(
-                    "🔎 نام، @username، Telegram ID یا Customer ID را ارسال کنید."
+                    "🔍 جستجوی کاربر",
+                    reply_markup=_search_menu_keyboard(),
                 )
                 return
 
             if text == BTN_DAILY_REPORT:
-                report = business.sales_report(actor, days=1)
-                await update.effective_message.reply_text(_report_text(report))
+                report = business.daily_admin_report(actor)
+                await update.effective_message.reply_text(
+                    _daily_report_text(report), parse_mode="HTML"
+                )
                 return
 
             if text == BTN_STATUS:
@@ -1770,6 +2164,83 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 await update.effective_message.reply_text(
                     "📫 بکاپ Tenant هنوز به‌صورت مستقل و امن منتقل نشده است. "
                     "بکاپ سراسری Master به ادمین Tenant نمایش داده نمی‌شود."
+                )
+                return
+
+        if isinstance(flow, dict) and str(flow.get("kind") or "").startswith("search_"):
+            kind = str(flow.get("kind") or "")
+            if text == "❌ لغو":
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    "❌ عملیات لغو شد.", reply_markup=admin_main_keyboard()
+                )
+                return
+            if kind == "search_smart":
+                items = business.search_subscriptions_admin(actor, text)
+                context.user_data.pop("biz_flow", None)
+                if not items:
+                    context.user_data.pop("smart_search_results", None)
+                    await update.effective_message.reply_text(
+                        "❌ کاربر یافت نشد.",
+                        reply_markup=admin_main_keyboard(),
+                    )
+                    return
+                context.user_data["smart_search_results"] = items
+                context.user_data["search_results_title"] = "[📥 نتیجه جستجو]"
+                result_text, kb = _search_results_view(items)
+                await update.effective_message.reply_text(
+                    "✅ کاربر یافت شد", reply_markup=admin_main_keyboard()
+                )
+                await update.effective_message.reply_text(
+                    result_text, reply_markup=kb
+                )
+                return
+            if kind == "search_renew_traffic":
+                value = int(text.replace(",", "").strip())
+                if value <= 0:
+                    raise ValueError("invalid traffic")
+                flow["traffic_gb"] = value
+                flow["kind"] = "search_renew_days"
+                await update.effective_message.reply_text(
+                    "📅 مدت تمدید را به روز وارد کنید:",
+                    reply_markup=_server_cancel_keyboard(),
+                )
+                return
+            if kind == "search_renew_days":
+                days = int(text.replace(",", "").strip())
+                if days <= 0:
+                    raise ValueError("invalid days")
+                sid = int(flow["subscription_id"])
+                result = business.renew_subscription(
+                    actor,
+                    subscription_id=sid,
+                    traffic_gb=int(flow["traffic_gb"]),
+                    duration_days=days,
+                    idempotency_key=f"admin-search-renew:{sid}",
+                )
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    f"✅ اشتراک تمدید شد.\nوضعیت: {result['status']}",
+                    reply_markup=admin_main_keyboard(),
+                )
+                return
+            if kind in ("search_edit_volume", "search_edit_days"):
+                value = int(text.replace(",", "").strip())
+                if value <= 0:
+                    raise ValueError("invalid edit value")
+                sid = int(flow["subscription_id"])
+                kwargs = (
+                    {"traffic_gb": value}
+                    if kind == "search_edit_volume"
+                    else {"duration_days": value}
+                )
+                business.edit_subscription_terms_admin(
+                    actor, subscription_id=sid, **kwargs
+                )
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    "✅ اطلاعات اشتراک بروزرسانی شد.",
+                    reply_markup=admin_main_keyboard(),
                 )
                 return
 
