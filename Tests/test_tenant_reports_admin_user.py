@@ -472,3 +472,36 @@ def test_admin_subscription_search_expired_review_and_daily_report(
         {"currency": "IRR", "count": 1, "amount": 120000}
     ]
     assert report["services"][0]["buy_count"] == 1
+
+
+
+def test_unstarted_cleanup_preserves_receipt_history(conn, factories, cipher) -> None:
+    _tenant, service, _panel, plan, method = _service(
+        conn, factories, cipher
+    )
+    order, reviewed = _approve_purchase(
+        service,
+        customer=7101,
+        plan_id=int(plan["id"]),
+        method_id=int(method["id"]),
+        reference="unstarted-cleanup",
+    )
+    pending = service.list_subscriptions(7101)[0]
+    assert pending["status"] == "pending_provisioning"
+
+    result = service.cleanup_unstarted_subscription_admin(
+        7001, subscription_id=int(pending["id"])
+    )
+    assert result["status"] == "removed"
+    assert conn.execute(
+        "SELECT 1 FROM tenant_subscriptions WHERE id=?",
+        (int(pending["id"]),),
+    ).fetchone() is None
+    assert conn.execute(
+        "SELECT status FROM tenant_orders WHERE id=?",
+        (int(order["id"]),),
+    ).fetchone()["status"] == "cancelled"
+    assert conn.execute(
+        "SELECT status FROM tenant_receipts WHERE order_id=?",
+        (int(reviewed["order_id"]),),
+    ).fetchone()["status"] == "approved"
