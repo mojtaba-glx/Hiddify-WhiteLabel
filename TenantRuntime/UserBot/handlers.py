@@ -1097,7 +1097,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             result = business.retry_own_paid_order(actor, order_id=order_id)
             await update.callback_query.edit_message_text(
                 f"✅ سفارش #{order_id} انجام شد.\n🔗 {result.get('subscription_url') or '-'}",
-                reply_markup=_menu(spec, business),
+                reply_markup=_home_inline_markup(settings),
             ); return
         if data.startswith("shop:cancelorder:"):
             order_id = int(data.rsplit(":", 1)[1])
@@ -1503,7 +1503,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     f"🔗 {result.get('subscription_url') or '-'}"
                 )
             await update.callback_query.edit_message_text(
-                text, reply_markup=_menu(spec, business)
+                text, reply_markup=_home_inline_markup(settings)
             ); return
         if data.startswith("shop:paymethods:"):
             order_id = int(data.rsplit(":", 1)[1])
@@ -1523,7 +1523,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data.startswith("shop:pay:"):
             _, _, order_id, method_id = data.split(":", 3); order = business.order(actor, int(order_id)); method = business.method(int(method_id), currency=str(order['currency']))
             context.user_data["biz_flow"] = {"kind": "receipt", "order_id": int(order_id), "method_id": int(method_id)}
-            await update.callback_query.edit_message_text(f"پرداخت به: {method['destination']}\n{method.get('instructions') or ''}\nکد پیگیری یا عکس رسید را ارسال کنید.", reply_markup=_menu(spec, business)); return
+            await update.callback_query.edit_message_text(
+                f"پرداخت به: {method['destination']}\n"
+                f"{method.get('instructions') or ''}\n"
+                "کد پیگیری یا عکس رسید را ارسال کنید.",
+                reply_markup=_home_inline_markup(settings),
+            ); return
         if data == "shop:renewmenu":
             if not bool(settings.get("enable_renew", True)):
                 raise TenantBusinessError("renewal is disabled")
@@ -1979,7 +1984,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             faq = str(settings.get("faq_text") or "").strip()
             await update.callback_query.edit_message_text(
                 "📕 سوالات متداول\n" + (faq or "متنی تنظیم نشده است."),
-                reply_markup=_menu(spec, business),
+                reply_markup=_home_inline_markup(settings),
             )
             return
     except (ValueError, TenantBusinessError, PermissionError, sqlite3.IntegrityError):
@@ -2035,7 +2040,7 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 context.user_data.pop("biz_flow", None)
                 await update.effective_message.reply_text(
                     "✅ رسید شارژ کیف پول برای بررسی ارسال شد.",
-                    reply_markup=_menu(spec, business),
+                    reply_markup=_main_keyboard(spec, business),
                 )
                 return
             if kind == "coupon_apply":
@@ -2071,7 +2076,7 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     "✅ هدیه دریافت شد.\n"
                     f"🎁 مبلغ: {int(gift['amount']):,} {gift['currency']}\n"
                     f"💰 موجودی جدید: {int(gift['resulting_balance']):,} {gift['currency']}",
-                    reply_markup=_menu(spec, business),
+                    reply_markup=_main_keyboard(spec, business),
                 )
                 return
             if kind == "receipt":
@@ -2086,13 +2091,13 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             else:
                 raise ValueError("invalid input")
             context.user_data.pop("biz_flow", None)
-            await update.effective_message.reply_text("✅ ذخیره شد.", reply_markup=_menu(spec, business))
+            await update.effective_message.reply_text("✅ ذخیره شد.", reply_markup=_main_keyboard(spec, business))
             return
     except (ValueError, TenantBusinessError, PermissionError, sqlite3.IntegrityError):
-        await update.effective_message.reply_text("❌ قالب یا وضعیت معتبر نیست.", reply_markup=_menu(spec, business))
+        await update.effective_message.reply_text("❌ قالب یا وضعیت معتبر نیست.", reply_markup=_main_keyboard(spec, business))
         return
     if update.effective_message:
-        await update.effective_message.reply_text("از منوی ربات استفاده کنید.", reply_markup=_menu(spec, business))
+        await update.effective_message.reply_text("از منوی ربات استفاده کنید.", reply_markup=_main_keyboard(spec, business))
 
 
 async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2106,7 +2111,7 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not await _force_join_allowed(update, context, business):
         return
     if spec.role != "user" or not isinstance(flow, dict) or flow.get("kind") not in ("receipt", "wallet_receipt"):
-        await update.effective_message.reply_text("از منوی ربات استفاده کنید.", reply_markup=_menu(spec, business)); return
+        await update.effective_message.reply_text("از منوی ربات استفاده کنید.", reply_markup=_main_keyboard(spec, business)); return
     try:
         if flow.get("kind") == "wallet_receipt":
             business.submit_wallet_topup_receipt(
@@ -2121,9 +2126,9 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             business.submit_receipt(actor, order_id=int(flow['order_id']), method_id=int(flow['method_id']), reference=str(update.effective_message.caption or "").strip() or None, telegram_file_id=str(update.effective_message.photo[-1].file_id))
             success_text = "✅ تصویر رسید برای بررسی ارسال شد."
         context.user_data.pop("biz_flow", None)
-        await update.effective_message.reply_text(success_text, reply_markup=_menu(spec, business))
+        await update.effective_message.reply_text(success_text, reply_markup=_main_keyboard(spec, business))
     except (ValueError, TenantBusinessError, sqlite3.IntegrityError):
-        await update.effective_message.reply_text("❌ ثبت تصویر رسید انجام نشد.", reply_markup=_menu(spec, business))
+        await update.effective_message.reply_text("❌ ثبت تصویر رسید انجام نشد.", reply_markup=_main_keyboard(spec, business))
 
 
 
