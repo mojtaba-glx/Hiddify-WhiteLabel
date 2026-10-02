@@ -123,6 +123,37 @@ def _checkout_text(order: dict, wallet: dict) -> str:
 
 
 
+def _checkout_markup(
+    order_id: int,
+    settings: dict,
+    *,
+    back_callback: str = "runtime:home",
+    back_label: str = "↩️ منو",
+) -> InlineKeyboardMarkup:
+    """Build checkout actions while honoring admin-side marketing settings."""
+    pay_row: list[InlineKeyboardButton] = []
+    if bool(settings.get("enable_discount_code", True)):
+        pay_row.append(
+            InlineKeyboardButton(
+                "🎟 کد تخفیف", callback_data=f"shop:coupon:{int(order_id)}"
+            )
+        )
+    pay_row.append(
+        InlineKeyboardButton(
+            "💰 پرداخت کیف پول", callback_data=f"shop:walletpay:{int(order_id)}"
+        )
+    )
+    rows = [
+        pay_row,
+        [InlineKeyboardButton(
+            "💳 روش‌های پرداخت",
+            callback_data=f"shop:paymethods:{int(order_id)}",
+        )],
+        [InlineKeyboardButton(back_label, callback_data=back_callback)],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
 def _button(
     text: str,
     *,
@@ -164,10 +195,21 @@ def _menu(spec: RuntimeBotSpec, business) -> InlineKeyboardMarkup:
     rows = []
     first = []
     if bool(settings.get("enable_buy", True)):
-        first.append(_button("💳 خرید اشتراک", callback_data="shop:buy", settings=settings))
+        first.append(_button("💳خرید اشتراک", callback_data="shop:buy", settings=settings))
     first.append(_button("📦 اشتراک‌های من", callback_data="shop:subs", settings=settings))
     if first:
         rows.append(first)
+    if (
+        bool(settings.get("enable_renew", True))
+        and bool(settings.get("show_renew_in_main_menu", True))
+    ):
+        rows.append([
+            _button(
+                "♾تمدید اشتراک",
+                callback_data="shop:renewmenu",
+                settings=settings,
+            )
+        ])
     rows.append([
         _button("👤 حساب من", callback_data="shop:account", settings=settings),
         _button("🧾 سفارش‌های من", callback_data="shop:orders", settings=settings),
@@ -178,17 +220,24 @@ def _menu(spec: RuntimeBotSpec, business) -> InlineKeyboardMarkup:
     rows.append(referral_row)
     support_row = []
     if bool(growth.get("trial_enabled")):
-        support_row.append(_button("🎁 تست رایگان", callback_data="shop:trial", settings=settings))
-    support_row.append(_button("🎫 پشتیبانی", callback_data="shop:tickets", settings=settings))
+        support_row.append(_button("🔥تست رایگان", callback_data="shop:trial", settings=settings))
+    support_row.append(_button("📩پشتیبانی", callback_data="shop:tickets", settings=settings))
     rows.append(support_row)
     if bool(settings.get("show_gift_button", True)):
         rows.append([_button("🎁 دریافت هدیه", callback_data="shop:gift", settings=settings)])
-    help_row = [_button("📖 راهنما", callback_data="shop:guide", settings=settings)]
+    help_row = [_button("💡راهنما", callback_data="shop:guide", settings=settings)]
     if str(settings.get("faq_text") or "").strip():
-        help_row.append(_button("📕 سوالات متداول", callback_data="shop:faq", settings=settings))
+        help_row.append(_button("❓سوالات متداول", callback_data="shop:faq", settings=settings))
     rows.append(help_row)
     rows.append([_button("🏠 منو", callback_data="runtime:home", settings=settings)])
-    rows.append([_button("📊 وضعیت", callback_data="runtime:status", settings=settings)])
+    if bool(settings.get("show_user_status", True)):
+        rows.append([
+            _button(
+                "📊وضعیت اشتراک",
+                callback_data="runtime:status",
+                settings=settings,
+            )
+        ])
     return InlineKeyboardMarkup(rows)
 
 
@@ -533,30 +582,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             order = business.create_order(actor, int(data.rsplit(":", 1)[1]))
             await update.callback_query.edit_message_text(
                 _checkout_text(order, business.wallet_summary(actor)),
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("🎟 کد تخفیف", callback_data=f"shop:coupon:{order['id']}"),
-                        InlineKeyboardButton("💰 پرداخت کیف پول", callback_data=f"shop:walletpay:{order['id']}"),
-                    ],
-                    [InlineKeyboardButton("💳 روش‌های پرداخت", callback_data=f"shop:paymethods:{order['id']}")],
-                    [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
-                ]),
+                reply_markup=_checkout_markup(int(order["id"]), settings),
             ); return
         if data.startswith("shop:checkout:"):
             order_id = int(data.rsplit(":", 1)[1])
             order = business.order(actor, order_id)
             await update.callback_query.edit_message_text(
                 _checkout_text(order, business.wallet_summary(actor)),
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("🎟 کد تخفیف", callback_data=f"shop:coupon:{order_id}"),
-                        InlineKeyboardButton("💰 پرداخت کیف پول", callback_data=f"shop:walletpay:{order_id}"),
-                    ],
-                    [InlineKeyboardButton("💳 روش‌های پرداخت", callback_data=f"shop:paymethods:{order_id}")],
-                    [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
-                ]),
+                reply_markup=_checkout_markup(order_id, settings),
             ); return
         if data.startswith("shop:coupon:"):
+            if not bool(settings.get("enable_discount_code", True)):
+                raise TenantBusinessError("discount codes are disabled")
             order_id = int(data.rsplit(":", 1)[1])
             order = business.order(actor, order_id)
             if order["status"] != "pending_payment":
@@ -606,6 +643,34 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             _, _, order_id, method_id = data.split(":", 3); order = business.order(actor, int(order_id)); method = business.method(int(method_id), currency=str(order['currency']))
             context.user_data["biz_flow"] = {"kind": "receipt", "order_id": int(order_id), "method_id": int(method_id)}
             await update.callback_query.edit_message_text(f"پرداخت به: {method['destination']}\n{method.get('instructions') or ''}\nکد پیگیری یا عکس رسید را ارسال کنید.", reply_markup=_menu(spec, business)); return
+        if data == "shop:renewmenu":
+            if not bool(settings.get("enable_renew", True)):
+                raise TenantBusinessError("renewal is disabled")
+            items = [
+                item
+                for item in business.list_subscriptions(actor)
+                if item.get("external_ref")
+                and item.get("server_id")
+                and item.get("status") in ("active", "disabled", "expired")
+            ]
+            rows = [
+                [InlineKeyboardButton(
+                    f"♾ #{item['id']} · {item['plan_name']}",
+                    callback_data=f"shop:renew:{item['id']}",
+                )]
+                for item in items
+            ]
+            if not rows:
+                rows = [[InlineKeyboardButton(
+                    "اشتراک قابل تمدیدی وجود ندارد",
+                    callback_data="noop",
+                )]]
+            rows.append([InlineKeyboardButton("↩️ منو", callback_data="runtime:home")])
+            await update.callback_query.edit_message_text(
+                "♾ تمدید اشتراک\nاشتراک موردنظر را انتخاب کنید:",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
         if data == "shop:subs":
             items = business.list_subscriptions(actor)
             text = "📦 اشتراک‌های من\n" + ("\n".join(
@@ -653,7 +718,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             configs = business.subscription_configs(
                 actor, subscription_id=subscription_id
             )
-            if bool(settings.get("shuffle_configs", True)):
+            if (
+                bool(settings.get("shuffle_configs", True))
+                or bool(settings.get("shuffle_server_layout", True))
+            ):
                 random.shuffle(configs)
             text_parts = ["📄 کانفیگ‌های مستقیم"]
             for item in configs:
@@ -704,14 +772,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             await update.callback_query.edit_message_text(
                 _checkout_text(order, business.wallet_summary(actor)),
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("🎟 کد تخفیف", callback_data=f"shop:coupon:{order['id']}"),
-                        InlineKeyboardButton("💰 پرداخت کیف پول", callback_data=f"shop:walletpay:{order['id']}"),
-                    ],
-                    [InlineKeyboardButton("💳 روش‌های پرداخت", callback_data=f"shop:paymethods:{order['id']}")],
-                    [InlineKeyboardButton("↩️ اشتراک‌های من", callback_data="shop:subs")],
-                ]),
+                reply_markup=_checkout_markup(
+                    int(order["id"]),
+                    settings,
+                    back_callback="shop:subs",
+                    back_label="↩️ اشتراک‌های من",
+                ),
             ); return
         if data == "shop:tickets":
             items = business.list_tickets(actor)
@@ -769,12 +835,42 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ); return
         if data == "shop:guide":
             guide = str(settings.get("guide_text") or "").strip()
+            rows = [
+                [
+                    InlineKeyboardButton("📱 اندروید", callback_data="shop:guide:android"),
+                    InlineKeyboardButton("📱 IOS", callback_data="shop:guide:ios"),
+                ],
+                [
+                    InlineKeyboardButton("🖥️ ویندوز", callback_data="shop:guide:windows"),
+                    InlineKeyboardButton("💻 مک", callback_data="shop:guide:mac"),
+                ],
+                [InlineKeyboardButton("🖥️ لینوکس", callback_data="shop:guide:linux")],
+                [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+            ]
             await update.callback_query.edit_message_text(
-                "📖 راهنما\n" + (
-                    guide
-                    or "برای خرید، پلن را انتخاب کنید و سپس روش پرداخت را مشخص کنید."
-                ),
-                reply_markup=_menu(spec, business),
+                "💡 راهنما\n" + (guide or "انتخاب سیستم عامل ⬇️"),
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+        if data.startswith("shop:guide:"):
+            platform = data.rsplit(":", 1)[1]
+            labels = {
+                "android": "📱 راهنمای اندروید",
+                "ios": "📱 راهنمای IOS",
+                "windows": "🖥️ راهنمای ویندوز",
+                "mac": "💻 راهنمای مک",
+                "linux": "🖥️ راهنمای لینوکس",
+            }
+            if platform not in labels:
+                raise TenantBusinessError("invalid guide platform")
+            body = str(settings.get(f"guide_{platform}_text") or "").strip()
+            await update.callback_query.edit_message_text(
+                labels[platform] + "\n\n" + (body or "هنوز متنی تنظیم نشده است."),
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙بازگشت", callback_data="shop:guide")],
+                    [InlineKeyboardButton("🏠 منو", callback_data="runtime:home")],
+                ]),
+                disable_web_page_preview=True,
             )
             return
         if data == "shop:faq":

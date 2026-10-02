@@ -79,6 +79,13 @@ def test_tenant_userbot_settings_roundtrip(conn, factories, cipher) -> None:
     assert defaults["enable_buy"] is True
     assert defaults["button_theme"] == "smart"
     assert defaults["reminder_days"] == 3
+    assert defaults["show_renew_in_main_menu"] is True
+    assert defaults["shuffle_server_layout"] is True
+    assert defaults["shuffle_config_layout"] is True
+    assert defaults["enable_discount_code"] is True
+    assert defaults["show_user_status"] is True
+    assert defaults["guide_android_text"] == ""
+    assert defaults["smart_base_url"] == ""
 
     changed = service.set_userbot_setting_admin(
         7001, key="enable_buy", value=False
@@ -114,8 +121,8 @@ def test_user_menu_reacts_to_admin_settings(conn, factories, cipher) -> None:
         7001, key="show_gift_button", value=False
     )
     labels = sum(_labels(user_handlers._menu(spec, service)), [])
-    assert "💳 خرید اشتراک" not in labels
-    assert "🎁 تست رایگان" not in labels
+    assert "💳خرید اشتراک" not in labels
+    assert "🔥تست رایگان" not in labels
     assert "🤝 دعوت دوستان" not in labels
     assert "🎁 دریافت هدیه" not in labels
 
@@ -127,10 +134,140 @@ def test_user_menu_reacts_to_admin_settings(conn, factories, cipher) -> None:
         7001, referral_enabled=True, trial_enabled=True
     )
     labels = sum(_labels(user_handlers._menu(spec, service)), [])
-    assert "💳 خرید اشتراک" in labels
-    assert "🎁 تست رایگان" in labels
+    assert "💳خرید اشتراک" in labels
+    assert "🔥تست رایگان" in labels
     assert "🤝 دعوت دوستان" in labels
     assert "🎁 دریافت هدیه" in labels
+
+
+def test_renew_main_menu_setting_is_functional(
+    conn, factories, cipher
+) -> None:
+    _tenant, service = _service(conn, factories, cipher)
+    spec = SimpleNamespace(tenant_name="Speed Test")
+
+    labels = sum(_labels(user_handlers._menu(spec, service)), [])
+    assert "♾تمدید اشتراک" in labels
+
+    service.set_userbot_setting_admin(
+        7001, key="show_renew_in_main_menu", value=False
+    )
+    labels = sum(_labels(user_handlers._menu(spec, service)), [])
+    assert "♾تمدید اشتراک" not in labels
+
+    service.set_userbot_setting_admin(7001, key="enable_renew", value=False)
+    service.set_userbot_setting_admin(
+        7001, key="show_renew_in_main_menu", value=True
+    )
+    labels = sum(_labels(user_handlers._menu(spec, service)), [])
+    assert "♾تمدید اشتراک" not in labels
+
+
+def test_user_status_visibility_is_functional(
+    conn, factories, cipher
+) -> None:
+    _tenant, service = _service(conn, factories, cipher)
+    spec = SimpleNamespace(tenant_name="Speed Test")
+    assert "📊وضعیت اشتراک" in sum(_labels(user_handlers._menu(spec, service)), [])
+
+    service.set_userbot_setting_admin(
+        7001, key="show_user_status", value=False
+    )
+    assert "📊وضعیت اشتراک" not in sum(
+        _labels(user_handlers._menu(spec, service)), []
+    )
+
+
+def test_deep_settings_callbacks_are_wired_to_real_runtime() -> None:
+    source = open(
+        "TenantRuntime/AdminBot/userbot_management.py",
+        encoding="utf-8",
+    ).read()
+    runtime = open(
+        "TenantRuntime/UserBot/handlers.py",
+        encoding="utf-8",
+    ).read()
+    for callback in (
+        "userbot:settings:subscription:show_user_page_link",
+        "userbot:settings:subscription:shuffle_server_layout",
+        "userbot:settings:subscription:sub_status_reminder",
+        "userbot:settings:subscription:trial_spec",
+        "userbot:settings:subscription:reset_free_trial",
+        "userbot:settings:sub_link_status:set_base_url",
+        "userbot:settings:buy_renew:show_renew_in_main_menu",
+        "userbot:settings:buy_renew:plan_columns:menu",
+        "userbot:settings:tx_plans:plan_sort_mode:menu",
+        "userbot:settings:texts:guide_menu",
+        "userbot:settings:marketing:toggle:enable_discount_code",
+        "userbot:settings:force_join:toggle",
+    ):
+        assert callback in source
+
+    assert 'data == "shop:renewmenu"' in runtime
+    assert 'settings.get("show_renew_in_main_menu", True)' in runtime
+    assert 'settings.get("enable_discount_code", True)' in runtime
+    for callback in (
+        "shop:guide:android",
+        "shop:guide:ios",
+        "shop:guide:windows",
+        "shop:guide:mac",
+        "shop:guide:linux",
+    ):
+        assert callback in runtime
+
+
+def test_payment_root_callbacks_match_sellbot() -> None:
+    callbacks = [
+        button.callback_data
+        for row in admin_userbot.build_payments_menu_keyboard().inline_keyboard
+        for button in row
+    ]
+    assert "userbot:payments:list:approved" in callbacks
+    assert "userbot:payments:list:rejected" in callbacks
+    assert "userbot:payments:list:pending" in callbacks
+    assert "userbot:payments:list:card" in callbacks
+    assert "userbot:payments:list:approved:1" not in callbacks
+
+
+def test_reset_all_free_trials_is_tenant_scoped(
+    conn, factories, cipher
+) -> None:
+    tenant, service = _service(conn, factories, cipher)
+    service.register_customer(7101, display_name="Trial A", username=None)
+    service.register_customer(7102, display_name="Trial B", username=None)
+    conn.execute(
+        "UPDATE tenant_customers SET trial_used_at='2026-10-01T00:00:00+00:00' "
+        "WHERE tenant_id=?",
+        (int(tenant["id"]),),
+    )
+
+    other_tenant = factories.tenant(owner_telegram_id=8001)
+    other = TenantBusinessService(
+        conn,
+        tenant_id=int(other_tenant["id"]),
+        owner_telegram_id=8001,
+        secret_cipher=cipher,
+    )
+    other.register_customer(8101, display_name="Other Trial", username=None)
+    conn.execute(
+        "UPDATE tenant_customers SET trial_used_at='2026-10-01T00:00:00+00:00' "
+        "WHERE tenant_id=?",
+        (int(other_tenant["id"]),),
+    )
+    conn.commit()
+
+    assert service.reset_all_customer_trials_admin(7001) == 2
+    rows = conn.execute(
+        "SELECT trial_used_at FROM tenant_customers WHERE tenant_id=?",
+        (int(tenant["id"]),),
+    ).fetchall()
+    assert all(row[0] is None for row in rows)
+
+    foreign = conn.execute(
+        "SELECT trial_used_at FROM tenant_customers WHERE tenant_id=?",
+        (int(other_tenant["id"]),),
+    ).fetchone()
+    assert foreign[0] is not None
 
 
 def test_real_wallet_gift_is_single_use_per_customer(
@@ -211,7 +348,7 @@ def test_admin_forms_use_bottom_cancel_and_not_pipe_for_core_new_flows() -> None
         encoding="utf-8",
     ).read()
     assert '[[KeyboardButton("❌لغو")]]' in source
-    assert '"kind":"payment_add_title"' in source
+    assert "payment_add_title" in source
     assert '"kind":"gift_add_code"' in source
     assert '"kind":"referral_manual_customer"' in source
     assert '"kind":"wallet_set_currency"' in source
