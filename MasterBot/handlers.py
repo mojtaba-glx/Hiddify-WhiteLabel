@@ -137,6 +137,12 @@ def _parse_int(raw: str, label: str) -> int:
     return value
 
 
+def _flow_cancel_keyboard(target: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("❌ لغو", callback_data=f"flow:cancel:{target}")]]
+    )
+
+
 async def _show_orders(
     update: Update, context: ContextTypes.DEFAULT_TYPE, page_number: int = 0
 ) -> None:
@@ -350,6 +356,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         if data == "menu:main":
             await show_main(update, context)
+            return
+        if data.startswith("flow:cancel:"):
+            target = data.split(":", 2)[2]
+            context.user_data.pop("flow", None)
+            context.user_data.pop("confirm", None)
+            if target == "tenants":
+                await _show_tenants(update, context)
+            elif target == "plans":
+                await _show_plans(update, context)
+            elif target == "licenses":
+                await _show_licenses(update, context)
+            else:
+                await show_main(update, context)
             return
         if data == "menu:orders":
             context.user_data["order_status_filter"] = "all"
@@ -566,19 +585,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await _show_tenants(update, context, _parse_int(data.rsplit(":", 1)[1], "page"))
             return
         if data == "tenant:new":
-            context.user_data["flow"] = {"kind": "tenant_new"}
+            context.user_data["flow"] = {"kind": "tenant_new_name"}
             await _render(
                 update,
-                "➕ اطلاعات ربات مشتری را بفرستید:\nنام | شناسه انگلیسی | شناسه عددی مالک",
-                back_keyboard("tenant:page:0"),
+                "🏪 نام فروشگاه را وارد کنید:",
+                _flow_cancel_keyboard("tenants"),
             )
             return
         if data == "tenant:provision":
-            context.user_data["flow"] = {"kind": "provision_details"}
+            context.user_data["flow"] = {"kind": "provision_name"}
             await _render(
                 update,
-                "🚀 اطلاعات ربات مشتری را بفرستید:\nنام | شناسه انگلیسی | شناسه عددی مالک",
-                back_keyboard("tenant:page:0"),
+                "🏪 نام فروشگاه را وارد کنید:",
+                _flow_cancel_keyboard("tenants"),
             )
             return
         if data == "tenant:search":
@@ -654,11 +673,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await _show_plans(update, context, _parse_int(data.rsplit(":", 1)[1], "page"))
             return
         if data == "plan:new":
-            context.user_data["flow"] = {"kind": "plan_new"}
+            context.user_data["flow"] = {"kind": "plan_new_name"}
             await _render(
                 update,
-                "➕ پلن را بفرستید:\nنام | روز | قیمت | حداکثر سرور | حداکثر کاربر",
-                back_keyboard("plan:page:0"),
+                "📦 نام پلن را وارد کنید:",
+                _flow_cancel_keyboard("plans"),
             )
             return
         if data == "plan:search":
@@ -739,11 +758,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await _show_licenses(update, context, _parse_int(data.rsplit(":", 1)[1], "page"))
             return
         if data == "license:new":
-            context.user_data["flow"] = {"kind": "license_new"}
+            context.user_data["flow"] = {"kind": "license_new_tenant"}
             await _render(
                 update,
-                "➕ لایسنس را بفرستید:\nشناسه مشتری | شناسه پلن | روز مهلت (اختیاری)",
-                back_keyboard("license:page:0"),
+                "👤 شناسه عددی مشتری را وارد کنید:",
+                _flow_cancel_keyboard("licenses"),
             )
             return
         if data == "license:search":
@@ -1004,17 +1023,52 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     service = _service(context)
     text = str(update.effective_message.text or "").strip()
     try:
-        if kind == "provision_details":
-            fields = _split_fields(text, 3, 3)
-            context.user_data["flow"] = {
-                "kind": "provision_admin_token",
-                "name": fields[0],
-                "slug": fields[1],
-                "owner_telegram_id": _parse_int(fields[2], "owner id"),
-            }
+        if kind in ("tenant_new_name", "provision_name"):
+            name = text.strip()
+            if not name:
+                raise ValueError("shop name is required")
+            flow["name"] = name[:120]
+            flow["kind"] = (
+                "tenant_new_owner" if kind == "tenant_new_name" else "provision_owner"
+            )
+            await update.effective_message.reply_text(
+                "👤 شناسه عددی تلگرام مالک فروشگاه را وارد کنید:",
+                reply_markup=_flow_cancel_keyboard("tenants"),
+            )
+            return
+        if kind in ("tenant_new_owner", "provision_owner"):
+            owner_id = _parse_int(text, "owner id")
+            if owner_id <= 0:
+                raise ValueError("owner id must be positive")
+            flow["owner_telegram_id"] = owner_id
+            flow["kind"] = (
+                "tenant_new_slug" if kind == "tenant_new_owner" else "provision_slug"
+            )
+            await update.effective_message.reply_text(
+                "🔤 شناسه انگلیسی فروشگاه را وارد کنید.\n"
+                "مثال: speedtest",
+                reply_markup=_flow_cancel_keyboard("tenants"),
+            )
+            return
+        if kind in ("tenant_new_slug", "provision_slug"):
+            slug = text.strip()
+            if not slug:
+                raise ValueError("slug is required")
+            flow["slug"] = slug
+            if kind == "tenant_new_slug":
+                row = service.create_tenant(
+                    actor,
+                    name=str(flow["name"]),
+                    slug=str(flow["slug"]),
+                    owner_telegram_id=int(flow["owner_telegram_id"]),
+                )
+                context.user_data.pop("flow", None)
+                await _show_tenant(update, context, int(row["id"]))
+                return
+            flow["kind"] = "provision_admin_token"
             await update.effective_message.reply_text(
                 "🔐 توکن ربات مدیریت مشتری را بفرستید؛ پیام بلافاصله حذف می‌شود.",
-                reply_markup=back_keyboard("tenant:page:0"),
+                reply_markup=_flow_cancel_keyboard("tenants"),
             )
             return
         if kind in ("provision_admin_token", "provision_user_token"):
@@ -1035,7 +1089,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 flow["kind"] = "provision_user_token"
                 await update.effective_chat.send_message(
                     "✅ ربات مدیریت تأیید شد. اکنون توکن ربات کاربران را بفرستید.",
-                    reply_markup=back_keyboard("tenant:page:0"),
+                    reply_markup=_flow_cancel_keyboard("tenants"),
                 )
                 return
             admin_bot = flow.get("admin_bot")
@@ -1069,14 +1123,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 },
             )
             await update.effective_chat.send_message(detail, reply_markup=keyboard)
-            return
-        if kind == "tenant_new":
-            fields = _split_fields(text, 3, 3)
-            row = service.create_tenant(
-                actor, name=fields[0], slug=fields[1], owner_telegram_id=_parse_int(fields[2], "owner id")
-            )
-            context.user_data.pop("flow", None)
-            await _show_tenant(update, context, int(row["id"]))
             return
         if kind == "tenant_edit":
             fields = _split_fields(text, 3, 3)
@@ -1164,7 +1210,58 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data["license_query"] = text[:100]
             await _show_licenses(update, context)
             return
-        if kind in ("plan_new", "plan_edit"):
+        if kind == "plan_new_name":
+            name = text.strip()
+            if not name:
+                raise ValueError("plan name is required")
+            flow["name"] = name[:120]
+            flow["kind"] = "plan_new_days"
+            await update.effective_message.reply_text(
+                "⏳ مدت پلن را به روز وارد کنید.\nمثال: 30",
+                reply_markup=_flow_cancel_keyboard("plans"),
+            )
+            return
+        if kind == "plan_new_days":
+            days = _parse_int(text, "days")
+            if days <= 0:
+                raise ValueError("days must be positive")
+            flow["duration_days"] = days
+            flow["kind"] = "plan_new_price"
+            await update.effective_message.reply_text(
+                "💰 قیمت پلن را وارد کنید.\nبرای پلن رایگان عدد 0 را بفرستید.",
+                reply_markup=_flow_cancel_keyboard("plans"),
+            )
+            return
+        if kind == "plan_new_price":
+            flow["price"] = _parse_int(text.replace(",", ""), "price")
+            flow["kind"] = "plan_new_max_servers"
+            await update.effective_message.reply_text(
+                "🖥 حداکثر تعداد سرور مجاز این پلن را وارد کنید:",
+                reply_markup=_flow_cancel_keyboard("plans"),
+            )
+            return
+        if kind == "plan_new_max_servers":
+            flow["max_servers"] = _parse_int(text, "max servers")
+            flow["kind"] = "plan_new_max_users"
+            await update.effective_message.reply_text(
+                "👥 حداکثر تعداد کاربر مجاز این پلن را وارد کنید:",
+                reply_markup=_flow_cancel_keyboard("plans"),
+            )
+            return
+        if kind == "plan_new_max_users":
+            max_users = _parse_int(text, "max users")
+            row = service.create_plan(
+                actor,
+                name=str(flow["name"]),
+                duration_days=int(flow["duration_days"]),
+                price=int(flow["price"]),
+                max_servers=int(flow["max_servers"]),
+                max_users=max_users,
+            )
+            context.user_data.pop("flow", None)
+            await _show_plan(update, context, int(row["id"]))
+            return
+        if kind == "plan_edit":
             fields = _split_fields(text, 5, 5)
             kwargs: dict[str, Any] = {
                 "name": fields[0],
@@ -1173,10 +1270,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "max_servers": _parse_int(fields[3], "max servers"),
                 "max_users": _parse_int(fields[4], "max users"),
             }
-            if kind == "plan_new":
-                row = service.create_plan(actor, **kwargs)
-            else:
-                row = service.update_plan(actor, int(flow["plan_id"]), **kwargs)
+            row = service.update_plan(actor, int(flow["plan_id"]), **kwargs)
             context.user_data.pop("flow", None)
             await _show_plan(update, context, int(row["id"]))
             return
@@ -1227,13 +1321,42 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data.pop("flow", None)
             await _show_settings(update, context)
             return
-        if kind == "license_new":
-            fields = _split_fields(text, 2, 3)
+        if kind == "license_new_tenant":
+            tenant_id = _parse_int(text, "tenant id")
+            if tenant_id <= 0:
+                raise ValueError("tenant id must be positive")
+            tenant = service.get_tenant(actor, tenant_id)
+            flow["tenant_id"] = tenant_id
+            flow["kind"] = "license_new_plan"
+            await update.effective_message.reply_text(
+                f"✅ فروشگاه انتخاب شد: {tenant['name']} (#{tenant_id})\n\n"
+                "📦 شناسه عددی پلن را وارد کنید:",
+                reply_markup=_flow_cancel_keyboard("licenses"),
+            )
+            return
+        if kind == "license_new_plan":
+            plan_id = _parse_int(text, "plan id")
+            if plan_id <= 0:
+                raise ValueError("plan id must be positive")
+            plan = service.get_plan(actor, plan_id)
+            if str(plan.get("status") or "") != "active":
+                raise ValueError("plan must be active")
+            flow["plan_id"] = plan_id
+            flow["kind"] = "license_new_grace"
+            await update.effective_message.reply_text(
+                f"✅ پلن انتخاب شد: {plan['name']} · {int(plan['duration_days'])} روز\n\n"
+                "⏱ تعداد روز مهلت بعد از پایان لایسنس را وارد کنید.\n"
+                "برای بدون مهلت، 0 بفرستید:",
+                reply_markup=_flow_cancel_keyboard("licenses"),
+            )
+            return
+        if kind == "license_new_grace":
+            grace_days = _parse_int(text, "grace days")
             row = service.create_license(
                 actor,
-                tenant_id=_parse_int(fields[0], "tenant id"),
-                plan_id=_parse_int(fields[1], "plan id"),
-                grace_days=_parse_int(fields[2], "grace days") if len(fields) == 3 else 0,
+                tenant_id=int(flow["tenant_id"]),
+                plan_id=int(flow["plan_id"]),
+                grace_days=grace_days,
             )
             context.user_data.pop("flow", None)
             await _show_license(update, context, int(row["id"]))
@@ -1293,14 +1416,27 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Flow remains active so the owner can correct the input. The actual
         # message content is deliberately absent from this log entry.
         logger.warning("MasterBot input rejected: %s", safe_format_exception(exc))
-        error_text = "❌ اطلاعات معتبر نیست. قالب خواسته‌شده را دوباره ارسال کنید."
+        error_text = "❌ مقدار واردشده معتبر نیست. دوباره تلاش کنید."
         if kind in ("bot_token", "provision_admin_token", "provision_user_token"):
+            keyboard = (
+                _flow_cancel_keyboard("tenants")
+                if kind in ("provision_admin_token", "provision_user_token")
+                else back_keyboard()
+            )
             await update.effective_chat.send_message(
-                error_text, reply_markup=back_keyboard()
+                error_text, reply_markup=keyboard
             )
         else:
+            if kind.startswith(("tenant_new_", "provision_")):
+                keyboard = _flow_cancel_keyboard("tenants")
+            elif kind.startswith("plan_new_"):
+                keyboard = _flow_cancel_keyboard("plans")
+            elif kind.startswith("license_new_"):
+                keyboard = _flow_cancel_keyboard("licenses")
+            else:
+                keyboard = back_keyboard()
             await update.effective_message.reply_text(
-                error_text, reply_markup=back_keyboard()
+                error_text, reply_markup=keyboard
             )
 
 
