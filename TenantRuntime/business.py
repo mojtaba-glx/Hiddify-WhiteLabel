@@ -3894,8 +3894,6 @@ class TenantBusinessService:
         subscription = self.subscription_admin(
             actor_id, subscription_id=int(subscription_id)
         )
-        if subscription["status"] != "active" or self._subscription_is_due(subscription):
-            raise TenantBusinessError("subscription is not active")
         if subscription["server_id"] is None or not subscription["external_ref"]:
             raise TenantBusinessError("subscription is not provisioned")
         smart_url = self._smart_url(subscription_id=int(subscription_id))
@@ -3909,6 +3907,52 @@ class TenantBusinessService:
             )
         except PanelError as exc:
             raise TenantBusinessError("subscription link is unavailable") from exc
+
+    def cleanup_unstarted_subscription_admin(
+        self, actor_id: int, *, subscription_id: int
+    ) -> dict[str, Any]:
+        subscription = self.subscription_admin(
+            actor_id, subscription_id=int(subscription_id)
+        )
+        if (
+            subscription["status"] != "pending_provisioning"
+            or subscription.get("server_id") is not None
+            or str(subscription.get("external_ref") or "").strip()
+        ):
+            raise TenantBusinessError(
+                "only an unprovisioned pending subscription can be cleaned"
+            )
+        order_id = int(subscription.get("order_id") or 0)
+        with transaction(self.conn):
+            self.conn.execute(
+                "UPDATE tenant_trial_claims SET subscription_id=NULL, status='failed', updated_at=? "
+                "WHERE tenant_id=? AND subscription_id=?",
+                (iso_utc(utcnow()), self.tenant_id, int(subscription_id)),
+            )
+            self.conn.execute(
+                "DELETE FROM tenant_smart_links "
+                "WHERE tenant_id=? AND target=?",
+                (self.tenant_id, f"subscription:{int(subscription_id)}"),
+            )
+            changed = self.conn.execute(
+                "DELETE FROM tenant_subscriptions WHERE id=? AND tenant_id=? "
+                "AND status='pending_provisioning' AND server_id IS NULL "
+                "AND external_ref IS NULL",
+                (int(subscription_id), self.tenant_id),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("subscription state changed")
+            if order_id > 0:
+                self.conn.execute(
+                    "UPDATE tenant_orders SET status='cancelled', updated_at=? "
+                    "WHERE id=? AND tenant_id=? AND status='paid'",
+                    (iso_utc(utcnow()), order_id, self.tenant_id),
+                )
+        return {
+            "id": int(subscription_id),
+            "order_id": order_id,
+            "status": "removed",
+        }
 
     def edit_subscription_terms_admin(
         self,
