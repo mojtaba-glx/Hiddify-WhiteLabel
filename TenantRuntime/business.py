@@ -512,9 +512,19 @@ class TenantBusinessService:
             "WHERE tenant_id=? AND server_id=? AND external_ref IS NOT NULL",
             (self.tenant_id, int(server_id)),
         ).fetchone()
+        pending_orders = self.conn.execute(
+            "SELECT COUNT(*) AS total FROM tenant_orders "
+            "WHERE tenant_id=? AND selected_server_id=? "
+            "AND status IN ('pending_payment','payment_review','paid')",
+            (self.tenant_id, int(server_id)),
+        ).fetchone()
         if int(primary["total"] if primary else 0) or int(mapped["total"] if mapped else 0):
             raise TenantBusinessError(
                 "server still has subscription mappings; move or remove them first"
+            )
+        if int(pending_orders["total"] if pending_orders else 0):
+            raise TenantBusinessError(
+                "server is selected by unfinished purchase orders"
             )
         with transaction(self.conn):
             self.conn.execute(
