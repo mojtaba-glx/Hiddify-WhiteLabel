@@ -406,11 +406,45 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
     except (TenantBusinessError, ValueError, sqlite3.Error):
         text = base
+    settings = business.runtime_userbot_settings()
+    status_markup = InlineKeyboardMarkup([
+        [
+            _button(
+                "👤 حساب من",
+                callback_data="shop:account",
+                settings=settings,
+            ),
+            _button(
+                "🧾 سفارش‌های من",
+                callback_data="shop:orders",
+                settings=settings,
+            ),
+        ],
+        [
+            _button(
+                "📦 اشتراک‌های من",
+                callback_data="shop:subs",
+                settings=settings,
+            ),
+            _button(
+                "🔗 اتصال اشتراک",
+                callback_data="shop:connect",
+                settings=settings,
+            ),
+        ],
+        [
+            _button(
+                "🔙بازگشت",
+                callback_data="runtime:home",
+                settings=settings,
+            )
+        ],
+    ])
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(text, reply_markup=_menu(spec, business))
+        await update.callback_query.edit_message_text(text, reply_markup=status_markup)
     elif update.effective_message:
-        await update.effective_message.reply_text(text, reply_markup=_menu(spec, business))
+        await update.effective_message.reply_text(text, reply_markup=status_markup)
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
