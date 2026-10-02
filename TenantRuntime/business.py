@@ -3133,11 +3133,16 @@ class TenantBusinessService:
         self._admin(actor_id)
         rows = self.conn.execute(
             "SELECT o.*, c.display_name, p.name AS plan_name, "
+            "pc.title AS category_title, srv.label AS selected_server_label, "
             "o.order_kind AS operation, "
             "ro.subscription_id AS renewal_subscription_id "
             "FROM tenant_orders o "
             "JOIN tenant_customers c ON c.id=o.customer_id "
             "JOIN tenant_sale_plans p ON p.id=o.plan_id "
+            "LEFT JOIN tenant_plan_categories pc "
+            "ON pc.id=p.category_id AND pc.tenant_id=o.tenant_id "
+            "LEFT JOIN tenant_servers srv "
+            "ON srv.id=o.selected_server_id AND srv.tenant_id=o.tenant_id "
             "LEFT JOIN tenant_renewal_orders ro ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
             "WHERE o.tenant_id=? ORDER BY o.id DESC",
             (self.tenant_id,),
@@ -5432,10 +5437,15 @@ class TenantBusinessService:
         row = self.conn.execute(
             "SELECT o.*, c.display_name, c.username, c.telegram_user_id, "
             "p.name AS plan_name, p.traffic_gb, p.duration_days, "
+            "pc.title AS category_title, srv.label AS selected_server_label, "
             "o.order_kind AS operation, ro.subscription_id AS renewal_subscription_id "
             "FROM tenant_orders o "
             "JOIN tenant_customers c ON c.id=o.customer_id AND c.tenant_id=o.tenant_id "
             "JOIN tenant_sale_plans p ON p.id=o.plan_id AND p.tenant_id=o.tenant_id "
+            "LEFT JOIN tenant_plan_categories pc "
+            "ON pc.id=p.category_id AND pc.tenant_id=o.tenant_id "
+            "LEFT JOIN tenant_servers srv "
+            "ON srv.id=o.selected_server_id AND srv.tenant_id=o.tenant_id "
             "LEFT JOIN tenant_renewal_orders ro "
             "ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
             "WHERE o.tenant_id=? AND o.id=?",
@@ -5462,10 +5472,15 @@ class TenantBusinessService:
             args.extend([numeric, numeric, numeric])
         rows = self.conn.execute(
             "SELECT o.*, c.display_name, c.username, c.telegram_user_id, "
-            "p.name AS plan_name, o.order_kind AS operation "
+            "p.name AS plan_name, pc.title AS category_title, "
+            "srv.label AS selected_server_label, o.order_kind AS operation "
             "FROM tenant_orders o "
             "JOIN tenant_customers c ON c.id=o.customer_id AND c.tenant_id=o.tenant_id "
             "JOIN tenant_sale_plans p ON p.id=o.plan_id AND p.tenant_id=o.tenant_id "
+            "LEFT JOIN tenant_plan_categories pc "
+            "ON pc.id=p.category_id AND pc.tenant_id=o.tenant_id "
+            "LEFT JOIN tenant_servers srv "
+            "ON srv.id=o.selected_server_id AND srv.tenant_id=o.tenant_id "
             "WHERE o.tenant_id=? AND ("
             "c.display_name LIKE ? COLLATE NOCASE OR "
             "COALESCE(c.username,'') LIKE ? COLLATE NOCASE OR "
