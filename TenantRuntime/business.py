@@ -39,6 +39,15 @@ USERBOT_SETTING_DEFAULTS: dict[str, Any] = {
     "enable_buy": True,
     "enable_renew": True,
     "show_renew_in_main_menu": True,
+    "renew_policy": "advanced",
+    "renew_volume_mode": "reset",
+    "renew_time_mode": "reset",
+    "renew_max_days": 3,
+    "renew_max_remaining_gb": 3,
+    "renew_unlimited_volume": False,
+    "renew_unlimited_time": False,
+    "renew_unlimited_volume_from_gb": 1000,
+    "renew_unlimited_time_from_days": 365,
 
     # Subscription presentation.
     "show_user_page_link": True,
@@ -3067,12 +3076,194 @@ class TenantBusinessService:
                 raise TenantBusinessError("purchase order server cannot be changed")
         return self.order(actor_id, int(order_id))
 
+    @staticmethod
+    def _renew_modes_from_policy(policy: str) -> tuple[str, str]:
+        normalized = str(policy or "").strip().lower()
+        if normalized == "fair":
+            return "add", "add"
+        if normalized == "default":
+            return "add", "reset"
+        return "reset", "reset"
+
+    def set_renewal_policy_admin(
+        self, actor_id: int, *, policy: str
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        normalized = str(policy or "").strip().lower()
+        if normalized not in ("advanced", "default", "fair"):
+            raise ValueError("invalid renewal policy")
+        volume_mode, time_mode = self._renew_modes_from_policy(normalized)
+        now = iso_utc(utcnow())
+        values = {
+            "renew_policy": normalized,
+            "renew_volume_mode": volume_mode,
+            "renew_time_mode": time_mode,
+        }
+        with transaction(self.conn):
+            for key, value in values.items():
+                self.conn.execute(
+                    "INSERT INTO tenant_userbot_settings "
+                    "(tenant_id,key,value,updated_at) VALUES (?,?,?,?) "
+                    "ON CONFLICT(tenant_id,key) DO UPDATE SET "
+                    "value=excluded.value,updated_at=excluded.updated_at",
+                    (
+                        self.tenant_id,
+                        key,
+                        json.dumps(value, ensure_ascii=False),
+                        now,
+                    ),
+                )
+        return self.runtime_userbot_settings()
+
+    def set_renewal_rollover_admin(
+        self,
+        actor_id: int,
+        *,
+        kind: str,
+        mode: str,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        clean_kind = str(kind or "").strip().lower()
+        clean_mode = str(mode or "").strip().lower()
+        if clean_kind not in ("volume", "time"):
+            raise ValueError("invalid renewal rollover kind")
+        if clean_mode not in ("add", "reset"):
+            raise ValueError("invalid renewal rollover mode")
+        return self.set_userbot_setting_admin(
+            actor_id,
+            key=(
+                "renew_volume_mode"
+                if clean_kind == "volume"
+                else "renew_time_mode"
+            ),
+            value=clean_mode,
+        )
+
+    def renewal_eligibility(
+        self,
+        actor_id: int,
+        *,
+        subscription_id: int,
+    ) -> dict[str, Any]:
+        customer = self._customer(actor_id)
+        row = self.conn.execute(
+            "SELECT * FROM tenant_subscriptions "
+            "WHERE id=? AND tenant_id=? AND customer_id=? "
+            "AND status IN ('active','disabled','expired')",
+            (int(subscription_id), self.tenant_id, int(customer["id"])),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("subscription cannot be renewed")
+        subscription = dict(row)
+        if subscription["server_id"] is None or not subscription["external_ref"]:
+            raise TenantBusinessError("subscription is not provisioned")
+
+        # Match the proven SellBot behavior: make the advanced-policy decision
+        # from fresh panel usage when possible. Provider outages fall back to
+        # the last safely persisted counters instead of opening the policy.
+        if str(subscription.get("status") or "") in ("active", "disabled"):
+            try:
+                self.sync_subscription_usage(
+                    self.owner_telegram_id,
+                    subscription_id=int(subscription_id),
+                )
+            except (TenantBusinessError, PanelError):
+                pass
+            refreshed = self.conn.execute(
+                "SELECT * FROM tenant_subscriptions "
+                "WHERE id=? AND tenant_id=? AND customer_id=?",
+                (int(subscription_id), self.tenant_id, int(customer["id"])),
+            ).fetchone()
+            if refreshed is not None:
+                subscription = dict(refreshed)
+
+        settings = self.runtime_userbot_settings()
+        if not bool(settings.get("enable_renew", True)):
+            return {
+                "allowed": False,
+                "reason": "disabled",
+                "policy": str(settings.get("renew_policy") or "advanced"),
+            }
+
+        policy = str(settings.get("renew_policy") or "advanced").strip().lower()
+        if policy not in ("advanced", "default", "fair"):
+            policy = "advanced"
+
+        now = utcnow()
+        remaining_seconds: float | None = None
+        try:
+            expires_at = parse_utc(str(subscription["expires_at"]))
+            remaining_seconds = (expires_at - now).total_seconds()
+            days_left = int(remaining_seconds // 86400)
+        except Exception:
+            days_left = None
+
+        traffic_bytes = max(0, int(subscription.get("traffic_bytes") or 0))
+        usage_bytes = max(0, int(subscription.get("usage_bytes") or 0))
+        remaining_bytes = max(0, traffic_bytes - usage_bytes)
+        remaining_gb = remaining_bytes / (1024 ** 3)
+
+        max_days = max(1, int(settings.get("renew_max_days") or 3))
+        max_remaining_gb = max(
+            1, int(settings.get("renew_max_remaining_gb") or 3)
+        )
+        days_ok = (
+            remaining_seconds is not None
+            and remaining_seconds < (max_days * 86400)
+        )
+        usage_ok = traffic_bytes > 0 and remaining_gb < max_remaining_gb
+        allowed = (
+            policy in ("default", "fair")
+            or days_ok
+            or usage_ok
+            or str(subscription.get("status") or "") == "expired"
+        )
+        return {
+            "allowed": bool(allowed),
+            "reason": "" if allowed else "advanced_limits",
+            "policy": policy,
+            "days_left": days_left,
+            "remaining_gb": remaining_gb,
+            "max_days": max_days,
+            "max_remaining_gb": max_remaining_gb,
+            "volume_mode": str(
+                settings.get("renew_volume_mode") or "reset"
+            ),
+            "time_mode": str(settings.get("renew_time_mode") or "reset"),
+        }
+
+    def renewal_not_allowed_text(self) -> str:
+        settings = self.runtime_userbot_settings()
+        max_days = max(1, int(settings.get("renew_max_days") or 3))
+        max_remaining_gb = max(
+            1, int(settings.get("renew_max_remaining_gb") or 3)
+        )
+        return (
+            "🛑 در حال حاضر شما امکان تمدید اشتراک خود را ندارید.\n"
+            f"1- کمتر از {max_days} روز تا اتمام اشتراک باقی مانده باشد.\n"
+            f"2- حجم باقی‌مانده اشتراک کمتر از {max_remaining_gb} گیگابایت باشد."
+        )
+
     def create_renewal_order(
         self, actor_id: int, *, subscription_id: int, plan_id: int
     ) -> dict[str, Any]:
-        """Create a normal payable order linked to one existing subscription."""
+        """Create a payable renewal with a snapshot of rollover behavior."""
         customer = self._customer(actor_id)
         plan = self.plan(plan_id, public=True)
+        eligibility = self.renewal_eligibility(
+            actor_id, subscription_id=int(subscription_id)
+        )
+        if not bool(eligibility.get("allowed")):
+            raise TenantBusinessError("renewal policy does not allow renewal")
+
+        settings = self.runtime_userbot_settings()
+        volume_mode = str(settings.get("renew_volume_mode") or "reset").lower()
+        time_mode = str(settings.get("renew_time_mode") or "reset").lower()
+        if volume_mode not in ("add", "reset"):
+            volume_mode = "reset"
+        if time_mode not in ("add", "reset"):
+            time_mode = "reset"
+
         now = iso_utc(utcnow())
         with transaction(self.conn):
             subscription = self.conn.execute(
@@ -3113,9 +3304,17 @@ class TenantBusinessService:
             )
             order_id = int(cursor.lastrowid or 0)
             self.conn.execute(
-                "INSERT INTO tenant_renewal_orders (order_id, tenant_id, subscription_id, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (order_id, self.tenant_id, int(subscription_id), now),
+                "INSERT INTO tenant_renewal_orders "
+                "(order_id, tenant_id, subscription_id, renew_volume_mode, "
+                "renew_time_mode, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    order_id,
+                    self.tenant_id,
+                    int(subscription_id),
+                    volume_mode,
+                    time_mode,
+                    now,
+                ),
             )
         return self.order(actor_id, order_id)
     def order(self, actor_id: int, order_id: int) -> dict[str, Any]:
@@ -3344,7 +3543,8 @@ class TenantBusinessService:
         self._admin(actor_id)
         row = self.conn.execute(
             "SELECT o.*, p.traffic_gb, p.duration_days, "
-            "ro.subscription_id AS renewal_subscription_id "
+            "ro.subscription_id AS renewal_subscription_id, "
+            "ro.renew_volume_mode, ro.renew_time_mode "
             "FROM tenant_orders o "
             "JOIN tenant_sale_plans p ON p.id=o.plan_id "
             "LEFT JOIN tenant_renewal_orders ro ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
@@ -3361,6 +3561,8 @@ class TenantBusinessService:
                 traffic_gb=int(order["traffic_gb"]),
                 duration_days=int(order["duration_days"]),
                 plan_id=int(order["plan_id"]),
+                volume_mode=str(order.get("renew_volume_mode") or "reset"),
+                time_mode=str(order.get("renew_time_mode") or "reset"),
                 idempotency_key=f"tenant:{self.tenant_id}:renewal-order:{int(order_id)}",
                 fulfillment_order_id=int(order_id),
             )
@@ -3996,6 +4198,8 @@ class TenantBusinessService:
         traffic_gb: int,
         duration_days: int,
         plan_id: int | None = None,
+        volume_mode: str = "reset",
+        time_mode: str = "reset",
         idempotency_key: str = "",
         fulfillment_order_id: int | None = None,
     ) -> dict[str, Any]:
@@ -4008,8 +4212,42 @@ class TenantBusinessService:
         next_plan_id = int(plan_id or subscription["plan_id"])
         if plan_id is not None:
             self.plan(next_plan_id, public=False)
-        traffic_bytes = int(traffic_gb) * 1024 * 1024 * 1024
-        expires_at = iso_utc(utcnow() + timedelta(days=int(duration_days)))
+        clean_volume_mode = str(volume_mode or "reset").strip().lower()
+        clean_time_mode = str(time_mode or "reset").strip().lower()
+        if clean_volume_mode not in ("add", "reset"):
+            raise ValueError("invalid renewal volume mode")
+        if clean_time_mode not in ("add", "reset"):
+            raise ValueError("invalid renewal time mode")
+
+        plan_traffic_bytes = int(traffic_gb) * 1024 * 1024 * 1024
+        current_traffic_bytes = max(
+            0, int(subscription.get("traffic_bytes") or 0)
+        )
+        traffic_bytes = (
+            current_traffic_bytes + plan_traffic_bytes
+            if clean_volume_mode == "add"
+            else plan_traffic_bytes
+        )
+        reset_usage = clean_volume_mode == "reset"
+
+        now_dt = utcnow()
+        if clean_time_mode == "add":
+            try:
+                current_expiry = parse_utc(str(subscription["expires_at"]))
+            except Exception:
+                current_expiry = now_dt
+            expiry_base = max(now_dt, current_expiry)
+        else:
+            expiry_base = now_dt
+        target_expiry = expiry_base + timedelta(days=int(duration_days))
+        expires_at = iso_utc(target_expiry)
+        panel_duration_days = max(
+            1,
+            int(
+                ((target_expiry - now_dt).total_seconds() + 86399)
+                // 86400
+            ),
+        )
         base_key = str(idempotency_key or "")
         _, target, secret = self._panel_material(int(subscription["server_id"]))
         try:
@@ -4019,9 +4257,10 @@ class TenantBusinessService:
                 external_ref=str(subscription["external_ref"]),
                 request=RenewRequest(
                     traffic_bytes=traffic_bytes,
-                    duration_days=int(duration_days),
+                    duration_days=panel_duration_days,
                     expires_at=expires_at,
-                    reset_usage=True,
+                    reset_usage=reset_usage,
+                    reset_time=clean_time_mode == "reset",
                     idempotency_key=base_key,
                 ),
             )
@@ -4095,9 +4334,10 @@ class TenantBusinessService:
                     external_ref=str(row["external_ref"]),
                     request=RenewRequest(
                         traffic_bytes=traffic_bytes,
-                        duration_days=int(duration_days),
+                        duration_days=panel_duration_days,
                         expires_at=expires_at,
-                        reset_usage=True,
+                        reset_usage=reset_usage,
+                        reset_time=clean_time_mode == "reset",
                         idempotency_key=(
                             f"{base_key}:server:{int(row['server_id'])}"
                             if base_key
@@ -4150,6 +4390,9 @@ class TenantBusinessService:
                 "status": "active",
                 "traffic_bytes": traffic_bytes,
                 "expires_at": expires_at,
+                "renew_volume_mode": clean_volume_mode,
+                "renew_time_mode": clean_time_mode,
+                "reset_usage": reset_usage,
                 "node_errors": secondary_errors,
                 "subscription_url": self._smart_url(
                     subscription_id=int(subscription_id)
@@ -5255,6 +5498,14 @@ class TenantBusinessService:
                 raise ValueError("reminder days out of range")
             if name == "reminder_remaining_gb" and clean > 1000:
                 raise ValueError("reminder volume out of range")
+            if name == "renew_max_days" and clean > 3650:
+                raise ValueError("renewal day limit out of range")
+            if name == "renew_max_remaining_gb" and clean > 100000:
+                raise ValueError("renewal volume limit out of range")
+            if name == "renew_unlimited_volume_from_gb" and clean > 1000000:
+                raise ValueError("unlimited volume threshold out of range")
+            if name == "renew_unlimited_time_from_days" and clean > 36500:
+                raise ValueError("unlimited time threshold out of range")
         else:
             clean = str(value or "").strip()
             if len(clean) > 4000:
@@ -5267,6 +5518,14 @@ class TenantBusinessService:
                 "id", "price_asc", "price_desc", "traffic_asc", "traffic_desc"
             ):
                 raise ValueError("invalid plan sort mode")
+            if name == "renew_policy" and clean not in (
+                "advanced", "default", "fair"
+            ):
+                raise ValueError("invalid renewal policy")
+            if name in ("renew_volume_mode", "renew_time_mode") and clean not in (
+                "add", "reset"
+            ):
+                raise ValueError("invalid renewal rollover mode")
         now = iso_utc(utcnow())
         with transaction(self.conn):
             self.conn.execute(

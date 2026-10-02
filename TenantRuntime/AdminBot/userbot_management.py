@@ -1198,6 +1198,12 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
         return
 
     if section == "buy_renew":
+        policy = str(s.get("renew_policy") or "advanced")
+        policy_title = {
+            "advanced": "پیشرفته",
+            "default": "پیشفرض",
+            "fair": "منصفانه",
+        }.get(policy, "پیشرفته")
         rows = [
             [InlineKeyboardButton(
                 f"امکان خرید اشتراک | {_bool_icon(s.get('enable_buy'))}",
@@ -1211,6 +1217,10 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
                 f"دکمه تمدید اشتراک در منوی اصلی | {_bool_icon(s.get('show_renew_in_main_menu'))}",
                 callback_data="userbot:settings:buy_renew:show_renew_in_main_menu",
             )],
+            [InlineKeyboardButton(
+                f"تنظیم شیوه تمدید | {policy_title}",
+                callback_data="userbot:settings:buy_renew:renew_mode_info",
+            )],
             [
                 InlineKeyboardButton(
                     "ستون‌های پلن‌ها",
@@ -1221,9 +1231,101 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
                     callback_data="userbot:settings:buy_renew:server_columns:menu",
                 ),
             ],
+            [InlineKeyboardButton(
+                f"حجم نامحدود∞ | {_bool_icon(s.get('renew_unlimited_volume'))}",
+                callback_data="userbot:settings:buy_renew:renew_unlimited_volume",
+            )],
+            [InlineKeyboardButton(
+                f"زمان نامحدود∞ | {_bool_icon(s.get('renew_unlimited_time'))}",
+                callback_data="userbot:settings:buy_renew:renew_unlimited_time",
+            )],
             [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
         ]
-        await _edit_or_send(update, "🛒 تنظیمات خرید و تمدید", InlineKeyboardMarkup(rows))
+        await _edit_or_send(
+            update,
+            "🛒 تنظیمات خرید و تمدید\n"
+            f"⚙️ سیاست تمدید فعلی: {policy_title}",
+            InlineKeyboardMarkup(rows),
+        )
+        return
+
+    if section == "renew_policy":
+        policy = str(s.get("renew_policy") or "advanced")
+        volume_mode = str(s.get("renew_volume_mode") or "reset")
+        time_mode = str(s.get("renew_time_mode") or "reset")
+        policy_title = {
+            "advanced": "پیشرفته",
+            "default": "پیشفرض",
+            "fair": "منصفانه",
+        }.get(policy, "پیشرفته")
+        volume_text = (
+            "افزایشی (باقیمانده + پلن جدید)"
+            if volume_mode == "add"
+            else "ریست (فقط پلن جدید)"
+        )
+        time_text = (
+            "افزایشی (باقیمانده + پلن جدید)"
+            if time_mode == "add"
+            else "ریست (فقط پلن جدید)"
+        )
+        rows = [
+            [
+                InlineKeyboardButton(
+                    f"پیشفرض | {'✅' if policy == 'default' else '❌'}",
+                    callback_data="userbot:settings:buy_renew:renew_policy:default",
+                ),
+                InlineKeyboardButton(
+                    f"پیشرفته | {'✅' if policy == 'advanced' else '❌'}",
+                    callback_data="userbot:settings:buy_renew:renew_policy:advanced",
+                ),
+                InlineKeyboardButton(
+                    f"منصفانه | {'✅' if policy == 'fair' else '❌'}",
+                    callback_data="userbot:settings:buy_renew:renew_policy:fair",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    f"حجم افزایشی | {'✅' if volume_mode == 'add' else '❌'}",
+                    callback_data="userbot:settings:buy_renew:renew_rollover:volume:add",
+                ),
+                InlineKeyboardButton(
+                    f"حجم ریست | {'✅' if volume_mode == 'reset' else '❌'}",
+                    callback_data="userbot:settings:buy_renew:renew_rollover:volume:reset",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    f"زمان افزایشی | {'✅' if time_mode == 'add' else '❌'}",
+                    callback_data="userbot:settings:buy_renew:renew_rollover:time:add",
+                ),
+                InlineKeyboardButton(
+                    f"زمان ریست | {'✅' if time_mode == 'reset' else '❌'}",
+                    callback_data="userbot:settings:buy_renew:renew_rollover:time:reset",
+                ),
+            ],
+            [InlineKeyboardButton(
+                f"حداکثر زمان مجاز برای تمدید📊 | {int(s.get('renew_max_days') or 3)} روز",
+                callback_data="userbot:settings:buy_renew:renew_limit:days",
+            )],
+            [InlineKeyboardButton(
+                f"حداکثر حجم باقی‌مانده📆 | {int(s.get('renew_max_remaining_gb') or 3)} GB",
+                callback_data="userbot:settings:buy_renew:renew_limit:usage",
+            )],
+            [InlineKeyboardButton(
+                "🔙بازگشت",
+                callback_data="userbot:settings:buy_renew",
+            )],
+        ]
+        await _edit_or_send(
+            update,
+            "تنظیم شیوه تمدید\n"
+            f"⚙️ پروفایل فعلی: {policy_title}\n"
+            f"📦 حالت حجم در تمدید: {volume_text}\n"
+            f"⏳ حالت زمان در تمدید: {time_text}\n"
+            f"📊 مقدار فعلی زمان: {int(s.get('renew_max_days') or 3)} روز\n"
+            f"📆 مقدار فعلی حجم: {int(s.get('renew_max_remaining_gb') or 3)} گیگابایت",
+            InlineKeyboardMarkup(rows),
+        )
         return
 
     if section == "ui":
@@ -2004,6 +2106,93 @@ async def handle_callback(
                 InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:sub_link_status")
             ]]),
         )
+        return True
+
+    if data == "userbot:settings:buy_renew:renew_mode_info":
+        await _settings_section(update, business, actor, "renew_policy")
+        return True
+
+    if data.startswith("userbot:settings:buy_renew:renew_policy:"):
+        policy = data.rsplit(":", 1)[1]
+        business.set_renewal_policy_admin(actor, policy=policy)
+        await _settings_section(update, business, actor, "renew_policy")
+        return True
+
+    if data.startswith("userbot:settings:buy_renew:renew_rollover:"):
+        parts = data.split(":")
+        if len(parts) != 6:
+            raise ValueError("invalid renewal rollover callback")
+        business.set_renewal_rollover_admin(
+            actor,
+            kind=parts[4],
+            mode=parts[5],
+        )
+        await _settings_section(update, business, actor, "renew_policy")
+        return True
+
+    if data.startswith("userbot:settings:buy_renew:renew_limit:"):
+        field = data.rsplit(":", 1)[1]
+        settings = business.userbot_settings_admin(actor)
+        if field == "days":
+            key = "renew_max_days"
+            current = int(settings.get(key) or 3)
+            prompt = (
+                f"📊 مقدار فعلی: {current} روز\n"
+                "حداکثر چند روز مانده به پایان اشتراک، تمدید مجاز باشد؟"
+            )
+        elif field == "usage":
+            key = "renew_max_remaining_gb"
+            current = int(settings.get(key) or 3)
+            prompt = (
+                f"📆 مقدار فعلی: {current} گیگابایت\n"
+                "حداکثر چند گیگابایتِ باقی‌مانده، تمدید مجاز باشد؟"
+            )
+        else:
+            raise ValueError("invalid renewal limit")
+        context.user_data[FLOW_KEY] = {
+            "kind": "renew_setting_int",
+            "key": key,
+        }
+        await query.message.reply_text(
+            prompt,
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+
+    if data == "userbot:settings:buy_renew:renew_unlimited_volume":
+        settings = business.toggle_userbot_setting_admin(
+            actor, key="renew_unlimited_volume"
+        )
+        if bool(settings.get("renew_unlimited_volume")):
+            context.user_data[FLOW_KEY] = {
+                "kind": "renew_setting_int",
+                "key": "renew_unlimited_volume_from_gb",
+            }
+            await query.message.reply_text(
+                "♾ حداقل حجم پلن برای نمایش «نامحدود» را به گیگابایت ارسال کنید.\n"
+                f"مقدار فعلی: {int(settings.get('renew_unlimited_volume_from_gb') or 1000)}",
+                reply_markup=userbot_cancel_keyboard(),
+            )
+            return True
+        await _settings_section(update, business, actor, "buy_renew")
+        return True
+
+    if data == "userbot:settings:buy_renew:renew_unlimited_time":
+        settings = business.toggle_userbot_setting_admin(
+            actor, key="renew_unlimited_time"
+        )
+        if bool(settings.get("renew_unlimited_time")):
+            context.user_data[FLOW_KEY] = {
+                "kind": "renew_setting_int",
+                "key": "renew_unlimited_time_from_days",
+            }
+            await query.message.reply_text(
+                "♾ حداقل مدت برای نمایش «نامحدود» را به روز ارسال کنید.\n"
+                f"مقدار فعلی: {int(settings.get('renew_unlimited_time_from_days') or 365)}",
+                reply_markup=userbot_cancel_keyboard(),
+            )
+            return True
+        await _settings_section(update, business, actor, "buy_renew")
         return True
 
     if data == "userbot:settings:buy_renew:plan_columns:menu":
@@ -2890,6 +3079,25 @@ async def handle_text(
                 "✅ اولویت دسته ذخیره شد.",
                 reply_markup=admin_main_keyboard(),
             )
+            return True
+        if kind=="renew_setting_int":
+            key=str(flow["key"])
+            business.set_userbot_setting_admin(
+                actor,
+                key=key,
+                value=int(text),
+            )
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text(
+                "✅ تنظیم تمدید ذخیره شد.",
+                reply_markup=admin_main_keyboard(),
+            )
+            section=(
+                "renew_policy"
+                if key in {"renew_max_days","renew_max_remaining_gb"}
+                else "buy_renew"
+            )
+            await _settings_section(update,business,actor,section)
             return True
         if kind=="setting_text":
             key = str(flow["key"])

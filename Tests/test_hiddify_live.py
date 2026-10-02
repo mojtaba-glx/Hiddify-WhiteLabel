@@ -123,6 +123,111 @@ def test_v12_renew_keeps_legacy_fields_and_resets_usage() -> None:
     assert result.active is True
 
 
+def test_renew_add_time_preserves_start_date_and_extends_package_days() -> None:
+    patches: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode()) if request.content else None
+        if request.url.path.endswith("/api/v2/panel/info/"):
+            return _json_response(200, {"version": "12.3.3"}, request)
+        if request.method == "PATCH":
+            patches.append(body or {})
+            return _json_response(
+                200,
+                {
+                    "uuid": "u-add-time",
+                    "is_active": True,
+                    "current_usage_GB": 7,
+                    "usage_limit_GB": 80,
+                    "start_date": "2026-09-01",
+                },
+                request,
+            )
+        return _json_response(
+            200,
+            {
+                "uuid": "u-add-time",
+                "is_active": True,
+                "current_usage_GB": 7,
+                "usage_limit_GB": 50,
+                "start_date": "2026-09-01",
+            },
+            request,
+        )
+
+    adapter = HiddifyPanelAdapter(transport=httpx.MockTransport(handler))
+    adapter.renew(
+        target=_target(),
+        secret="api-key",
+        external_ref="u-add-time",
+        request=RenewRequest(
+            traffic_bytes=80 * 1024**3,
+            duration_days=40,
+            expires_at="2026-11-01T00:00:00+00:00",
+            reset_usage=False,
+            reset_time=False,
+        ),
+    )
+
+    renewal_patch = next(p for p in patches if "package_days" in p)
+    assert renewal_patch["package_days"] == 61
+    assert renewal_patch["usage_limit_GB"] == 80.0
+    assert "current_usage_GB" not in renewal_patch
+    assert "start_date" not in renewal_patch
+
+
+def test_renew_reset_time_is_independent_from_usage_reset() -> None:
+    patches: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode()) if request.content else None
+        if request.url.path.endswith("/api/v2/panel/info/"):
+            return _json_response(200, {"version": "12.3.3"}, request)
+        if request.method == "PATCH":
+            patches.append(body or {})
+            return _json_response(
+                200,
+                {
+                    "uuid": "u-reset-time",
+                    "is_active": True,
+                    "current_usage_GB": 7,
+                    "usage_limit_GB": 80,
+                    "start_date": "2026-10-03",
+                },
+                request,
+            )
+        return _json_response(
+            200,
+            {
+                "uuid": "u-reset-time",
+                "is_active": True,
+                "current_usage_GB": 7,
+                "usage_limit_GB": 50,
+                "start_date": "2026-09-01",
+            },
+            request,
+        )
+
+    adapter = HiddifyPanelAdapter(transport=httpx.MockTransport(handler))
+    adapter.renew(
+        target=_target(),
+        secret="api-key",
+        external_ref="u-reset-time",
+        request=RenewRequest(
+            traffic_bytes=80 * 1024**3,
+            duration_days=30,
+            expires_at="2026-11-02T00:00:00+00:00",
+            reset_usage=False,
+            reset_time=True,
+        ),
+    )
+
+    renewal_patch = next(p for p in patches if "package_days" in p)
+    assert renewal_patch["package_days"] == 30
+    assert "current_usage_GB" not in renewal_patch
+    assert "start_date" in renewal_patch
+
+
 def test_usage_refreshes_official_counter_and_preserves_last_online() -> None:
     calls: list[str] = []
 
