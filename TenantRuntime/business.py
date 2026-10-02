@@ -3146,6 +3146,25 @@ class TenantBusinessService:
         if subscription["server_id"] is None or not subscription["external_ref"]:
             raise TenantBusinessError("subscription is not provisioned")
 
+        # Match the proven SellBot behavior: make the advanced-policy decision
+        # from fresh panel usage when possible. Provider outages fall back to
+        # the last safely persisted counters instead of opening the policy.
+        if str(subscription.get("status") or "") in ("active", "disabled"):
+            try:
+                self.sync_subscription_usage(
+                    self.owner_telegram_id,
+                    subscription_id=int(subscription_id),
+                )
+            except (TenantBusinessError, PanelError):
+                pass
+            refreshed = self.conn.execute(
+                "SELECT * FROM tenant_subscriptions "
+                "WHERE id=? AND tenant_id=? AND customer_id=?",
+                (int(subscription_id), self.tenant_id, int(customer["id"])),
+            ).fetchone()
+            if refreshed is not None:
+                subscription = dict(refreshed)
+
         settings = self.runtime_userbot_settings()
         if not bool(settings.get("enable_renew", True)):
             return {
