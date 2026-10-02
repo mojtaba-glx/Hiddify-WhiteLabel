@@ -408,3 +408,67 @@ def test_ticket_reply_close_and_user_history(
             ticket_id=int(ticket["id"]),
             reply="نباید ثبت شود",
         )
+
+
+
+def test_admin_subscription_search_expired_review_and_daily_report(
+    conn, factories, cipher
+) -> None:
+    _tenant, service, panel, plan, method = _service(
+        conn, factories, cipher
+    )
+    order, reviewed = _approve_purchase(
+        service,
+        customer=7101,
+        plan_id=int(plan["id"]),
+        method_id=int(method["id"]),
+        reference="search-report",
+    )
+    activated = service.fulfill_paid_order(
+        7001, order_id=int(reviewed["order_id"])
+    )
+    sid = int(activated["id"])
+
+    by_name = service.search_subscriptions_admin(7001, "Ali Report")
+    by_tid = service.search_subscriptions_admin(7001, "7101")
+    by_sid = service.search_subscriptions_admin(7001, str(sid))
+    assert [int(x["id"]) for x in by_name] == [sid]
+    assert [int(x["id"]) for x in by_tid] == [sid]
+    assert [int(x["id"]) for x in by_sid] == [sid]
+
+    link = service.admin_subscription_link(7001, subscription_id=sid)
+    assert link
+
+    edited = service.edit_subscription_terms_admin(
+        7001, subscription_id=sid, traffic_gb=25
+    )
+    assert int(edited["traffic_bytes"]) == 25 * 1024**3
+
+    conn.execute(
+        "UPDATE tenant_subscriptions SET status='expired' WHERE id=?",
+        (sid,),
+    )
+    expired = service.list_subscriptions_tracking_admin(
+        7001, status="expired"
+    )
+    assert any(int(x["id"]) == sid for x in expired)
+
+    now = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+    yesterday = iso_utc(now - timedelta(days=1, hours=2))
+    conn.execute(
+        "UPDATE tenant_orders SET paid_at=? WHERE id=?",
+        (yesterday, int(order["id"])),
+    )
+    conn.execute(
+        "UPDATE tenant_receipts SET reviewed_at=? WHERE order_id=?",
+        (yesterday, int(order["id"])),
+    )
+    report = service.daily_admin_report(
+        7001, now=now, tz_name="UTC"
+    )
+    assert report["report_day"] == "2026-10-01"
+    assert report["approved_receipts"] == 1
+    assert report["cash"] == [
+        {"currency": "IRR", "count": 1, "amount": 120000}
+    ]
+    assert report["services"][0]["buy_count"] == 1

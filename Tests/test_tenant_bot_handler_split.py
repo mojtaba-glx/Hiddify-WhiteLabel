@@ -72,3 +72,23 @@ def test_admin_server_menu_uses_sellbot_labels() -> None:
         "❄️ کاربران یخ‌زده این سرور",
     ):
         assert label in source
+
+
+
+def test_admin_search_menu_matches_sellbot_sections() -> None:
+    source = (ROOT / "TenantRuntime" / "AdminBot" / "handlers.py").read_text(
+        encoding="utf-8"
+    )
+    for label in (
+        "🔍 جستجوی هوشمند کاربر",
+        "📊پیگیری اشتراک",
+        "⚠️ لیست کاربران منقضی شده",
+        "♻️ اشتراک‌های منقضی‌شده",
+        "🧹 بررسی رکوردهای مشکوک/قدیمی",
+        "کانفیگ ها📄",
+        "ویرایش کاربر✏️",
+        "تمدید اشتراک♾️",
+        "حذف کاربر🗑️",
+        "📊 <b>گزارش کامل روزانه فروش</b>",
+    ):
+        assert label in source

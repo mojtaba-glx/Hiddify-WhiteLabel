@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.10.3 — Admin user search and daily report parity
+
+- Rebuilt Tenant AdminBot user search around the Hiddify-SellBot search menu: smart search, subscription tracking, expired users, expired subscriptions and old/suspicious records.
+- Smart search now resolves real tenant subscriptions by customer name, username, Telegram ID, Customer ID, subscription ID, order ID and panel external reference.
+- Added SellBot-style search result paging and subscription detail actions for configs, editing, renewal, deletion and customer profile.
+- Added working subscription edit controls for enable/disable, usage reset, traffic change, duration reset and duration change across all mapped nodes.
+- Added tenant-scoped previous-day accounting matching SellBot daily-report semantics while avoiding double-counting wallet spend as new cash.
+- Added regression coverage for search resolution, expired lists, subscription edit/link actions and daily accounting.
+
 ## v0.10.2 — Tenant AdminBot server management parity
 
 - Rebuilt the Tenant AdminBot server list and server-detail screens to follow the Hiddify-SellBot AdminBot labels, layout and navigation.
