@@ -730,8 +730,9 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
         rows = [
             [InlineKeyboardButton(f"رنگی بودن دکمه‌ها | {_bool_icon(s.get('colored_buttons'))}", callback_data="userbot:settings:toggle:colored_buttons:userbot:settings:ui")],
             [InlineKeyboardButton("✨ هوشمند", callback_data="userbot:settings:value:button_theme:smart:userbot:settings:ui")],
+            [InlineKeyboardButton("🛒 فروشگاهی", callback_data="userbot:settings:value:button_theme:shop:userbot:settings:ui")],
+            [InlineKeyboardButton("💼 حرفه‌ای", callback_data="userbot:settings:value:button_theme:pro:userbot:settings:ui")],
             [InlineKeyboardButton("🕊 مینیمال", callback_data="userbot:settings:value:button_theme:minimal:userbot:settings:ui")],
-            [InlineKeyboardButton("💼 کلاسیک", callback_data="userbot:settings:value:button_theme:classic:userbot:settings:ui")],
             [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
         ]
         await _edit_or_send(update, f"🎨 تنظیم ظاهر دکمه‌ها\nطرح فعلی: {s.get('button_theme')}", InlineKeyboardMarkup(rows))
@@ -760,7 +761,6 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
     if section == "marketing":
         growth = business.growth_settings(actor)
         rows = [
-            [InlineKeyboardButton(f"🎁 نمایش دکمه هدیه | {_bool_icon(s.get('show_gift_button'))}", callback_data="userbot:settings:toggle:show_gift_button:userbot:settings:marketing")],
             [InlineKeyboardButton(f"🤝 رفرال | {_bool_icon(growth.get('referral_enabled'))}", callback_data="userbot:referral:toggle")],
             [InlineKeyboardButton(f"🎁 تست رایگان | {_bool_icon(growth.get('trial_enabled'))}", callback_data="userbot:settings:trial")],
             [InlineKeyboardButton("🏷 مدیریت کوپن‌ها", callback_data="userbot:gifts:coupons")],
