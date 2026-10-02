@@ -5421,6 +5421,14 @@ class TenantBusinessService:
                 raise ValueError("reminder days out of range")
             if name == "reminder_remaining_gb" and clean > 1000:
                 raise ValueError("reminder volume out of range")
+            if name == "renew_max_days" and clean > 3650:
+                raise ValueError("renewal day limit out of range")
+            if name == "renew_max_remaining_gb" and clean > 100000:
+                raise ValueError("renewal volume limit out of range")
+            if name == "renew_unlimited_volume_from_gb" and clean > 1000000:
+                raise ValueError("unlimited volume threshold out of range")
+            if name == "renew_unlimited_time_from_days" and clean > 36500:
+                raise ValueError("unlimited time threshold out of range")
         else:
             clean = str(value or "").strip()
             if len(clean) > 4000:
@@ -5433,6 +5441,14 @@ class TenantBusinessService:
                 "id", "price_asc", "price_desc", "traffic_asc", "traffic_desc"
             ):
                 raise ValueError("invalid plan sort mode")
+            if name == "renew_policy" and clean not in (
+                "advanced", "default", "fair"
+            ):
+                raise ValueError("invalid renewal policy")
+            if name in ("renew_volume_mode", "renew_time_mode") and clean not in (
+                "add", "reset"
+            ):
+                raise ValueError("invalid renewal rollover mode")
         now = iso_utc(utcnow())
         with transaction(self.conn):
             self.conn.execute(
