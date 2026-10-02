@@ -159,6 +159,24 @@ def _bytes_to_gb(value: int) -> float:
     return round(max(0, int(value)) / _GIB, 6)
 
 
+def _parse_utcish_datetime(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        try:
+            parsed = datetime.strptime(raw[:10], "%Y-%m-%d")
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _parse_major(version: Any) -> int:
     match = re.match(r"^\s*v?(\d+)", str(version or "").strip(), flags=re.IGNORECASE)
     return int(match.group(1)) if match else 0
@@ -432,12 +450,24 @@ class HiddifyPanelAdapter:
                 enabled = self._set_enabled_raw(target, secret, external_ref, True)
                 return self._snapshot(target, external_ref, enabled)
 
+        package_days = max(1, int(request.duration_days))
+        if not bool(request.reset_time):
+            target_expiry = _parse_utcish_datetime(request.expires_at)
+            current_start = _parse_utcish_datetime(current.get("start_date"))
+            if target_expiry is not None and current_start is not None:
+                seconds = max(
+                    86400.0,
+                    (target_expiry - current_start).total_seconds(),
+                )
+                package_days = max(1, int(math.ceil(seconds / 86400.0)))
+
         payload: dict[str, Any] = {
             "usage_limit_GB": _bytes_to_gb(request.traffic_bytes),
-            "package_days": max(1, int(request.duration_days)),
+            "package_days": package_days,
         }
         if request.reset_usage:
             payload["current_usage_GB"] = 0
+        if request.reset_time:
             payload["start_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if marker:
             comment = str(current.get("comment") or "").strip()
