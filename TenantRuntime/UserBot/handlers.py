@@ -14,7 +14,7 @@ from typing import Any
 from telegram import (
     InlineKeyboardButton as TelegramInlineKeyboardButton,
     InlineKeyboardMarkup,
-    ReplyKeyboardRemove,
+    ReplyKeyboardMarkup,
     Update,
 )
 from telegram.ext import (
@@ -30,6 +30,7 @@ from telegram.ext import (
 
 from Gateway.catalog import RuntimeBotSpec
 from TenantRuntime.business import TenantBusinessError
+from TenantRuntime.button_styles import keyboard_button as KeyboardButton
 from TenantRuntime.common import _deny_update, _services, runtime_access_gate, runtime_error
 
 def _money_lines(items: list[dict]) -> list[str]:
@@ -449,131 +450,86 @@ def _purchase_server_rows(
     )
 
 
-_LEGACY_REPLY_KEYBOARD_CLEANUP_KEY = "legacy_reply_keyboard_removed_v0132"
+BTN_STATUS = "📊وضعیت اشتراک"
+BTN_RENEW = "♾تمدید اشتراک"
+BTN_BUY = "💳خرید اشتراک"
+BTN_CONNECT = "🔗اتصال اشتراک"
+BTN_TRIAL = "🔥تست رایگان"
+BTN_WALLET = "💰کیف پول"
+BTN_SUPPORT = "📩پشتیبانی"
+BTN_GUIDE = "📚راهنما"
+BTN_FAQ = "❗️سوالات متداول"
+BTN_REFERRAL = "💌دعوت دوستان"
+BTN_GIFT = "🎁دریافت هدیه"
 
 
-async def _remove_legacy_reply_keyboard(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    """Remove the persistent ReplyKeyboard left by pre-inline UserBot versions."""
-    if bool(context.user_data.get(_LEGACY_REPLY_KEYBOARD_CLEANUP_KEY)):
-        return
-    chat = update.effective_chat
-    if chat is None:
-        return
-    try:
-        cleanup = await chat.send_message(
-            "\u2063",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        context.user_data[_LEGACY_REPLY_KEYBOARD_CLEANUP_KEY] = True
-        try:
-            await cleanup.delete()
-        except Exception:
-            pass
-    except Exception:
-        # Failure to clean an old client-side keyboard must never block UserBot.
-        return
-
-
-def _menu(spec: RuntimeBotSpec, business) -> InlineKeyboardMarkup:
-    """Build the customer main menu with SellBot-compatible navigation.
-
-    Visibility switches are read at render time, so an AdminBot change is
-    reflected on the next UserBot screen without restarting the tenant worker.
-    """
+def _main_keyboard(spec: RuntimeBotSpec, business) -> ReplyKeyboardMarkup:
+    """Persistent customer menu shown at the bottom of Telegram."""
     settings = business.runtime_userbot_settings()
     growth = business._ensure_growth_settings()
-    rows: list[list[InlineKeyboardButton]] = []
+    rows = []
 
     if bool(settings.get("show_user_status", True)):
         rows.append([
-            _button(
-                "📊وضعیت اشتراک",
-                callback_data="runtime:status",
-                settings=settings,
-            )
+            KeyboardButton(BTN_STATUS, settings=settings),
         ])
 
-    commerce_row: list[InlineKeyboardButton] = []
+    commerce_row = []
     if (
         bool(settings.get("enable_renew", True))
         and bool(settings.get("show_renew_in_main_menu", True))
     ):
-        commerce_row.append(
-            _button(
-                "♾تمدید اشتراک",
-                callback_data="shop:renewmenu",
-                settings=settings,
-            )
-        )
+        commerce_row.append(KeyboardButton(BTN_RENEW, settings=settings))
     if bool(settings.get("enable_buy", True)):
-        commerce_row.append(
-            _button(
-                "💳خرید اشتراک",
-                callback_data="shop:buy",
-                settings=settings,
-            )
-        )
+        commerce_row.append(KeyboardButton(BTN_BUY, settings=settings))
     if commerce_row:
         rows.append(commerce_row)
 
     rows.append([
-        _button(
-            "🔗اتصال اشتراک",
-            callback_data="shop:connect",
-            settings=settings,
-        )
+        KeyboardButton(BTN_CONNECT, settings=settings),
     ])
 
-    wallet_row: list[InlineKeyboardButton] = []
+    wallet_row = []
     if bool(growth.get("trial_enabled")):
-        wallet_row.append(
-            _button(
-                "🔥تست رایگان",
-                callback_data="shop:trial",
-                settings=settings,
-            )
-        )
-    wallet_row.append(
-        _button(
-            "💰کیف پول",
-            callback_data="shop:wallet",
-            settings=settings,
-        )
-    )
+        wallet_row.append(KeyboardButton(BTN_TRIAL, settings=settings))
+    wallet_row.append(KeyboardButton(BTN_WALLET, settings=settings))
     rows.append(wallet_row)
 
     rows.append([
-        _button("📩پشتیبانی", callback_data="shop:tickets", settings=settings),
-        _button("📚راهنما", callback_data="shop:guide", settings=settings),
-        _button("❗️سوالات متداول", callback_data="shop:faq", settings=settings),
+        KeyboardButton(BTN_SUPPORT, settings=settings),
+        KeyboardButton(BTN_GUIDE, settings=settings),
+        KeyboardButton(BTN_FAQ, settings=settings),
     ])
 
     if bool(growth.get("referral_enabled")):
         rows.append([
-            _button(
-                "💌دعوت دوستان",
-                callback_data="shop:referral",
-                settings=settings,
-            )
+            KeyboardButton(BTN_REFERRAL, settings=settings),
         ])
 
     if bool(settings.get("show_gift_button", True)):
         rows.append([
-            _button(
-                "🎁دریافت هدیه",
-                callback_data="shop:gift",
-                settings=settings,
-            )
+            KeyboardButton(BTN_GIFT, settings=settings),
         ])
 
-    return InlineKeyboardMarkup(rows)
+    return ReplyKeyboardMarkup(
+        rows,
+        resize_keyboard=True,
+        is_persistent=True,
+        selective=True,
+    )
+
+
+def _home_inline_markup(settings: dict[str, Any]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        _button(
+            "🏠 منو",
+            callback_data="runtime:home",
+            settings=settings,
+        )
+    ]])
 
 
 async def _force_join_allowed(update: Update, context: ContextTypes.DEFAULT_TYPE, business) -> bool:
-    await _remove_legacy_reply_keyboard(update, context)
     settings = _set_button_settings(business.runtime_userbot_settings())
     if not bool(settings.get("force_join_enabled", False)):
         return True
@@ -668,7 +624,6 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     spec, policy, state_store, business = _services(context)
-    await _remove_legacy_reply_keyboard(update, context)
     if spec.role != "user":
         raise RuntimeError("UserBot handler registered for non-user role")
     user_id = int(update.effective_user.id) if update.effective_user else 0
