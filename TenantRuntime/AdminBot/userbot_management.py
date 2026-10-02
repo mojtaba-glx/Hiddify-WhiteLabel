@@ -10,8 +10,10 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 from io import BytesIO
 from typing import Any
+from urllib.parse import urlparse
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
@@ -24,6 +26,10 @@ from TenantRuntime.business import TenantBusinessError
 
 PAGE_SIZE = 21
 FLOW_KEY = "userbot_admin_flow"
+CHANNEL_DRAFT_KEY = "tenant_channel_post_draft"
+MAX_CHANNEL_BUTTONS = 8
+BROADCAST_SKIP_TEXT = "⏩رد کردن"
+
 
 SEGMENT_LABELS = {
     "all": "تمام کاربران",
@@ -42,6 +48,49 @@ def userbot_cancel_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         one_time_keyboard=True,
     )
+
+
+def broadcast_skip_cancel_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(BROADCAST_SKIP_TEXT)],
+            [KeyboardButton("❌لغو")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def _is_broadcast_skip(value: str) -> bool:
+    normalized = str(value or "").replace("\u200c", "").replace(" ", "").strip()
+    return normalized in {
+        "⏩ردکردن", "⏩️ردکردن", "ردکردن", "⏭️ردکردن", "▶️ردکردن"
+    }
+
+
+def _normalize_button_url(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("@"):
+        username = raw[1:].strip()
+        return (
+            f"https://t.me/{username}"
+            if re.fullmatch(r"[A-Za-z0-9_]{5,32}", username)
+            else ""
+        )
+    if raw.lower().startswith("t.me/"):
+        raw = "https://" + raw
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return ""
+    scheme = str(parsed.scheme or "").lower()
+    if scheme in {"http", "https"} and parsed.netloc:
+        return raw
+    if scheme == "tg" and (parsed.netloc or parsed.path):
+        return raw
+    return ""
 
 
 def build_userbot_main_menu() -> InlineKeyboardMarkup:
@@ -624,61 +673,305 @@ async def _send_via_userbot(business: Any, chat_id: int | str, *, text: str) -> 
         token = ""
 
 
-async def _broadcast_text(business: Any, actor: int, segment: str, text: str) -> dict[str, int]:
+async def _download_admin_file(context: ContextTypes.DEFAULT_TYPE, file_id: str) -> BytesIO:
+    tg_file = await context.bot.get_file(file_id)
+    raw = bytes(await tg_file.download_as_bytearray())
+    stream = BytesIO(raw)
+    stream.name = "telegram-media"
+    stream.seek(0)
+    return stream
+
+
+async def _send_broadcast_to_targets(
+    context: ContextTypes.DEFAULT_TYPE,
+    business: Any,
+    actor: int,
+    segment: str,
+    body_text: str,
+    photo_file_id: str = "",
+) -> dict[str, int]:
     targets = business.broadcast_targets_admin(actor, segment=segment)
     now = iso_utc(utcnow())
     cursor = business.conn.execute(
         "INSERT INTO tenant_broadcast_runs "
         "(tenant_id, segment, message_kind, target_count, sent_count, failed_count, created_at) "
-        "VALUES (?, ?, 'text', ?, 0, 0, ?)",
-        (business.tenant_id, segment, len(targets), now),
+        "VALUES (?, ?, ?, ?, 0, 0, ?)",
+        (
+            business.tenant_id,
+            segment,
+            "photo" if photo_file_id else "text",
+            len(targets),
+            now,
+        ),
     )
     run_id = int(cursor.lastrowid or 0)
-    sent = failed = 0
+    business.conn.commit()
+
+    media_bytes: bytes | None = None
+    if photo_file_id:
+        stream = await _download_admin_file(context, photo_file_id)
+        media_bytes = stream.getvalue()
+
+    sent = failed = recovered = unreachable = temporary = other = 0
+    reusable_userbot_file_id = ""
     token = _sibling_user_bot_token(business)
     try:
         async with Bot(token=token) as bot:
             for target in targets:
-                try:
-                    await bot.send_message(chat_id=int(target["telegram_user_id"]), text=text)
-                    sent += 1
-                except RetryAfter as exc:
-                    wait = getattr(exc, "retry_after", 1)
-                    if hasattr(wait, "total_seconds"):
-                        wait = wait.total_seconds()
-                    await asyncio.sleep(min(max(float(wait), 0.5), 30.0))
+                chat_id = int(target["telegram_user_id"])
+                for attempt in range(3):
                     try:
-                        await bot.send_message(chat_id=int(target["telegram_user_id"]), text=text)
+                        if photo_file_id:
+                            if reusable_userbot_file_id:
+                                result = await bot.send_photo(
+                                    chat_id=chat_id,
+                                    photo=reusable_userbot_file_id,
+                                    caption=body_text,
+                                )
+                            else:
+                                assert media_bytes is not None
+                                stream = BytesIO(media_bytes)
+                                stream.name = "broadcast-image.jpg"
+                                result = await bot.send_photo(
+                                    chat_id=chat_id,
+                                    photo=stream,
+                                    caption=body_text,
+                                )
+                                photos = list(getattr(result, "photo", None) or [])
+                                if photos:
+                                    reusable_userbot_file_id = str(
+                                        photos[-1].file_id
+                                    )
+                        else:
+                            await bot.send_message(chat_id=chat_id, text=body_text)
                         sent += 1
+                        if attempt:
+                            recovered += 1
+                        break
+                    except RetryAfter as exc:
+                        if attempt >= 2:
+                            failed += 1
+                            temporary += 1
+                            break
+                        wait = getattr(exc, "retry_after", 1)
+                        if hasattr(wait, "total_seconds"):
+                            wait = wait.total_seconds()
+                        await asyncio.sleep(min(max(float(wait), 0.5), 30.0))
+                    except (TimedOut, NetworkError):
+                        if attempt >= 2:
+                            failed += 1
+                            temporary += 1
+                            break
+                        await asyncio.sleep(float(attempt + 1))
+                    except (Forbidden, BadRequest):
+                        failed += 1
+                        unreachable += 1
+                        break
                     except Exception:
                         failed += 1
-                except (Forbidden, BadRequest, NetworkError, TimedOut):
-                    failed += 1
+                        other += 1
+                        break
     finally:
         token = ""
+
     business.conn.execute(
-        "UPDATE tenant_broadcast_runs SET sent_count=?, failed_count=?, finished_at=? "
-        "WHERE id=? AND tenant_id=?",
-        (sent, failed, iso_utc(utcnow()), run_id, business.tenant_id),
+        "UPDATE tenant_broadcast_runs SET sent_count=?, failed_count=?, "
+        "finished_at=? WHERE id=? AND tenant_id=?",
+        (
+            sent,
+            failed,
+            iso_utc(utcnow()),
+            run_id,
+            business.tenant_id,
+        ),
     )
     business.conn.commit()
-    return {"target": len(targets), "sent": sent, "failed": failed}
+    return {
+        "target": len(targets),
+        "sent": sent,
+        "failed": failed,
+        "recovered": recovered,
+        "unreachable": unreachable,
+        "temporary": temporary,
+        "other": other,
+    }
+
+
+def _broadcast_result_text(result: dict[str, int]) -> str:
+    return (
+        "✅ ارسال همگانی تمام شد.\n"
+        f"🎯 کل هدف: {int(result.get('target') or 0)}\n"
+        f"✅ موفق: {int(result.get('sent') or 0)}\n"
+        f"❌ ناموفق: {int(result.get('failed') or 0)}\n"
+        f"♻️ بازیابی‌شده با تلاش مجدد: {int(result.get('recovered') or 0)}\n"
+        f"🚫 غیرقابل دسترس/مسدود: {int(result.get('unreachable') or 0)}\n"
+        f"⏳ خطای موقت: {int(result.get('temporary') or 0)}\n"
+        f"⚠️ سایر خطاها: {int(result.get('other') or 0)}"
+    )
+
+
+
+
+def _channel_draft(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
+    value = context.user_data.get(CHANNEL_DRAFT_KEY)
+    if not isinstance(value, dict):
+        value = {"kind": "", "text": "", "file_id": "", "buttons": []}
+        context.user_data[CHANNEL_DRAFT_KEY] = value
+    return value
+
+
+def _channel_markup(draft: dict[str, Any]) -> InlineKeyboardMarkup | None:
+    buttons = list(draft.get("buttons") or [])
+    if not buttons:
+        return None
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(str(item["text"]), url=str(item["url"]))]
+        for item in buttons[:MAX_CHANNEL_BUTTONS]
+    ])
+
+
+def _channel_admin_menu(draft: dict[str, Any]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("➕ ساخت پست جدید", callback_data="channelpost:new")]]
+    if draft.get("kind"):
+        rows.extend([
+            [InlineKeyboardButton("✏️ ویرایش پست", callback_data="channelpost:edit")],
+            [InlineKeyboardButton("🔘 افزودن دکمه", callback_data="channelpost:button")],
+            [InlineKeyboardButton("👁 پیش‌نمایش", callback_data="channelpost:preview")],
+            [InlineKeyboardButton("🚀 انتشار در کانال", callback_data="channelpost:publish")],
+            [InlineKeyboardButton("🧹 پاک کردن دکمه‌ها", callback_data="channelpost:clear_buttons")],
+        ])
+    rows.extend([
+        [InlineKeyboardButton("⚙️ تنظیم کانال مقصد", callback_data="channelpost:set")],
+        [InlineKeyboardButton("🔙 بازگشت به مدیریت ربات کاربران", callback_data="userbot:menu")],
+    ])
+    return InlineKeyboardMarkup(rows)
 
 
 async def _channel_menu(update: Update, business: Any, actor: int) -> None:
     settings = business.userbot_settings_admin(actor)
+    draft = _channel_draft(update._effective_message._bot._request[0] if False else None) if False else None
+    # The no-op expression above intentionally avoids storing global state; draft
+    # is always read from the current Telegram context by caller.
     channel = str(settings.get("channel_id") or "").strip() or "تنظیم نشده"
+    context_draft = {"kind": "", "buttons": []}
     await _edit_or_send(
         update,
-        "📢 مدیریت کانال\n"
-        f"کانال فعلی: {channel}\n\n"
-        "ربات کاربران باید در کانال مقصد دسترسی ارسال پیام داشته باشد.",
-        InlineKeyboardMarkup([
-            [InlineKeyboardButton("⚙️ تنظیم کانال", callback_data="channelpost:set")],
-            [InlineKeyboardButton("🚀 انتشار متن در کانال", callback_data="channelpost:publish")],
-            [InlineKeyboardButton("🔙 بازگشت به مدیریت ربات کاربران", callback_data="userbot:menu")],
-        ]),
+        "📢 مدیریت پست کانال\n"
+        f"🎯 مقصد: {channel}\n\n"
+        "از این بخش پست متنی، عکس یا ویدئو را با دکمه و پیش‌نمایش "
+        "ساخته و با توکن ربات کاربران منتشر می‌کنید.",
+        _channel_admin_menu(context_draft),
     )
+
+
+async def _show_channel_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    business: Any,
+    actor: int,
+) -> None:
+    settings = business.userbot_settings_admin(actor)
+    draft = _channel_draft(context)
+    channel = str(settings.get("channel_id") or "").strip() or "تنظیم نشده"
+    kind = {"text": "متنی", "photo": "عکس + کپشن", "video": "ویدئو + کپشن"}.get(
+        str(draft.get("kind") or ""), "هنوز ساخته نشده"
+    )
+    await _edit_or_send(
+        update,
+        "📢 مدیریت پست کانال\n\n"
+        f"📝 نوع پست: {kind}\n"
+        f"🔘 تعداد دکمه‌ها: {len(draft.get('buttons') or [])}\n"
+        f"🎯 مقصد: {channel}\n\n"
+        "انتشار با توکن ربات کاربران انجام می‌شود.",
+        _channel_admin_menu(draft),
+    )
+
+
+async def _channel_preview(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    draft = _channel_draft(context)
+    kind = str(draft.get("kind") or "")
+    text = str(draft.get("text") or "")
+    markup = _channel_markup(draft)
+    message = update.callback_query.message if update.callback_query else update.effective_message
+    if not kind:
+        await message.reply_text("❌ هنوز محتوای پست ساخته نشده است.")
+    elif kind == "text":
+        await message.reply_text(text or " ", parse_mode="HTML", reply_markup=markup)
+    elif kind == "photo":
+        await message.reply_photo(
+            photo=str(draft["file_id"]),
+            caption=text or None,
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
+    elif kind == "video":
+        await message.reply_video(
+            video=str(draft["file_id"]),
+            caption=text or None,
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
+
+
+async def _publish_channel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    business: Any,
+    actor: int,
+) -> None:
+    draft = _channel_draft(context)
+    settings = business.userbot_settings_admin(actor)
+    target = str(settings.get("channel_id") or "").strip()
+    if not target:
+        raise TenantBusinessError("channel is not configured")
+    kind = str(draft.get("kind") or "")
+    if not kind:
+        raise TenantBusinessError("channel post is empty")
+    text = str(draft.get("text") or "")
+    markup = _channel_markup(draft)
+    token = _sibling_user_bot_token(business)
+    try:
+        async with Bot(token=token) as bot:
+            if kind == "text":
+                sent = await bot.send_message(
+                    chat_id=target,
+                    text=text or " ",
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                )
+            else:
+                media = await _download_admin_file(
+                    context, str(draft.get("file_id") or "")
+                )
+                if kind == "photo":
+                    sent = await bot.send_photo(
+                        chat_id=target,
+                        photo=media,
+                        caption=text or None,
+                        parse_mode="HTML",
+                        reply_markup=markup,
+                    )
+                else:
+                    sent = await bot.send_video(
+                        chat_id=target,
+                        video=media,
+                        caption=text or None,
+                        parse_mode="HTML",
+                        reply_markup=markup,
+                    )
+    finally:
+        token = ""
+    context.user_data.pop(CHANNEL_DRAFT_KEY, None)
+    context.user_data.pop(FLOW_KEY, None)
+    await update.effective_chat.send_message(
+        "✅ پست با موفقیت توسط ربات کاربران در کانال منتشر شد.\n"
+        f"🆔 Message ID: {int(sent.message_id)}"
+    )
+
+
 
 
 async def _settings_root(update: Update, business: Any, actor: int) -> None:
@@ -1214,7 +1507,7 @@ async def handle_callback(
         ); return True
     if data.startswith("userbot:broadcast:segment:"):
         segment=data.rsplit(":",1)[1]; targets=business.broadcast_targets_admin(actor,segment=segment)
-        context.user_data[FLOW_KEY]={"kind":"broadcast","segment":segment}
+        context.user_data[FLOW_KEY]={"kind":"broadcast","segment":segment,"step":"wait_text","text":""}
         await query.message.reply_text(
             f"✍ لطفا پیام خود را برای ارسال به «{SEGMENT_LABELS[segment]}» وارد کنید:\n"
             f"تعداد فعلی گیرنده‌ها: {len(targets)}",
@@ -1222,13 +1515,61 @@ async def handle_callback(
         ); return True
 
     if data == "channelpost:menu":
-        await _channel_menu(update,business,actor); return True
+        await _show_channel_menu(update,context,business,actor); return True
     if data == "channelpost:set":
         context.user_data[FLOW_KEY]={"kind":"channel_set"}
-        await query.message.reply_text("📢 @channel یا -100... را ارسال کنید:",reply_markup=userbot_cancel_keyboard()); return True
+        await query.message.reply_text(
+            "📢 @channel یا -100... را ارسال کنید:",
+            reply_markup=userbot_cancel_keyboard(),
+        ); return True
+    if data == "channelpost:new":
+        context.user_data[CHANNEL_DRAFT_KEY]={"kind":"","text":"","file_id":"","buttons":[]}
+        context.user_data[FLOW_KEY]={"kind":"channel_content"}
+        await query.message.reply_text(
+            "📝 متن پست را بفرست، یا عکس/ویدئو را همراه کپشن ارسال کن.",
+            reply_markup=userbot_cancel_keyboard(),
+        ); return True
+    if data == "channelpost:edit":
+        draft=_channel_draft(context)
+        if not draft.get("kind"): raise TenantBusinessError("channel post is empty")
+        await _edit_or_send(update,
+            "✏️ ویرایش پست\nبخشی که می‌خواهید تغییر کند را انتخاب کنید.",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("📝 ویرایش متن / کپشن",callback_data="channelpost:edit_text")],
+                [InlineKeyboardButton("🖼 ویرایش عکس / ویدئو",callback_data="channelpost:edit_media")],
+                [InlineKeyboardButton("🔄 جایگزینی کامل پست",callback_data="channelpost:new")],
+                [InlineKeyboardButton("🔙 بازگشت",callback_data="channelpost:menu")],
+            ])
+        ); return True
+    if data == "channelpost:edit_text":
+        context.user_data[FLOW_KEY]={"kind":"channel_edit_text"}
+        await query.message.reply_text(
+            "📝 متن یا کپشن جدید را بفرستید. برای حذف کامل متن، 0 بفرستید.",
+            reply_markup=userbot_cancel_keyboard(),
+        ); return True
+    if data == "channelpost:edit_media":
+        context.user_data[FLOW_KEY]={"kind":"channel_edit_media"}
+        await query.message.reply_text(
+            "🖼 عکس یا ویدئوی جدید را بفرستید.",
+            reply_markup=userbot_cancel_keyboard(),
+        ); return True
+    if data == "channelpost:button":
+        draft=_channel_draft(context)
+        if not draft.get("kind"): raise TenantBusinessError("channel post is empty")
+        if len(draft.get("buttons") or [])>=MAX_CHANNEL_BUTTONS:
+            raise TenantBusinessError("channel button limit reached")
+        context.user_data[FLOW_KEY]={"kind":"channel_button_text"}
+        await query.message.reply_text(
+            "🔘 عنوان دکمه را بفرستید؛ مثال: 🛒 خرید سرویس",
+            reply_markup=userbot_cancel_keyboard(),
+        ); return True
+    if data == "channelpost:preview":
+        await _channel_preview(update,context); return True
+    if data == "channelpost:clear_buttons":
+        _channel_draft(context)["buttons"]=[]
+        await _show_channel_menu(update,context,business,actor); return True
     if data == "channelpost:publish":
-        context.user_data[FLOW_KEY]={"kind":"channel_publish"}
-        await query.message.reply_text("✍ متن پست کانال را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
+        await _publish_channel(update,context,business,actor); return True
 
     if data == "userbot:settings_menu":
         await _settings_root(update,business,actor); return True
@@ -1477,17 +1818,62 @@ async def handle_text(
             except Exception: pass
             context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ پاسخ ثبت شد.",reply_markup=admin_main_keyboard()); return True
         if kind=="broadcast":
-            result=await _broadcast_text(business,actor,str(flow["segment"]),text)
-            context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text(
-                f"✅ ارسال همگانی تمام شد.\nموفق: {result['sent']}\nناموفق: {result['failed']}\nکل هدف: {result['target']}",
-                reply_markup=admin_main_keyboard()
+            step=str(flow.get("step") or "wait_text")
+            if step=="wait_text":
+                if not text: raise ValueError("empty broadcast")
+                flow["text"]=text; flow["step"]="wait_photo"
+                await update.effective_message.reply_text(
+                    "🖼️ لطفا عکس خود را برای ارسال به کاربران ارسال کنید "
+                    "یا روی دکمه [⏩رد کردن] کلیک کنید:",
+                    reply_markup=broadcast_skip_cancel_keyboard(),
+                ); return True
+            if step=="wait_photo" and _is_broadcast_skip(text):
+                result=await _send_broadcast_to_targets(
+                    context,business,actor,str(flow["segment"]),
+                    str(flow.get("text") or ""),""
+                )
+                context.user_data.pop(FLOW_KEY,None)
+                await update.effective_message.reply_text(
+                    _broadcast_result_text(result),reply_markup=admin_main_keyboard()
+                ); return True
+            await update.effective_message.reply_text(
+                "❌ لطفا عکس ارسال کنید یا روی دکمه [⏩رد کردن] بزنید.",
+                reply_markup=broadcast_skip_cancel_keyboard(),
             ); return True
         if kind=="channel_set":
-            business.set_userbot_setting_admin(actor,key="channel_id",value=text); context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ کانال ذخیره شد.",reply_markup=admin_main_keyboard()); return True
-        if kind=="channel_publish":
-            channel=str(business.userbot_settings_admin(actor).get("channel_id") or "").strip()
-            if not channel: raise TenantBusinessError("channel is not configured")
-            await _send_via_userbot(business,channel,text=text); context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ در کانال منتشر شد.",reply_markup=admin_main_keyboard()); return True
+            business.set_userbot_setting_admin(actor,key="channel_id",value=text)
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text(
+                "✅ کانال ذخیره شد.",reply_markup=admin_main_keyboard()
+            ); return True
+        if kind=="channel_content":
+            draft=_channel_draft(context)
+            draft.update(kind="text",text=text,file_id="")
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text("✅ محتوای پست ذخیره شد.",reply_markup=admin_main_keyboard())
+            return True
+        if kind=="channel_edit_text":
+            draft=_channel_draft(context)
+            draft["text"]="" if text in {"0","-","—"} else text
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text("✅ متن/کپشن ویرایش شد.",reply_markup=admin_main_keyboard())
+            return True
+        if kind=="channel_button_text":
+            if not text or len(text)>64: raise ValueError("button text")
+            flow["label"]=text; flow["kind"]="channel_button_url"
+            await update.effective_message.reply_text(
+                "🔗 حالا لینک دکمه را بفرستید؛ لینک کامل یا @username.",
+                reply_markup=userbot_cancel_keyboard(),
+            ); return True
+        if kind=="channel_button_url":
+            url=_normalize_button_url(text)
+            if not url: raise ValueError("button url")
+            draft=_channel_draft(context); buttons=list(draft.get("buttons") or [])
+            if len(buttons)>=MAX_CHANNEL_BUTTONS: raise TenantBusinessError("channel button limit reached")
+            buttons.append({"text":str(flow["label"]),"url":url}); draft["buttons"]=buttons
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text("✅ دکمه اضافه شد.",reply_markup=admin_main_keyboard())
+            return True
         if kind=="setting_text":
             business.set_userbot_setting_admin(actor,key=str(flow["key"]),value=text); context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ متن ذخیره شد.",reply_markup=admin_main_keyboard()); return True
         if kind=="trial_edit":
@@ -1512,6 +1898,67 @@ async def handle_text(
     return False
 
 
+async def handle_media(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    business: Any,
+    actor: int,
+    admin_main_keyboard: Any,
+) -> bool:
+    flow=context.user_data.get(FLOW_KEY)
+    if not isinstance(flow,dict):
+        return False
+    kind=str(flow.get("kind") or "")
+    message=update.effective_message
+    if message is None:
+        return False
+
+    if kind=="broadcast" and str(flow.get("step") or "")=="wait_photo":
+        file_id=""
+        if getattr(message,"photo",None):
+            file_id=str(message.photo[-1].file_id)
+        else:
+            document=getattr(message,"document",None)
+            mime=str(getattr(document,"mime_type","") or "").lower()
+            if document is not None and mime.startswith("image/"):
+                file_id=str(document.file_id)
+        if not file_id:
+            await message.reply_text(
+                "❌ فقط عکس ارسال کنید یا «⏩رد کردن» را بزنید.",
+                reply_markup=broadcast_skip_cancel_keyboard(),
+            )
+            return True
+        result=await _send_broadcast_to_targets(
+            context,business,actor,str(flow["segment"]),
+            str(flow.get("text") or ""),file_id
+        )
+        context.user_data.pop(FLOW_KEY,None)
+        await message.reply_text(
+            _broadcast_result_text(result),reply_markup=admin_main_keyboard()
+        )
+        return True
+
+    if kind in {"channel_content","channel_edit_media"}:
+        draft=_channel_draft(context)
+        if getattr(message,"photo",None):
+            draft["kind"]="photo"; draft["file_id"]=str(message.photo[-1].file_id)
+            if kind=="channel_content":
+                draft["text"]=str(getattr(message,"caption_html",None) or message.caption or "")
+        elif getattr(message,"video",None):
+            draft["kind"]="video"; draft["file_id"]=str(message.video.file_id)
+            if kind=="channel_content":
+                draft["text"]=str(getattr(message,"caption_html",None) or message.caption or "")
+        else:
+            return False
+        context.user_data.pop(FLOW_KEY,None)
+        await message.reply_text(
+            "✅ محتوای پست ذخیره/ویرایش شد.",reply_markup=admin_main_keyboard()
+        )
+        return True
+    return False
+
+
 async def handle_document(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1521,6 +1968,11 @@ async def handle_document(
     admin_main_keyboard: Any,
 ) -> bool:
     flow=context.user_data.get(FLOW_KEY)
+    if isinstance(flow,dict) and flow.get("kind")=="broadcast" and str(flow.get("step") or "")=="wait_photo":
+        return await handle_media(
+            update,context,business=business,actor=actor,
+            admin_main_keyboard=admin_main_keyboard,
+        )
     if not isinstance(flow,dict) or flow.get("kind")!="backup_restore":
         return False
     document=update.effective_message.document
