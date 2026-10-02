@@ -182,6 +182,20 @@ def test_userbot_main_navigation_callbacks_are_real() -> None:
         assert callback in runtime
 
 
+def test_status_screen_keeps_account_order_and_subscription_navigation() -> None:
+    runtime = open(
+        "TenantRuntime/UserBot/handlers.py",
+        encoding="utf-8",
+    ).read()
+    for callback in (
+        'callback_data="shop:account"',
+        'callback_data="shop:orders"',
+        'callback_data="shop:subs"',
+        'callback_data="shop:connect"',
+    ):
+        assert callback in runtime
+
+
 def test_faq_navigation_is_always_available(
     conn, factories, cipher
 ) -> None:
