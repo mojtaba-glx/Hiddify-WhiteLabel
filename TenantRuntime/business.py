@@ -3030,6 +3030,33 @@ class TenantBusinessService:
             )
         return self.order(actor_id, int(cursor.lastrowid or 0))
 
+    def change_purchase_order_server(
+        self,
+        actor_id: int,
+        *,
+        order_id: int,
+        server_id: int,
+    ) -> dict[str, Any]:
+        customer = self._customer(actor_id)
+        selected = self._purchase_server(int(server_id))
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_orders SET selected_server_id=?, updated_at=? "
+                "WHERE id=? AND tenant_id=? AND customer_id=? "
+                "AND order_kind='purchase' AND status='pending_payment'",
+                (
+                    int(selected["id"]),
+                    now,
+                    int(order_id),
+                    self.tenant_id,
+                    int(customer["id"]),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("purchase order server cannot be changed")
+        return self.order(actor_id, int(order_id))
+
     def create_renewal_order(
         self, actor_id: int, *, subscription_id: int, plan_id: int
     ) -> dict[str, Any]:
