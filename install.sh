@@ -150,10 +150,28 @@ ensure_directories() {
 
 ensure_venv() {
     require_command python3
+    local requirements_hash stamp installed_hash
+    stamp="$ROOT_DIR/runtime/requirements.sha256"
+
     if [[ ! -x "$ROOT_DIR/.venv/bin/python" ]]; then
         as_service_user python3 -m venv "$ROOT_DIR/.venv"
     fi
+
+    requirements_hash="$(
+        as_service_user "$ROOT_DIR/.venv/bin/python" -c             'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())'             "$ROOT_DIR/requirements.txt"
+    )"
+    installed_hash=""
+    [[ -f "$stamp" ]] && installed_hash="$(cat "$stamp")"
+
+    if [[ "$requirements_hash" == "$installed_hash" ]]; then
+        echo "Dependencies unchanged; skipping pip install."
+        return 0
+    fi
+
     as_service_user "$ROOT_DIR/.venv/bin/python" -m pip install         --disable-pip-version-check -r "$ROOT_DIR/requirements.txt"
+    printf '%s\n' "$requirements_hash" > "$stamp"
+    chmod 600 "$stamp"
+    chown "$(service_user)":"$(service_group)" "$stamp"
 }
 
 ensure_environment() {
@@ -444,8 +462,13 @@ install_all() {
     echo "Manager command: sudo whitelabel"
 }
 
-run_project_tests() {
-    as_service_user "$ROOT_DIR/.venv/bin/python" -m pytest -q
+run_update_preflight() {
+    echo "Running quick update validation..."
+    as_service_user "$ROOT_DIR/.venv/bin/python" -m compileall -q         "$ROOT_DIR/MasterBot"         "$ROOT_DIR/TenantRuntime"         "$ROOT_DIR/Gateway"         "$ROOT_DIR/LicenseService"         "$ROOT_DIR/Provisioning"         "$ROOT_DIR/Shared"         "$ROOT_DIR/Database"         "$ROOT_DIR/scripts"
+    bash -n "$ROOT_DIR/install.sh"
+    bash -n "$ROOT_DIR/bootstrap.sh"
+    as_service_user "$ROOT_DIR/.venv/bin/python"         "$ROOT_DIR/scripts/release_drill.py" --plan-only --json >/dev/null
+    echo "Quick update validation passed."
 }
 
 update_action() {
@@ -475,16 +498,17 @@ update_action() {
 
     if [[ "$old_sha" == "$new_sha" ]]; then
         echo "Already up to date: v$old_version"
-        install_all
+        health_services
         return
     fi
 
     echo "Preparing update v$old_version -> v$new_version"
     as_service_user git -C "$ROOT_DIR" checkout -q "$UPDATE_BRANCH"
     as_service_user git -C "$ROOT_DIR" reset --hard "$new_sha"
+    ensure_directories
     ensure_venv
-    if ! run_project_tests; then
-        echo "ERROR: new version failed tests; restoring previous source." >&2
+    if ! run_update_preflight; then
+        echo "ERROR: new version failed quick validation; restoring previous source." >&2
         as_service_user git -C "$ROOT_DIR" reset --hard "$old_sha"
         ensure_venv
         return 1
