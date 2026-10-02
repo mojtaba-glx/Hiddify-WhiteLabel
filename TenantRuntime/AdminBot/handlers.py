@@ -8,7 +8,13 @@ from __future__ import annotations
 
 import sqlite3
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
@@ -186,6 +192,43 @@ def _growth_text(settings: dict, coupons: list[dict]) -> str:
 
 
 
+BTN_SERVERS = "🖥 مدیریت سرورها"
+BTN_SEARCH_USER = "🔍 جستجوی کاربر"
+BTN_USERBOT = "🤖 مدیریت ربات کاربران"
+BTN_STATUS = "📊 وضعیت سرور"
+BTN_BACKUP = "📫 دریافت بکاپ"
+BTN_AGENCIES = "🏢 نمایندگی"
+BTN_DAILY_REPORT = "📊 گزارش روزانه"
+
+ADMIN_MAIN_BUTTONS = {
+    BTN_SERVERS,
+    BTN_SEARCH_USER,
+    BTN_USERBOT,
+    BTN_STATUS,
+    BTN_BACKUP,
+    BTN_AGENCIES,
+    BTN_DAILY_REPORT,
+}
+
+
+def admin_main_keyboard() -> ReplyKeyboardMarkup:
+    """Main tenant-admin keyboard kept visually compatible with Hiddify-SellBot."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(BTN_SERVERS)],
+            [KeyboardButton(BTN_SEARCH_USER), KeyboardButton(BTN_DAILY_REPORT)],
+            [KeyboardButton(BTN_USERBOT)],
+            [
+                KeyboardButton(BTN_STATUS),
+                KeyboardButton(BTN_AGENCIES),
+                KeyboardButton(BTN_BACKUP),
+            ],
+        ],
+        resize_keyboard=True,
+        selective=True,
+    )
+
+
 def _menu(spec: RuntimeBotSpec) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("📊 داشبورد", callback_data="biz:dashboard"), InlineKeyboardButton("📈 گزارش فروش", callback_data="biz:reports")],
@@ -209,16 +252,25 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     state = state_store.load(user_id)
     visits = int(state.get("visits") or 0) + 1
     state_store.save(user_id, {**state, "visits": visits, "screen": "home"})
+    context.user_data.pop("biz_flow", None)
     text = (
-        f"⚙️ مدیریت {spec.tenant_name}\n\n"
-        "ربات مدیریتی شما فعال است.\n"
-        f"ورودهای شما: {visits}"
+        f"به ربات مدیریت {spec.tenant_name} خوش آمدید 👑\n"
+        "از منوی زیر یکی از گزینه‌ها را انتخاب کنید."
     )
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(text, reply_markup=_menu(spec))
+        try:
+            await update.callback_query.message.delete()
+        except Exception:
+            pass
+        if update.effective_chat:
+            await update.effective_chat.send_message(
+                text, reply_markup=admin_main_keyboard()
+            )
     elif update.effective_message:
-        await update.effective_message.reply_text(text, reply_markup=_menu(spec))
+        await update.effective_message.reply_text(
+            text, reply_markup=admin_main_keyboard()
+        )
 
 
 async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1094,6 +1146,70 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     flow = context.user_data.get("biz_flow")
     text = str(update.effective_message.text or "").strip() if update.effective_message else ""
     try:
+        if text in ADMIN_MAIN_BUTTONS:
+            # Main-menu navigation always leaves any unfinished text wizard,
+            # matching the proven SellBot behavior.
+            context.user_data.pop("biz_flow", None)
+
+            if text == BTN_SERVERS:
+                items = business.list_servers()
+                rows = [
+                    [InlineKeyboardButton(
+                        f"{'⭐ ' if int(item.get('is_default') or 0) else '🖥 '}"
+                        f"{item['label']} · {item['panel_kind']} · {item['status']}",
+                        callback_data=f"biz:server:{item['id']}",
+                    )]
+                    for item in items
+                ]
+                rows.extend([
+                    [InlineKeyboardButton("➕ سرور", callback_data="biz:addserver")],
+                    [InlineKeyboardButton("↩️ منوی اصلی", callback_data="runtime:home")],
+                ])
+                await update.effective_message.reply_text(
+                    "🖥 مدیریت سرورها\n⭐ = سرور پیش‌فرض فروش",
+                    reply_markup=InlineKeyboardMarkup(rows),
+                )
+                return
+
+            if text == BTN_SEARCH_USER:
+                context.user_data["biz_flow"] = {"kind": "customer_search"}
+                await update.effective_message.reply_text(
+                    "🔎 نام، @username، Telegram ID یا Customer ID را ارسال کنید."
+                )
+                return
+
+            if text == BTN_DAILY_REPORT:
+                report = business.sales_report(actor, days=1)
+                await update.effective_message.reply_text(_report_text(report))
+                return
+
+            if text == BTN_STATUS:
+                await show_status(update, context)
+                return
+
+            if text == BTN_USERBOT:
+                await update.effective_message.reply_text(
+                    "🤖 مدیریت ربات کاربران\n\n"
+                    "امکانات مدیریتی فعلی WhiteLabel از این بخش در دسترس است. "
+                    "در مراحل بعدی این صفحه نیز با ساختار SellBot یکسان می‌شود.",
+                    reply_markup=_menu(spec),
+                )
+                return
+
+            if text == BTN_AGENCIES:
+                await update.effective_message.reply_text(
+                    "🏢 بخش نمایندگی هنوز از Hiddify-SellBot به Tenant AdminBot "
+                    "منتقل نشده است. این بخش در مرحله مستقل منتقل می‌شود."
+                )
+                return
+
+            if text == BTN_BACKUP:
+                await update.effective_message.reply_text(
+                    "📫 بکاپ Tenant هنوز به‌صورت مستقل و امن منتقل نشده است. "
+                    "بکاپ سراسری Master به ادمین Tenant نمایش داده نمی‌شود."
+                )
+                return
+
         if isinstance(flow, dict):
             fields = [part.strip() for part in text.split("|")]
             kind = flow.get("kind")
@@ -1331,7 +1447,10 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text("❌ قالب یا وضعیت معتبر نیست.", reply_markup=_menu(spec))
         return
     if update.effective_message:
-        await update.effective_message.reply_text("از منوی ربات استفاده کنید.", reply_markup=_menu(spec))
+        await update.effective_message.reply_text(
+            "از منوی ربات استفاده کنید.",
+            reply_markup=admin_main_keyboard(),
+        )
 
 
 def register_admin_handlers(application: Application) -> None:

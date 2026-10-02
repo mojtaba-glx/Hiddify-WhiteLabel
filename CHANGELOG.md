@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.10.1 — Tenant AdminBot menu parity, stage 1
+
+- Rebuilt the Tenant AdminBot main menu as a persistent Telegram reply keyboard matching Hiddify-SellBot's proven AdminBot layout.
+- Restored the same main labels and row order for server management, user search, daily report, UserBot management, server status, agency and backup.
+- Main-menu button presses now cancel stale text flows before navigation, following SellBot's state-handling pattern.
+- Wired existing WhiteLabel server management, customer search, daily report and status capabilities into the new main menu.
+- Kept agency and tenant-scoped backup explicitly isolated for later staged ports instead of exposing incomplete or cross-tenant behavior.
+- Added regression coverage for the exact AdminBot main-menu layout.
+
 ## v0.10.1 — License Assignment Picker
 
 - Replaced manual Telegram-ID entry during license creation with explicit tenant selection buttons.

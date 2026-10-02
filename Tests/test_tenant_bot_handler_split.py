@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from telegram import ReplyKeyboardMarkup
+
 from TenantRuntime import handlers as dispatcher
 from TenantRuntime.AdminBot import handlers as admin_handlers
 from TenantRuntime.UserBot import handlers as user_handlers
@@ -33,3 +35,18 @@ def test_only_userbot_registers_photo_receipts() -> None:
 
     assert "filters.PHOTO" not in admin_source
     assert "filters.PHOTO" in user_source
+
+
+
+def test_admin_main_menu_matches_sellbot_layout() -> None:
+    keyboard = admin_handlers.admin_main_keyboard()
+    assert isinstance(keyboard, ReplyKeyboardMarkup)
+    labels = [[button.text for button in row] for row in keyboard.keyboard]
+    assert labels == [
+        ["🖥 مدیریت سرورها"],
+        ["🔍 جستجوی کاربر", "📊 گزارش روزانه"],
+        ["🤖 مدیریت ربات کاربران"],
+        ["📊 وضعیت سرور", "🏢 نمایندگی", "📫 دریافت بکاپ"],
+    ]
+    assert keyboard.resize_keyboard is True
+    assert keyboard.selective is True
