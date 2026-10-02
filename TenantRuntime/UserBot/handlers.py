@@ -1024,7 +1024,86 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 reply_markup=_checkout_markup(
                     int(order["id"]),
                     settings,
-                    back_callback=f"shop:plan:{plan_id}",
+                    back_callback=f"shop:changeserver:{int(order['id'])}",
+                    back_label="↩️ تغییر سرور",
+                ),
+            )
+            return
+
+        if data.startswith("shop:changeserver:"):
+            if not bool(settings.get("enable_buy", True)):
+                raise TenantBusinessError("purchase is disabled")
+            order_id = int(data.rsplit(":", 1)[1])
+            order = business.order(actor, order_id)
+            if (
+                str(order.get("operation") or "") != "purchase"
+                or str(order.get("status") or "") != "pending_payment"
+            ):
+                raise TenantBusinessError("purchase order server cannot be changed")
+            servers = business.list_purchase_servers()
+            rows = _purchase_server_rows(
+                servers,
+                plan_id=int(order["plan_id"]),
+                settings=settings,
+            )
+            # Convert new-order callbacks to in-place order server changes.
+            converted: list[list[TelegramInlineKeyboardButton]] = []
+            for row in rows:
+                converted_row = []
+                for button in row:
+                    callback = str(button.callback_data or "")
+                    server_id = int(callback.rsplit(":", 1)[1])
+                    converted_row.append(
+                        _button(
+                            button.text,
+                            callback_data=(
+                                f"shop:orderserver:{order_id}:{server_id}"
+                            ),
+                            settings=settings,
+                        )
+                    )
+                converted.append(converted_row)
+            rows = converted
+            if not rows:
+                rows = [[
+                    InlineKeyboardButton(
+                        "سرور قابل خریدی موجود نیست",
+                        callback_data="noop",
+                    )
+                ]]
+            rows.append([
+                _button(
+                    "↩️ سفارش",
+                    callback_data=f"shop:checkout:{order_id}",
+                    settings=settings,
+                )
+            ])
+            await update.callback_query.edit_message_text(
+                str(settings.get("servers_list_text") or "").strip()
+                or "🛰 سرور جدید را انتخاب کنید:",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+
+        if data.startswith("shop:orderserver:"):
+            if not bool(settings.get("enable_buy", True)):
+                raise TenantBusinessError("purchase is disabled")
+            parts = data.split(":")
+            if len(parts) != 4:
+                raise TenantBusinessError("invalid order server")
+            order_id = int(parts[2])
+            server_id = int(parts[3])
+            order = business.change_purchase_order_server(
+                actor,
+                order_id=order_id,
+                server_id=server_id,
+            )
+            await update.callback_query.edit_message_text(
+                _checkout_text(order, business.wallet_summary(actor)),
+                reply_markup=_checkout_markup(
+                    order_id,
+                    settings,
+                    back_callback=f"shop:changeserver:{order_id}",
                     back_label="↩️ تغییر سرور",
                 ),
             )
@@ -1033,9 +1112,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data.startswith("shop:checkout:"):
             order_id = int(data.rsplit(":", 1)[1])
             order = business.order(actor, order_id)
+            back_callback = "runtime:home"
+            back_label = "↩️ منو"
+            if (
+                str(order.get("operation") or "") == "purchase"
+                and str(order.get("status") or "") == "pending_payment"
+                and order.get("selected_server_id") is not None
+            ):
+                back_callback = f"shop:changeserver:{order_id}"
+                back_label = "↩️ تغییر سرور"
             await update.callback_query.edit_message_text(
                 _checkout_text(order, business.wallet_summary(actor)),
-                reply_markup=_checkout_markup(order_id, settings),
+                reply_markup=_checkout_markup(
+                    order_id,
+                    settings,
+                    back_callback=back_callback,
+                    back_label=back_label,
+                ),
             ); return
         if data.startswith("shop:coupon:"):
             if not bool(settings.get("enable_discount_code", True)):
