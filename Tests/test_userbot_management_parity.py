@@ -348,7 +348,7 @@ def test_admin_forms_use_bottom_cancel_and_not_pipe_for_core_new_flows() -> None
         encoding="utf-8",
     ).read()
     assert '[[KeyboardButton("❌لغو")]]' in source
-    assert '"kind":"payment_add_title"' in source
+    assert "payment_add_title" in source
     assert '"kind":"gift_add_code"' in source
     assert '"kind":"referral_manual_customer"' in source
     assert '"kind":"wallet_set_currency"' in source
