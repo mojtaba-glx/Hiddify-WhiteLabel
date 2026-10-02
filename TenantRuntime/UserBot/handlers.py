@@ -423,6 +423,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data == "runtime:status":
         await show_status(update, context)
         return
+    if data == "noop":
+        await update.callback_query.answer()
+        return
     spec, _, _, business = _services(context)
     if spec.role != "user":
         raise RuntimeError("UserBot callback registered for non-user role")
