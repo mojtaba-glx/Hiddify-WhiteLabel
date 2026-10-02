@@ -91,12 +91,22 @@ def test_installer_contains_manager_and_safe_update_controls() -> None:
     content = (ROOT / "install.sh").read_text(encoding="utf-8")
     assert "/usr/local/bin/whitelabel" in content
     assert "git -C" in content
-    assert "pytest -q" in content
+    assert "run_update_preflight" in content
+    assert "compileall" in content
+    assert "requirements.sha256" in content
     assert "tracked project files have local changes" in content
     assert "Type DELETE ALL" in content
     assert "update_snapshot.py" in content
     assert "ROLLBACK OK" in content
     assert "automatic database/environment rollback failed" in content
+
+
+def test_update_path_does_not_run_full_pytest_suite() -> None:
+    content = (ROOT / "install.sh").read_text(encoding="utf-8")
+    update = content.split("update_action() {", 1)[1].split("backup_action() {", 1)[0]
+    assert "run_update_preflight" in update
+    assert "-m pytest" not in update
+    assert "install_all" not in update.split('if [[ "$old_sha" == "$new_sha" ]]', 1)[1].split("fi", 1)[0]
 
 
 def test_bootstrap_uses_dedicated_service_account_and_opt_path() -> None:
