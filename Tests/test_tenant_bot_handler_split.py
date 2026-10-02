@@ -92,3 +92,16 @@ def test_admin_search_menu_matches_sellbot_sections() -> None:
         "📊 <b>گزارش کامل روزانه فروش</b>",
     ):
         assert label in source
+
+
+
+def test_smart_search_prompt_matches_sellbot_and_uses_bottom_cancel_keyboard() -> None:
+    source = (ROOT / "TenantRuntime" / "AdminBot" / "handlers.py").read_text(
+        encoding="utf-8"
+    )
+    assert "نام کاربر، UUID یا لینک کانفیگ را ارسال کنید." in source
+    assert "نام کاربر، یوزرنیم، Telegram ID، شناسه سرویس یا شناسه پنل را ارسال کنید." not in source
+    assert '[[KeyboardButton("❌ لغو")]]' in source
+    assert "reply_markup=cancel_keyboard()" in source
+    assert "await msg.delete()" in source
+    assert '"❌ جستجو لغو شد."' in source

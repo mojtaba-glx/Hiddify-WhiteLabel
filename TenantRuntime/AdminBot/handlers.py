@@ -419,13 +419,19 @@ def admin_main_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def _server_cancel_keyboard() -> ReplyKeyboardMarkup:
+def cancel_keyboard() -> ReplyKeyboardMarkup:
+    """Exact bottom cancel keyboard used by Hiddify-SellBot text flows."""
     return ReplyKeyboardMarkup(
         [[KeyboardButton("❌ لغو")]],
         resize_keyboard=True,
         one_time_keyboard=True,
         selective=True,
     )
+
+
+def _server_cancel_keyboard() -> ReplyKeyboardMarkup:
+    # Backward-compatible alias for existing server wizards.
+    return cancel_keyboard()
 
 
 def _server_provider_title(server: dict) -> str:
@@ -639,19 +645,31 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     actor = int(update.effective_user.id) if update.effective_user else 0
     try:
         if data.startswith("searchmenu:"):
+            await update.callback_query.answer()
             action = data.split(":", 1)[1]
             if action == "smart":
+                msg = update.callback_query.message
+                try:
+                    await msg.delete()
+                except Exception:
+                    try:
+                        await msg.edit_reply_markup(reply_markup=None)
+                    except Exception:
+                        pass
                 context.user_data["biz_flow"] = {"kind": "search_smart"}
-                await update.callback_query.edit_message_text(
+                await msg.reply_text(
                     "🔍 جستجوی هوشمند کاربر در کل ربات\n"
-                    "نام کاربر، یوزرنیم، Telegram ID، شناسه سرویس یا شناسه پنل را ارسال کنید."
+                    "نام کاربر، UUID یا لینک کانفیگ را ارسال کنید.",
+                    reply_markup=cancel_keyboard(),
                 )
                 return
             if action == "tracking":
                 context.user_data["biz_flow"] = {"kind": "search_tracking"}
-                await _reply_server_prompt(
-                    update, " 🀄️لطفا شناسه اشتراک را وارد کنید:"
-                )
+                if update.callback_query and update.callback_query.message:
+                    await update.callback_query.message.reply_text(
+                        " 🀄️لطفا شناسه اشتراک را وارد کنید:",
+                        reply_markup=cancel_keyboard(),
+                    )
                 return
             if action in ("expired", "expired_profiles"):
                 items = business.list_subscriptions_tracking_admin(
@@ -2230,8 +2248,15 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             kind = str(flow.get("kind") or "")
             if text == "❌ لغو":
                 context.user_data.pop("biz_flow", None)
+                context.user_data.pop("smart_search_results", None)
+                context.user_data.pop("search_results_title", None)
+                cancel_text = (
+                    "❌ جستجو لغو شد."
+                    if kind == "search_smart"
+                    else "❌ لغو شد."
+                )
                 await update.effective_message.reply_text(
-                    "❌ عملیات لغو شد.", reply_markup=admin_main_keyboard()
+                    cancel_text, reply_markup=admin_main_keyboard()
                 )
                 return
             if kind == "search_tracking":

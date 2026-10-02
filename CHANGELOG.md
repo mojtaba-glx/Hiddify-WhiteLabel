@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.10.4 — Search flow UI parity fix
+
+- Fixed Smart User Search to match Hiddify-SellBot exactly: the old inline menu is removed, the prompt is sent as a new message, and the bottom reply keyboard becomes a single `❌ لغو` button.
+- Restored the exact Hiddify-SellBot smart-search prompt: `نام کاربر، UUID یا لینک کانفیگ را ارسال کنید.`
+- Smart-search cancellation now returns `❌ جستجو لغو شد.` and restores the main admin keyboard.
+- Subscription-tracking text input now also uses the same bottom cancel keyboard.
+- Added regression coverage so the incorrect inline-only prompt cannot return.
+
 ## v0.10.3 — Admin user search and daily report parity
 
 - Rebuilt Tenant AdminBot user search around the Hiddify-SellBot search menu: smart search, subscription tracking, expired users, expired subscriptions and old/suspicious records.
