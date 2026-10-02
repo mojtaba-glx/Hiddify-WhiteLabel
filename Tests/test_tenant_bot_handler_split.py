@@ -29,12 +29,24 @@ def test_role_packages_export_their_own_registration() -> None:
     assert dispatcher.register_runtime_handlers.__module__ == "TenantRuntime.handlers"
 
 
-def test_only_userbot_registers_photo_receipts() -> None:
+def test_photo_receipts_stay_in_userbot_while_admin_media_is_management_only() -> None:
     admin_source = (ROOT / "TenantRuntime" / "AdminBot" / "handlers.py").read_text(encoding="utf-8")
     user_source = (ROOT / "TenantRuntime" / "UserBot" / "handlers.py").read_text(encoding="utf-8")
+    management_source = (
+        ROOT / "TenantRuntime" / "AdminBot" / "userbot_management.py"
+    ).read_text(encoding="utf-8")
 
-    assert "filters.PHOTO" not in admin_source
+    assert "receipt_photo" not in admin_source
     assert "filters.PHOTO" in user_source
+    assert "receipt_photo" in user_source
+
+    # AdminBot may accept media only for the SellBot-compatible management
+    # flows (broadcast/channel posts), never as a customer receipt.
+    assert "userbot_admin_media" in admin_source
+    assert "filters.PHOTO | filters.VIDEO" in admin_source
+    assert 'kind=="broadcast"' in management_source
+    assert 'kind in {"channel_content","channel_edit_media"}' in management_source
+    assert "submit_receipt(" not in management_source
 
 
 
