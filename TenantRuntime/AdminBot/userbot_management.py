@@ -1274,8 +1274,8 @@ async def handle_callback(
         if action == "wallet":
             wallet = business.customer_wallet_admin(actor, customer_id=customer_id)
             current = list(wallet.get("accounts") or [])
-            text = "💳 ویرایش کیف پول\n" + ("\n".join(f"• {x['currency']}: {int(x['balance']):,}" for x in current) or "• موجودی ثبت نشده") + "\n\nمقدار جدید را به شکل «IRR | 50000» وارد کنید."
-            context.user_data[FLOW_KEY]={"kind":"wallet_set","customer_id":customer_id}
+            text = "💳 ویرایش کیف پول\n" + ("\n".join(f"• {x['currency']}: {int(x['balance']):,}" for x in current) or "• موجودی ثبت نشده") + "\n\n💱 ارز موردنظر را وارد کنید؛ مثال IRR:"
+            context.user_data[FLOW_KEY]={"kind":"wallet_set_currency","customer_id":customer_id}
             await query.message.reply_text(text, reply_markup=userbot_cancel_keyboard()); return True
         if action == "reset_trial":
             business.reset_customer_trial_admin(actor, customer_id=customer_id)
@@ -1458,8 +1458,8 @@ async def handle_callback(
         rows.append(nav); rows.append([InlineKeyboardButton("🔙بازگشت",callback_data="userbot:referral_menu")])
         await _edit_or_send(update,text,InlineKeyboardMarkup(rows)); return True
     if data == "userbot:referral:manual":
-        context.user_data[FLOW_KEY]={"kind":"referral_manual"}
-        await query.message.reply_text("🧾 Customer ID | AMOUNT | CURRENCY\nمثال: 12 | 50000 | IRR",reply_markup=userbot_cancel_keyboard()); return True
+        context.user_data[FLOW_KEY]={"kind":"referral_manual_customer"}
+        await query.message.reply_text("👤 Customer ID کاربر را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
 
     if data == "userbot:tickets_menu":
         await _send_tickets(update,business,actor); return True
@@ -1640,8 +1640,21 @@ async def handle_callback(
         context.user_data[FLOW_KEY]={"kind":"force_join_channel"}
         await query.message.reply_text("📢 @channel یا -100... را ارسال کنید:",reply_markup=userbot_cancel_keyboard()); return True
     if data == "userbot:settings:payment:add":
-        context.user_data[FLOW_KEY]={"kind":"payment_add"}
-        await query.message.reply_text("💳 kind(card/crypto) | title | currency | destination | network(optional) | instructions(optional)",reply_markup=userbot_cancel_keyboard()); return True
+        context.user_data[FLOW_KEY]={"kind":"payment_add_kind"}
+        await _edit_or_send(
+            update,
+            "💳 نوع روش پرداخت را انتخاب کنید:",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("💳 کارت به کارت",callback_data="userbot:settings:payment:addkind:card")],
+                [InlineKeyboardButton("🪙 رمزارز",callback_data="userbot:settings:payment:addkind:crypto")],
+                [InlineKeyboardButton("🔙بازگشت",callback_data="userbot:settings:payment")],
+            ]),
+        ); return True
+    if data.startswith("userbot:settings:payment:addkind:"):
+        kind=data.rsplit(":",1)[1]
+        if kind not in {"card","crypto"}: raise ValueError("invalid payment kind")
+        context.user_data[FLOW_KEY]={"kind":"payment_add_title","payment_kind":kind}
+        await query.message.reply_text("📝 عنوان روش پرداخت را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
     if data.startswith("userbot:settings:payment:method:"):
         mid=int(data.rsplit(":",1)[1]); item=next((x for x in business.list_payment_methods_admin(actor) if int(x["id"])==mid),None)
         if item is None: raise TenantBusinessError("payment method not found")
@@ -1695,13 +1708,31 @@ async def handle_text(
             rows.append([InlineKeyboardButton("🔙بازگشت",callback_data="userbot:users_menu")])
             await update.effective_message.reply_text(f"✅ {len(items)} نتیجه پیدا شد.",reply_markup=admin_main_keyboard())
             await update.effective_message.reply_text("نتایج:",reply_markup=InlineKeyboardMarkup(rows)); return True
-        if kind=="wallet_set":
-            parts=[x.strip() for x in text.split("|")]
-            if len(parts)!=2: raise ValueError("wallet format")
-            currency=parts[0].upper(); target=int(parts[1].replace(",","")); cid=int(flow["customer_id"])
-            wallet=business.customer_wallet_admin(actor,customer_id=cid); current=next((int(x["balance"]) for x in wallet["accounts"] if x["currency"]==currency),0); delta=target-current
-            if delta: business.adjust_wallet_admin(actor,customer_id=cid,currency=currency,amount=delta,note="Admin set wallet balance")
-            context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ موجودی کیف پول بروزرسانی شد.",reply_markup=admin_main_keyboard()); return True
+        if kind=="wallet_set_currency":
+            currency=text.strip().upper()
+            if not 3<=len(currency)<=8: raise ValueError("wallet currency")
+            flow["currency"]=currency; flow["kind"]="wallet_set_amount"
+            await update.effective_message.reply_text(
+                "💰 موجودی نهایی کیف پول را وارد کنید:",
+                reply_markup=userbot_cancel_keyboard(),
+            ); return True
+        if kind=="wallet_set_amount":
+            target=int(text.replace(",",""))
+            if target<0: raise ValueError("wallet amount")
+            cid=int(flow["customer_id"]); currency=str(flow["currency"])
+            wallet=business.customer_wallet_admin(actor,customer_id=cid)
+            current=next((int(x["balance"]) for x in wallet["accounts"] if x["currency"]==currency),0)
+            delta=target-current
+            if delta:
+                business.adjust_wallet_admin(
+                    actor,customer_id=cid,currency=currency,amount=delta,
+                    note="Admin set wallet balance"
+                )
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text(
+                f"✅ موجودی کیف پول روی {target:,} {currency} تنظیم شد.",
+                reply_markup=admin_main_keyboard(),
+            ); return True
         if kind=="user_message":
             cid=int(flow["customer_id"]); profile=business.customer_profile_admin(actor,customer_id=cid)
             await _send_via_userbot(business,int(profile["telegram_user_id"]),text=text)
@@ -1789,12 +1820,28 @@ async def handle_text(
             elif field=="min": kwargs["referral_min_purchase"]=value
             else: raise ValueError("referral field")
             business.update_growth_settings(actor,**kwargs); context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ تنظیمات رفرال ذخیره شد.",reply_markup=admin_main_keyboard()); return True
-        if kind=="referral_manual":
-            parts=[x.strip() for x in text.split("|")]
-            if len(parts)!=3: raise ValueError("manual referral")
-            cid,amount,currency=int(parts[0]),int(parts[1].replace(",","")),parts[2].upper()
-            business.adjust_wallet_admin(actor,customer_id=cid,currency=currency,amount=amount,note="manual referral reward")
-            context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ پاداش دستی به کیف پول اضافه شد.",reply_markup=admin_main_keyboard()); return True
+        if kind=="referral_manual_customer":
+            cid=int(text)
+            business.customer_profile_admin(actor,customer_id=cid)
+            flow["customer_id"]=cid; flow["kind"]="referral_manual_amount"
+            await update.effective_message.reply_text("💰 مبلغ پاداش را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
+        if kind=="referral_manual_amount":
+            amount=int(text.replace(",",""))
+            if amount<=0: raise ValueError("referral amount")
+            flow["amount"]=amount; flow["kind"]="referral_manual_currency"
+            await update.effective_message.reply_text("💱 ارز را وارد کنید؛ مثال IRR:",reply_markup=userbot_cancel_keyboard()); return True
+        if kind=="referral_manual_currency":
+            currency=text.strip().upper()
+            if not 3<=len(currency)<=8: raise ValueError("referral currency")
+            business.adjust_wallet_admin(
+                actor,customer_id=int(flow["customer_id"]),currency=currency,
+                amount=int(flow["amount"]),note="manual referral reward"
+            )
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text(
+                "✅ پاداش دستی به کیف پول اضافه شد.",
+                reply_markup=admin_main_keyboard(),
+            ); return True
         if kind=="ticket_reply":
             item=business.reply_ticket_admin(actor,ticket_id=int(flow["ticket_id"]),reply=text)
             try: await _send_via_userbot(business,int(item["telegram_user_id"]),text=f"📩 پاسخ تیکت #{item['id']}\n\n{text}")
@@ -1870,11 +1917,50 @@ async def handle_text(
             await update.effective_message.reply_text("✅ تنظیم یادآور ذخیره شد.",reply_markup=admin_main_keyboard()); return True
         if kind=="force_join_channel":
             business.set_userbot_setting_admin(actor,key="force_join_channel",value=text); context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ کانال عضویت اجباری ذخیره شد.",reply_markup=admin_main_keyboard()); return True
-        if kind=="payment_add":
-            parts=[x.strip() for x in text.split("|")]
-            if len(parts)<4: raise ValueError("payment format")
-            business.add_payment_method(actor,kind=parts[0],title=parts[1],currency=parts[2],destination=parts[3],network=parts[4] if len(parts)>4 else "",instructions=parts[5] if len(parts)>5 else "")
-            context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ روش پرداخت اضافه شد.",reply_markup=admin_main_keyboard()); return True
+        if kind=="payment_add_title":
+            if not text or len(text)>80: raise ValueError("payment title")
+            flow["title"]=text; flow["kind"]="payment_add_currency"
+            await update.effective_message.reply_text("💱 ارز را وارد کنید؛ مثال IRR یا USDT:",reply_markup=userbot_cancel_keyboard()); return True
+        if kind=="payment_add_currency":
+            currency=text.strip().upper()
+            if not 3<=len(currency)<=8: raise ValueError("payment currency")
+            flow["currency"]=currency; flow["kind"]="payment_add_destination"
+            await update.effective_message.reply_text(
+                "📍 شماره کارت / آدرس کیف پول را وارد کنید:",
+                reply_markup=userbot_cancel_keyboard(),
+            ); return True
+        if kind=="payment_add_destination":
+            if not text or len(text)>180: raise ValueError("payment destination")
+            flow["destination"]=text
+            if str(flow["payment_kind"])=="crypto":
+                flow["kind"]="payment_add_network"
+                await update.effective_message.reply_text(
+                    "🌐 نام شبکه را وارد کنید؛ مثال TRC20:",
+                    reply_markup=userbot_cancel_keyboard(),
+                ); return True
+            flow["network"]=""; flow["kind"]="payment_add_instructions"
+            await update.effective_message.reply_text(
+                "📝 توضیحات پرداخت را وارد کنید یا 0 برای بدون توضیح:",
+                reply_markup=userbot_cancel_keyboard(),
+            ); return True
+        if kind=="payment_add_network":
+            flow["network"]="" if text in {"0","-","—"} else text
+            flow["kind"]="payment_add_instructions"
+            await update.effective_message.reply_text(
+                "📝 توضیحات پرداخت را وارد کنید یا 0 برای بدون توضیح:",
+                reply_markup=userbot_cancel_keyboard(),
+            ); return True
+        if kind=="payment_add_instructions":
+            instructions="" if text in {"0","-","—"} else text
+            business.add_payment_method(
+                actor,kind=str(flow["payment_kind"]),title=str(flow["title"]),
+                currency=str(flow["currency"]),destination=str(flow["destination"]),
+                network=str(flow.get("network") or ""),instructions=instructions,
+            )
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text(
+                "✅ روش پرداخت اضافه شد.",reply_markup=admin_main_keyboard()
+            ); return True
     except (ValueError,TenantBusinessError):
         await update.effective_message.reply_text("❌ مقدار یا وضعیت معتبر نیست. دوباره تلاش کنید.",reply_markup=userbot_cancel_keyboard())
         return True
