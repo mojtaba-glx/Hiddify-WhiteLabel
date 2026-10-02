@@ -631,11 +631,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
                 return
             if action == "tracking":
-                items = business.list_subscriptions_tracking_admin(actor)
-                context.user_data["smart_search_results"] = items
-                context.user_data["search_results_title"] = "📊 پیگیری اشتراک"
-                text, kb = _search_results_view(items, title="📊 پیگیری اشتراک")
-                await update.callback_query.edit_message_text(text, reply_markup=kb)
+                context.user_data["biz_flow"] = {"kind": "search_tracking"}
+                await _reply_server_prompt(
+                    update, " 🀄️لطفا شناسه اشتراک را وارد کنید:"
+                )
                 return
             if action in ("expired", "expired_profiles"):
                 items = business.list_subscriptions_tracking_admin(
@@ -2173,6 +2172,36 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 context.user_data.pop("biz_flow", None)
                 await update.effective_message.reply_text(
                     "❌ عملیات لغو شد.", reply_markup=admin_main_keyboard()
+                )
+                return
+            if kind == "search_tracking":
+                items = business.search_subscriptions_admin(actor, text)
+                exact = None
+                plain = text.strip().lstrip("#")
+                if plain.isdigit():
+                    exact = next(
+                        (x for x in items if int(x["id"]) == int(plain)),
+                        None,
+                    )
+                if exact is None and len(items) == 1:
+                    exact = items[0]
+                if exact is None:
+                    await update.effective_message.reply_text(
+                        "❌اشتراکی با این شناسه یافت نشد"
+                        if not items
+                        else "⚠️ چند نتیجه پیدا شد؛ شناسه دقیق سرویس را وارد کنید.",
+                        reply_markup=_server_cancel_keyboard(),
+                    )
+                    return
+                context.user_data.pop("biz_flow", None)
+                detail, kb = _subscription_detail_view(
+                    business, actor, int(exact["id"])
+                )
+                await update.effective_message.reply_text(
+                    "✅اشتراک یافت شد", reply_markup=admin_main_keyboard()
+                )
+                await update.effective_message.reply_text(
+                    detail, reply_markup=kb
                 )
                 return
             if kind == "search_smart":
