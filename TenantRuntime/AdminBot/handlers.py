@@ -301,14 +301,31 @@ def _subscription_detail_view(
         f"📝یادداشت: —\n"
         f"🔑 شناسه سرویس: {int(item['id'])}"
     )
-    rows = [
-        [InlineKeyboardButton("کانفیگ ها📄", callback_data=f"search:cfg:{subscription_id}")],
-        [InlineKeyboardButton("ویرایش کاربر✏️", callback_data=f"search:edit:{subscription_id}")],
-        [InlineKeyboardButton("تمدید اشتراک♾️", callback_data=f"search:renew:{subscription_id}")],
-        [InlineKeyboardButton("حذف کاربر🗑️", callback_data=f"search:delete:{subscription_id}")],
-        [InlineKeyboardButton("پروفایل کاربر👤", callback_data=f"biz:customer:{int(item['customer_id'])}")],
-        [InlineKeyboardButton("بازگشت به نتایج🔙", callback_data="search:results")],
-    ]
+    if status == "pending_provisioning":
+        rows = [
+            [InlineKeyboardButton(
+                "🔁 تلاش ساخت/تحویل",
+                callback_data=f"biz:fulfill:{int(item['order_id'])}",
+            )],
+            [InlineKeyboardButton(
+                "🗑 پاک‌سازی رکورد شروع‌نشده",
+                callback_data=f"search:drop:{subscription_id}",
+            )],
+            [InlineKeyboardButton(
+                "پروفایل کاربر👤",
+                callback_data=f"biz:customer:{int(item['customer_id'])}",
+            )],
+            [InlineKeyboardButton("بازگشت به نتایج🔙", callback_data="search:results")],
+        ]
+    else:
+        rows = [
+            [InlineKeyboardButton("کانفیگ ها📄", callback_data=f"search:cfg:{subscription_id}")],
+            [InlineKeyboardButton("ویرایش کاربر✏️", callback_data=f"search:edit:{subscription_id}")],
+            [InlineKeyboardButton("تمدید اشتراک♾️", callback_data=f"search:renew:{subscription_id}")],
+            [InlineKeyboardButton("حذف کاربر🗑️", callback_data=f"search:delete:{subscription_id}")],
+            [InlineKeyboardButton("پروفایل کاربر👤", callback_data=f"biz:customer:{int(item['customer_id'])}")],
+            [InlineKeyboardButton("بازگشت به نتایج🔙", callback_data="search:results")],
+        ]
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -740,21 +757,29 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if action == "edit" and len(parts) == 3:
                 sid = int(parts[2])
                 item = business.subscription_admin(actor, subscription_id=sid)
-                toggle = "✅ فعال‌سازی" if item["status"] == "disabled" else "⛔ غیرفعال‌سازی"
+                edit_rows = []
+                if item["status"] in ("active", "disabled"):
+                    toggle = "✅ فعال‌سازی" if item["status"] == "disabled" else "⛔ غیرفعال‌سازی"
+                    edit_rows.append([
+                        InlineKeyboardButton(
+                            toggle,
+                            callback_data=f"search:editact:{sid}:toggle",
+                        )
+                    ])
+                    edit_rows.append([
+                        InlineKeyboardButton("بازنشانی حجم🔄", callback_data=f"search:editact:{sid}:reset_usage"),
+                        InlineKeyboardButton("ویرایش حجم📊", callback_data=f"search:editact:{sid}:volume"),
+                    ])
+                edit_rows.append([
+                    InlineKeyboardButton("بازنشانی مدت🔄", callback_data=f"search:editact:{sid}:reset_days"),
+                    InlineKeyboardButton("ویرایش مدت📅", callback_data=f"search:editact:{sid}:days"),
+                ])
+                edit_rows.append([
+                    InlineKeyboardButton("بازگشت🔙", callback_data=f"search:sel:{sid}")
+                ])
                 await update.callback_query.edit_message_text(
                     _subscription_detail_view(business, actor, sid)[0],
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton(toggle, callback_data=f"search:editact:{sid}:toggle")],
-                        [
-                            InlineKeyboardButton("بازنشانی حجم🔄", callback_data=f"search:editact:{sid}:reset_usage"),
-                            InlineKeyboardButton("ویرایش حجم📊", callback_data=f"search:editact:{sid}:volume"),
-                        ],
-                        [
-                            InlineKeyboardButton("بازنشانی مدت🔄", callback_data=f"search:editact:{sid}:reset_days"),
-                            InlineKeyboardButton("ویرایش مدت📅", callback_data=f"search:editact:{sid}:days"),
-                        ],
-                        [InlineKeyboardButton("بازگشت🔙", callback_data=f"search:sel:{sid}")],
-                    ]),
+                    reply_markup=InlineKeyboardMarkup(edit_rows),
                 )
                 return
             if action == "editact" and len(parts) == 4:
@@ -815,6 +840,41 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 }
                 await _reply_server_prompt(
                     update, "📊 حجم تمدید را به گیگابایت وارد کنید:"
+                )
+                return
+            if action == "drop" and len(parts) == 3:
+                sid = int(parts[2])
+                item = business.subscription_admin(actor, subscription_id=sid)
+                if item["status"] != "pending_provisioning":
+                    raise TenantBusinessError("subscription is not unstarted")
+                await update.callback_query.edit_message_text(
+                    "⚠️ این سرویس هنوز روی پنل ساخته نشده است.\n"
+                    "رکورد سرویس پاک و سفارش مربوطه لغو می‌شود؛ سابقه مالی/رسید باقی می‌ماند.\n\n"
+                    "ادامه می‌دهید؟",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "✅ بله، پاک شود",
+                            callback_data=f"search:dropok:{sid}",
+                        ),
+                        InlineKeyboardButton(
+                            "لغو ❌",
+                            callback_data=f"search:sel:{sid}",
+                        ),
+                    ]]),
+                )
+                return
+            if action == "dropok" and len(parts) == 3:
+                sid = int(parts[2])
+                business.cleanup_unstarted_subscription_admin(
+                    actor, subscription_id=sid
+                )
+                await update.callback_query.edit_message_text(
+                    "✅ رکورد شروع‌نشده پاک شد؛ سابقه مالی و رسید حفظ شد.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "بازگشت🔙", callback_data="search:results"
+                        )
+                    ]]),
                 )
                 return
             if action == "delete" and len(parts) == 3:
