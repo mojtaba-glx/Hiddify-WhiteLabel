@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +26,10 @@ def _service(conn, factories, cipher):
 
 def _labels(markup):
     return [[button.text for button in row] for row in markup.inline_keyboard]
+
+
+def _reply_labels(markup):
+    return [[button.text for button in row] for row in markup.keyboard]
 
 
 def test_userbot_admin_main_menu_matches_sellbot() -> None:
@@ -125,7 +128,7 @@ def test_user_menu_reacts_to_admin_settings(conn, factories, cipher) -> None:
     service.set_userbot_setting_admin(
         7001, key="show_gift_button", value=False
     )
-    labels = sum(_labels(user_handlers._menu(spec, service)), [])
+    labels = sum(_reply_labels(user_handlers._main_keyboard(spec, service)), [])
     assert "💳خرید اشتراک" not in labels
     assert "🔥تست رایگان" not in labels
     assert "💌دعوت دوستان" not in labels
@@ -138,7 +141,7 @@ def test_user_menu_reacts_to_admin_settings(conn, factories, cipher) -> None:
     service.update_growth_settings(
         7001, referral_enabled=True, trial_enabled=True
     )
-    labels = sum(_labels(user_handlers._menu(spec, service)), [])
+    labels = sum(_reply_labels(user_handlers._main_keyboard(spec, service)), [])
     assert "💳خرید اشتراک" in labels
     assert "🔥تست رایگان" in labels
     assert "💌دعوت دوستان" in labels
@@ -154,7 +157,7 @@ def test_userbot_customer_main_menu_matches_sellbot_navigation(
         7001, referral_enabled=True, trial_enabled=True
     )
 
-    labels = _labels(user_handlers._menu(spec, service))
+    labels = _reply_labels(user_handlers._main_keyboard(spec, service))
     assert labels == [
         ["📊وضعیت اشتراک"],
         ["♾تمدید اشتراک", "💳خرید اشتراک"],
@@ -207,7 +210,7 @@ def test_faq_navigation_is_always_available(
     _tenant, service = _service(conn, factories, cipher)
     spec = SimpleNamespace(tenant_name="Speed Test")
     service.set_userbot_setting_admin(7001, key="faq_text", value="")
-    labels = sum(_labels(user_handlers._menu(spec, service)), [])
+    labels = sum(_reply_labels(user_handlers._main_keyboard(spec, service)), [])
     assert "❗️سوالات متداول" in labels
 
 
@@ -217,20 +220,20 @@ def test_renew_main_menu_setting_is_functional(
     _tenant, service = _service(conn, factories, cipher)
     spec = SimpleNamespace(tenant_name="Speed Test")
 
-    labels = sum(_labels(user_handlers._menu(spec, service)), [])
+    labels = sum(_reply_labels(user_handlers._main_keyboard(spec, service)), [])
     assert "♾تمدید اشتراک" in labels
 
     service.set_userbot_setting_admin(
         7001, key="show_renew_in_main_menu", value=False
     )
-    labels = sum(_labels(user_handlers._menu(spec, service)), [])
+    labels = sum(_reply_labels(user_handlers._main_keyboard(spec, service)), [])
     assert "♾تمدید اشتراک" not in labels
 
     service.set_userbot_setting_admin(7001, key="enable_renew", value=False)
     service.set_userbot_setting_admin(
         7001, key="show_renew_in_main_menu", value=True
     )
-    labels = sum(_labels(user_handlers._menu(spec, service)), [])
+    labels = sum(_reply_labels(user_handlers._main_keyboard(spec, service)), [])
     assert "♾تمدید اشتراک" not in labels
 
 
@@ -239,13 +242,13 @@ def test_user_status_visibility_is_functional(
 ) -> None:
     _tenant, service = _service(conn, factories, cipher)
     spec = SimpleNamespace(tenant_name="Speed Test")
-    assert "📊وضعیت اشتراک" in sum(_labels(user_handlers._menu(spec, service)), [])
+    assert "📊وضعیت اشتراک" in sum(_reply_labels(user_handlers._main_keyboard(spec, service)), [])
 
     service.set_userbot_setting_admin(
         7001, key="show_user_status", value=False
     )
     assert "📊وضعیت اشتراک" not in sum(
-        _labels(user_handlers._menu(spec, service)), []
+        _reply_labels(user_handlers._main_keyboard(spec, service)), []
     )
 
 
@@ -355,38 +358,43 @@ def test_adminbot_inline_and_reply_buttons_serialize_native_styles() -> None:
     assert cancel["keyboard"][0][0]["style"] == "danger"
 
 
-def test_userbot_legacy_reply_keyboard_is_removed_only_once() -> None:
-    class CleanupMessage:
-        def __init__(self):
-            self.deleted = 0
-
-        async def delete(self):
-            self.deleted += 1
-
-    class FakeChat:
-        def __init__(self):
-            self.calls = []
-            self.cleanup = CleanupMessage()
-
-        async def send_message(self, text, reply_markup=None):
-            self.calls.append((text, reply_markup))
-            return self.cleanup
-
-    chat = FakeChat()
-    update = SimpleNamespace(effective_chat=chat)
-    context = SimpleNamespace(user_data={})
-
-    asyncio.run(
-        user_handlers._remove_legacy_reply_keyboard(update, context)
-    )
-    asyncio.run(
-        user_handlers._remove_legacy_reply_keyboard(update, context)
+def test_userbot_main_menu_is_persistent_bottom_reply_keyboard(
+    conn, factories, cipher
+) -> None:
+    _tenant, service = _service(conn, factories, cipher)
+    spec = SimpleNamespace(tenant_name="Speed Test")
+    service.update_growth_settings(
+        7001, referral_enabled=True, trial_enabled=True
     )
 
-    assert len(chat.calls) == 1
-    assert chat.calls[0][0] == "\u2063"
-    assert chat.calls[0][1].__class__.__name__ == "ReplyKeyboardRemove"
-    assert chat.cleanup.deleted == 1
+    markup = user_handlers._main_keyboard(spec, service)
+    payload = markup.to_dict()
+
+    assert payload["is_persistent"] is True
+    assert payload["resize_keyboard"] is True
+    assert "inline_keyboard" not in payload
+    assert payload["keyboard"][0][0]["text"] == "📊وضعیت اشتراک"
+    assert payload["keyboard"][0][0]["style"] == "primary"
+    assert payload["keyboard"][1][0]["style"] == "success"
+
+
+def test_userbot_main_reply_buttons_are_routed_to_real_actions() -> None:
+    runtime = open(
+        "TenantRuntime/UserBot/handlers.py",
+        encoding="utf-8",
+    ).read()
+    assert "async def _handle_main_reply_action" in runtime
+    assert 'if text == BTN_BUY:' in runtime
+    assert 'if text == BTN_RENEW:' in runtime
+    assert 'if text == BTN_CONNECT:' in runtime
+    assert 'if text == BTN_TRIAL:' in runtime
+    assert 'if text == BTN_WALLET:' in runtime
+    assert 'if text == BTN_SUPPORT:' in runtime
+    assert 'if text == BTN_GUIDE:' in runtime
+    assert 'if text == BTN_FAQ:' in runtime
+    assert 'if text == BTN_REFERRAL:' in runtime
+    assert 'if text == BTN_GIFT:' in runtime
+    assert 'if text in main_labels:' in runtime
 
 
 def test_layout_helpers_make_columns_and_safe_config_items(monkeypatch) -> None:
