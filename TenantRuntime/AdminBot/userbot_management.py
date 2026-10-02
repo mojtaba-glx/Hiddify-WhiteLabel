@@ -207,6 +207,46 @@ def _bool_icon(value: Any) -> str:
     return "✅" if bool(value) else "❌"
 
 
+
+def _plan_category_detail_text(category: dict[str, Any]) -> str:
+    return (
+        f"📂 دسته: {category['title']}\n"
+        "━━━━━━━━━━━━━━\n"
+        f"🔢 اولویت: {int(category.get('priority') or 0)}\n"
+        f"📋 تعداد پلن: {int(category.get('plan_count') or 0)}\n"
+        f"وضعیت: {'فعال ✅' if str(category.get('status')) == 'active' else 'غیرفعال ⛔'}"
+    )
+
+
+def _plan_category_detail_rows(
+    category: dict[str, Any],
+) -> list[list[InlineKeyboardButton]]:
+    category_id = int(category["id"])
+    active = str(category.get("status")) == "active"
+    return [
+        [InlineKeyboardButton(
+            "📋 اتصال/جداسازی پلن‌ها",
+            callback_data=f"userbot:settings:tx_plans:category:plans:{category_id}",
+        )],
+        [InlineKeyboardButton(
+            "📝 ویرایش عنوان",
+            callback_data=f"userbot:settings:tx_plans:category:edit_title:{category_id}",
+        )],
+        [InlineKeyboardButton(
+            "🔢 ویرایش اولویت",
+            callback_data=f"userbot:settings:tx_plans:category:edit_priority:{category_id}",
+        )],
+        [InlineKeyboardButton(
+            "⛔ غیرفعال کردن" if active else "✅ فعال کردن",
+            callback_data=f"userbot:settings:tx_plans:category:toggle:{category_id}",
+        )],
+        [InlineKeyboardButton(
+            "🔙بازگشت",
+            callback_data="userbot:settings:tx_plans:categories",
+        )],
+    ]
+
+
 def _display_name(item: dict[str, Any]) -> str:
     username = str(item.get("username") or "").strip()
     if username:
@@ -457,6 +497,8 @@ async def _send_order_detail(update: Update, business: Any, actor: int, order_id
         f"👤 خریدار: {order.get('display_name') or '-'}\n"
         f"📅 تاریخ: {order.get('created_at') or '-'}\n"
         f"📦 پلن: {order.get('plan_name') or '-'}\n"
+        f"📂 دسته: {order.get('category_title') or 'بدون دسته'}\n"
+        f"🛰 سرور خرید: {order.get('selected_server_label') or 'پیش‌فرض/قدیمی'}\n"
         f"💰 قیمت: {int(order.get('amount') or 0):,} {order.get('currency') or ''}\n"
         f"📊 وضعیت: {order.get('status') or '-'}\n"
         f"🔁 نوع: {order.get('operation') or 'purchase'}",
@@ -1210,9 +1252,22 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
         return
 
     if section == "tx_plans":
+        categories = business.list_plan_categories(public=False)
         rows = [
             [InlineKeyboardButton(
-                f"🔢ترتیب پلن‌ها | {s.get('plan_sort_mode')}",
+                f"📂 دسته‌بندی پلن‌ها | {_bool_icon(s.get('plan_categories_enabled'))}",
+                callback_data="userbot:settings:tx_plans:plan_categories_enabled",
+            )],
+            [InlineKeyboardButton(
+                f"🗂 مدیریت دسته‌ها | {len(categories)}",
+                callback_data="userbot:settings:tx_plans:categories",
+            )],
+            [InlineKeyboardButton(
+                f"🔢 اولویت دستی پلن‌ها | {_bool_icon(s.get('plan_sort_by_priority'))}",
+                callback_data="userbot:settings:tx_plans:plan_sort_by_priority",
+            )],
+            [InlineKeyboardButton(
+                f"↕️ ترتیب پلن‌ها | {s.get('plan_sort_mode')}",
                 callback_data="userbot:settings:tx_plans:plan_sort_mode:menu",
             )],
             [InlineKeyboardButton(
@@ -1225,7 +1280,12 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
             )],
             [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
         ]
-        await _edit_or_send(update, "🧮 تنظیمات تراکنشات و پلن ها", InlineKeyboardMarkup(rows))
+        await _edit_or_send(
+            update,
+            "🧮 تنظیمات تراکنشات و پلن ها\n\n"
+            "دسته‌بندی، ترتیب و ستون‌های این بخش مستقیماً روی مسیر خرید UserBot اعمال می‌شوند.",
+            InlineKeyboardMarkup(rows),
+        )
         return
 
     if section == "texts":
@@ -1847,6 +1907,8 @@ async def handle_callback(
         "userbot:settings:buy_renew:enable_buy": ("enable_buy", "buy_renew"),
         "userbot:settings:buy_renew:enable_renew": ("enable_renew", "buy_renew"),
         "userbot:settings:buy_renew:show_renew_in_main_menu": ("show_renew_in_main_menu", "buy_renew"),
+        "userbot:settings:tx_plans:plan_categories_enabled": ("plan_categories_enabled", "tx_plans"),
+        "userbot:settings:tx_plans:plan_sort_by_priority": ("plan_sort_by_priority", "tx_plans"),
         "userbot:settings:marketing:toggle:enable_discount_code": ("enable_discount_code", "marketing"),
         "userbot:settings:marketing:toggle:show_gift_button": ("show_gift_button", "marketing"),
         "userbot:settings:marketing:toggle:show_user_status": ("show_user_status", "marketing"),
@@ -1943,6 +2005,194 @@ async def handle_callback(
         value = int(data.rsplit(":", 1)[1])
         business.set_userbot_setting_admin(actor, key="server_columns", value=value)
         await _settings_section(update, business, actor, "buy_renew")
+        return True
+
+    if data == "userbot:settings:tx_plans:categories":
+        categories = business.list_plan_categories(public=False)
+        plans = [
+            p for p in business.list_plans(public=False)
+            if not str(p.get("name") or "").startswith("__WHITELABEL_")
+        ]
+        uncategorized = sum(1 for p in plans if p.get("category_id") is None)
+        rows = [
+            [InlineKeyboardButton(
+                (
+                    f"{'✅' if str(cat.get('status')) == 'active' else '⛔'} "
+                    f"{cat['title']} · اولویت {int(cat.get('priority') or 0)} "
+                    f"· {int(cat.get('plan_count') or 0)} پلن"
+                )[:64],
+                callback_data=f"userbot:settings:tx_plans:category:{int(cat['id'])}",
+            )]
+            for cat in categories
+        ]
+        rows.extend([
+            [InlineKeyboardButton(
+                "➕ افزودن دسته",
+                callback_data="userbot:settings:tx_plans:category:add",
+            )],
+            [InlineKeyboardButton(
+                f"📋 پلن‌های بدون دسته: {uncategorized}",
+                callback_data="userbot:settings:tx_plans",
+            )],
+            [InlineKeyboardButton(
+                "🔙بازگشت",
+                callback_data="userbot:settings:tx_plans",
+            )],
+        ])
+        await _edit_or_send(
+            update,
+            "🗂 مدیریت دسته‌بندی پلن‌ها\n"
+            "اولویت کمتر، بالاتر نمایش داده می‌شود.",
+            InlineKeyboardMarkup(rows),
+        )
+        return True
+
+    if data == "userbot:settings:tx_plans:category:add":
+        context.user_data[FLOW_KEY] = {"kind": "plan_category_add"}
+        await query.message.reply_text(
+            "➕ عنوان دسته | اولویت را ارسال کنید.\n"
+            "مثال: یک ماهه | 10",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+
+    if data.startswith("userbot:settings:tx_plans:category:toggle:"):
+        category_id = int(data.rsplit(":", 1)[1])
+        category = business.plan_category(category_id, public=False)
+        business.update_plan_category_admin(
+            actor,
+            category_id=category_id,
+            status=(
+                "disabled"
+                if str(category.get("status")) == "active"
+                else "active"
+            ),
+        )
+        category = business.plan_category(category_id, public=False)
+        rows = _plan_category_detail_rows(category)
+        await _edit_or_send(
+            update,
+            _plan_category_detail_text(category),
+            InlineKeyboardMarkup(rows),
+        )
+        return True
+
+    if data.startswith("userbot:settings:tx_plans:category:edit_title:"):
+        category_id = int(data.rsplit(":", 1)[1])
+        category = business.plan_category(category_id, public=False)
+        context.user_data[FLOW_KEY] = {
+            "kind": "plan_category_edit_title",
+            "category_id": category_id,
+        }
+        await query.message.reply_text(
+            f"📝 عنوان فعلی: {category['title']}\nعنوان جدید را بفرستید:",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+
+    if data.startswith("userbot:settings:tx_plans:category:edit_priority:"):
+        category_id = int(data.rsplit(":", 1)[1])
+        category = business.plan_category(category_id, public=False)
+        context.user_data[FLOW_KEY] = {
+            "kind": "plan_category_edit_priority",
+            "category_id": category_id,
+        }
+        await query.message.reply_text(
+            f"🔢 اولویت فعلی: {int(category.get('priority') or 0)}\n"
+            "عدد اولویت جدید را بفرستید:",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+
+    if data.startswith("userbot:settings:tx_plans:category:plans:"):
+        category_id = int(data.rsplit(":", 1)[1])
+        category = business.plan_category(category_id, public=False)
+        plans = [
+            p for p in business.list_plans(public=False)
+            if not str(p.get("name") or "").startswith("__WHITELABEL_")
+        ]
+        rows = [
+            [InlineKeyboardButton(
+                (
+                    f"{'✅ ' if int(p.get('category_id') or 0) == category_id else '▫️ '}"
+                    f"{p['name']} · {int(p.get('traffic_gb') or 0)}GB"
+                )[:64],
+                callback_data=(
+                    f"userbot:settings:tx_plans:category:assign:"
+                    f"{category_id}:{int(p['id'])}"
+                ),
+            )]
+            for p in plans
+        ]
+        rows.append([InlineKeyboardButton(
+            "🔙بازگشت",
+            callback_data=f"userbot:settings:tx_plans:category:{category_id}",
+        )])
+        await _edit_or_send(
+            update,
+            f"📋 اتصال پلن‌ها به دسته «{category['title']}»\n"
+            "با لمس هر پلن، عضویت آن در این دسته تغییر می‌کند.",
+            InlineKeyboardMarkup(rows),
+        )
+        return True
+
+    if data.startswith("userbot:settings:tx_plans:category:assign:"):
+        parts = data.split(":")
+        if len(parts) != 7:
+            raise ValueError("invalid category assignment callback")
+        category_id = int(parts[5])
+        plan_id = int(parts[6])
+        plan = business.plan(plan_id, public=False)
+        target = (
+            None
+            if int(plan.get("category_id") or 0) == category_id
+            else category_id
+        )
+        business.assign_plan_category_admin(
+            actor,
+            plan_id=plan_id,
+            category_id=target,
+        )
+        category = business.plan_category(category_id, public=False)
+        plans = [
+            p for p in business.list_plans(public=False)
+            if not str(p.get("name") or "").startswith("__WHITELABEL_")
+        ]
+        rows = [
+            [InlineKeyboardButton(
+                (
+                    f"{'✅ ' if int(p.get('category_id') or 0) == category_id else '▫️ '}"
+                    f"{p['name']} · {int(p.get('traffic_gb') or 0)}GB"
+                )[:64],
+                callback_data=(
+                    f"userbot:settings:tx_plans:category:assign:"
+                    f"{category_id}:{int(p['id'])}"
+                ),
+            )]
+            for p in plans
+        ]
+        rows.append([InlineKeyboardButton(
+            "🔙بازگشت",
+            callback_data=f"userbot:settings:tx_plans:category:{category_id}",
+        )])
+        await _edit_or_send(
+            update,
+            f"📋 اتصال پلن‌ها به دسته «{category['title']}»",
+            InlineKeyboardMarkup(rows),
+        )
+        return True
+
+    if (
+        data.startswith("userbot:settings:tx_plans:category:")
+        and data.rsplit(":", 1)[1].isdigit()
+    ):
+        category_id = int(data.rsplit(":", 1)[1])
+        category = business.plan_category(category_id, public=False)
+        await _edit_or_send(
+            update,
+            _plan_category_detail_text(category),
+            InlineKeyboardMarkup(_plan_category_detail_rows(category)),
+        )
         return True
 
     if data == "userbot:settings:tx_plans:plan_sort_mode:menu":
@@ -2561,6 +2811,49 @@ async def handle_text(
             buttons.append({"text":str(flow["label"]),"url":url}); draft["buttons"]=buttons
             context.user_data.pop(FLOW_KEY,None)
             await update.effective_message.reply_text("✅ دکمه اضافه شد.",reply_markup=admin_main_keyboard())
+            return True
+        if kind=="plan_category_add":
+            fields=[part.strip() for part in text.split("|")]
+            if not fields or not fields[0]:
+                raise ValueError("category title")
+            priority=int(fields[1]) if len(fields)>=2 and fields[1] else 0
+            business.add_plan_category_admin(
+                actor,
+                title=fields[0],
+                priority=priority,
+            )
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text(
+                "✅ دسته پلن ساخته شد.",
+                reply_markup=admin_main_keyboard(),
+            )
+            await _settings_section(update,business,actor,"tx_plans")
+            return True
+        if kind=="plan_category_edit_title":
+            category_id=int(flow["category_id"])
+            business.update_plan_category_admin(
+                actor,
+                category_id=category_id,
+                title=text,
+            )
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text(
+                "✅ عنوان دسته ذخیره شد.",
+                reply_markup=admin_main_keyboard(),
+            )
+            return True
+        if kind=="plan_category_edit_priority":
+            category_id=int(flow["category_id"])
+            business.update_plan_category_admin(
+                actor,
+                category_id=category_id,
+                priority=int(text),
+            )
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text(
+                "✅ اولویت دسته ذخیره شد.",
+                reply_markup=admin_main_keyboard(),
+            )
             return True
         if kind=="setting_text":
             key = str(flow["key"])

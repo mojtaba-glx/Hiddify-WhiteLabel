@@ -1931,10 +1931,41 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             items = [
                 x for x in business.list_plans(public=False)
                 if not str(x.get("name") or "").startswith("__WHITELABEL_")
-            ]; text = "📦 پلن‌های فروش\n" + ("\n".join(f"• {x['name']} · {x['traffic_gb']}GB · {x['duration_days']} روز · {x['price']:,} {x['currency']}" for x in items) or "موردی نیست.")
-            await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ پلن", callback_data="biz:addplan")], [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")]])); return
+            ]
+            text = "📦 پلن‌های فروش\n" + (
+                "\n".join(
+                    f"• #{x['id']} · {x['name']} · {x['traffic_gb']}GB · "
+                    f"{x['duration_days']} روز · {x['price']:,} {x['currency']} · "
+                    f"دسته: {x.get('category_title') or 'بدون دسته'} · "
+                    f"اولویت: {int(x.get('priority') or 0)}"
+                    for x in items
+                )
+                or "موردی نیست."
+            )
+            await update.callback_query.edit_message_text(
+                text,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ پلن", callback_data="biz:addplan")],
+                    [InlineKeyboardButton(
+                        "🗂 مدیریت دسته‌بندی پلن‌ها",
+                        callback_data="userbot:settings:tx_plans:categories",
+                    )],
+                    [InlineKeyboardButton(
+                        "⚙️ چیدمان خرید UserBot",
+                        callback_data="userbot:settings:tx_plans",
+                    )],
+                    [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+                ]),
+            )
+            return
         if data == "biz:addplan":
-            context.user_data["biz_flow"] = {"kind": "plan"}; await update.callback_query.edit_message_text("نام | حجم گیگ | روز | قیمت | ارز", reply_markup=_menu(spec)); return
+            context.user_data["biz_flow"] = {"kind": "plan"}
+            await update.callback_query.edit_message_text(
+                "نام | حجم گیگ | روز | قیمت | ارز | Category ID اختیاری | اولویت اختیاری\n"
+                "مثال: 50 گیگ یک ماهه | 50 | 30 | 250000 | IRR | 2 | 10",
+                reply_markup=_menu(spec),
+            )
+            return
         if data == "biz:payments":
             items = business.list_methods(); text = "💳 روش‌های پرداخت\n" + ("\n".join(f"• {x['kind']} · {x['title']} · {x['currency']}" for x in items) or "موردی نیست.")
             await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ کارت/رمزارز", callback_data="biz:addpayment")], [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")]])); return
@@ -1944,7 +1975,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             items = business.list_orders_admin(actor); receipts = business.list_receipts_admin(actor)
             pending = business.list_fulfillment_pending_admin(actor)
             text = "🧾 سفارش‌ها\n" + ("\n".join(
-                f"#{x['id']} · {x['display_name']} · {x['plan_name']} · {x['operation']} · {x['status']}"
+                f"#{x['id']} · {x['display_name']} · {x['plan_name']} · "
+                f"{x.get('selected_server_label') or 'سرور پیش‌فرض'} · "
+                f"{x['operation']} · {x['status']}"
                 for x in items
             ) or "موردی نیست.")
             rows = [[InlineKeyboardButton(f"✅/❌ بررسی رسید #{x['id']} · {x['display_name']}", callback_data=f"biz:receipt:{x['id']}")] for x in receipts]
@@ -2897,8 +2930,27 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     server_id=int(fields[1]),
                     location=fields[2] if len(fields) == 3 else "",
                 )
-            elif kind == "plan" and len(fields) == 5:
-                business.add_plan(actor, name=fields[0], traffic_gb=int(fields[1]), duration_days=int(fields[2]), price=int(fields[3]), currency=fields[4])
+            elif kind == "plan" and 5 <= len(fields) <= 7:
+                category_id = (
+                    int(fields[5])
+                    if len(fields) >= 6 and fields[5] not in {"", "0", "-", "—"}
+                    else None
+                )
+                priority = (
+                    int(fields[6])
+                    if len(fields) >= 7 and fields[6] not in {"", "-", "—"}
+                    else 0
+                )
+                business.add_plan(
+                    actor,
+                    name=fields[0],
+                    traffic_gb=int(fields[1]),
+                    duration_days=int(fields[2]),
+                    price=int(fields[3]),
+                    currency=fields[4],
+                    category_id=category_id,
+                    priority=priority,
+                )
             elif kind == "payment" and len(fields) == 6:
                 business.add_payment_method(actor, kind=fields[0], title=fields[1], currency=fields[2], destination=fields[3], network=fields[4], instructions=fields[5])
             elif kind == "link" and len(fields) == 2:

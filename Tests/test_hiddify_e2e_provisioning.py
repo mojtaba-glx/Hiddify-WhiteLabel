@@ -143,6 +143,75 @@ def test_panel_failure_keeps_payment_and_pending_subscription_retryable(conn, fa
     assert panel.requests[0].idempotency_key == panel.requests[1].idempotency_key
 
 
+def test_customer_selected_server_overrides_default_requirement(
+    conn, factories, cipher
+) -> None:
+    owner, customer = 7001, 31
+    tenant = factories.tenant(owner_telegram_id=owner)
+    panel = E2EPanel()
+    service = TenantBusinessService(
+        conn,
+        tenant_id=int(tenant["id"]),
+        owner_telegram_id=owner,
+        secret_cipher=cipher,
+        panel_adapter=panel,
+    )
+    first = service.add_server(
+        owner, label="TR", panel_kind="hiddify", endpoint="https://tr.example"
+    )
+    second = service.add_server(
+        owner, label="DE", panel_kind="hiddify", endpoint="https://de.example"
+    )
+    service.set_panel_credential(
+        owner, server_id=int(first["id"]), secret="tr-key"
+    )
+    service.set_panel_credential(
+        owner, server_id=int(second["id"]), secret="de-key"
+    )
+    plan = service.add_plan(
+        owner,
+        name="Monthly Selected",
+        traffic_gb=30,
+        duration_days=30,
+        price=150000,
+        currency="IRR",
+    )
+    method = service.add_payment_method(
+        owner,
+        kind="card",
+        title="Selected Card",
+        currency="IRR",
+        destination="6037-1111-1111-1111",
+    )
+    service.register_customer(
+        customer, display_name="Buyer", username="buyer"
+    )
+    order = service.create_order(
+        customer,
+        int(plan["id"]),
+        server_id=int(second["id"]),
+    )
+    assert order["selected_server_label"] == "DE"
+    receipt = service.submit_receipt(
+        customer,
+        order_id=int(order["id"]),
+        method_id=int(method["id"]),
+        reference="selected-server-ref",
+    )
+    reviewed = service.review_receipt(
+        owner, int(receipt["id"]), approve=True
+    )
+
+    active = service.provision_pending_subscription(
+        owner, subscription_id=int(reviewed["subscription_id"])
+    )
+    assert active["status"] == "active"
+    assert panel.targets[-1].endpoint == "https://de.example"
+    assert panel.requests[-1].server_id == int(second["id"])
+    subscription = service.list_subscriptions(customer)[0]
+    assert int(subscription["server_id"]) == int(second["id"])
+
+
 def test_multiple_hiddify_servers_require_tenant_default(conn, factories, cipher) -> None:
     owner, customer = 7001, 31
     tenant = factories.tenant(owner_telegram_id=owner)

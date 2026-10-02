@@ -86,7 +86,9 @@ USERBOT_SETTING_DEFAULTS: dict[str, Any] = {
     "button_theme": "smart",
     "colored_buttons": True,
 
-    # Plan/server list layout.
+    # Plan/server list layout and catalog.
+    "plan_categories_enabled": True,
+    "plan_sort_by_priority": True,
     "plan_sort_mode": "id",
     "plan_columns": 1,
     "server_columns": 1,
@@ -290,6 +292,29 @@ class TenantBusinessService:
                 (self.tenant_id,),
             ).fetchall()
         ]
+    def list_purchase_servers(self) -> list[dict[str, Any]]:
+        """Servers that can safely receive a newly purchased subscription."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT s.* FROM tenant_servers s "
+            "JOIN tenant_panel_credentials c "
+            "ON c.server_id=s.id AND c.tenant_id=s.tenant_id "
+            "WHERE s.tenant_id=? AND s.status='active' "
+            "AND (COALESCE(s.provider_kind,s.panel_kind)='hiddify' OR "
+            "(COALESCE(s.provider_kind,s.panel_kind)='xui' "
+            "AND s.xui_flavor IN ('sanaei','alireza')) OR "
+            "COALESCE(s.provider_kind,s.panel_kind)='xnet') "
+            "ORDER BY s.priority DESC, s.id ASC",
+            (self.tenant_id,),
+        ).fetchall()
+        return [self._server_dict(row) for row in rows]
+
+    def _purchase_server(self, server_id: int) -> dict[str, Any]:
+        target_id = int(server_id)
+        for server in self.list_purchase_servers():
+            if int(server["id"]) == target_id:
+                return server
+        raise TenantBusinessError("purchase server is unavailable")
+
     def update_server(
         self,
         actor_id: int,
@@ -487,9 +512,19 @@ class TenantBusinessService:
             "WHERE tenant_id=? AND server_id=? AND external_ref IS NOT NULL",
             (self.tenant_id, int(server_id)),
         ).fetchone()
+        pending_orders = self.conn.execute(
+            "SELECT COUNT(*) AS total FROM tenant_orders "
+            "WHERE tenant_id=? AND selected_server_id=? "
+            "AND status IN ('pending_payment','payment_review','paid')",
+            (self.tenant_id, int(server_id)),
+        ).fetchone()
         if int(primary["total"] if primary else 0) or int(mapped["total"] if mapped else 0):
             raise TenantBusinessError(
                 "server still has subscription mappings; move or remove them first"
+            )
+        if int(pending_orders["total"] if pending_orders else 0):
+            raise TenantBusinessError(
+                "server is selected by unfinished purchase orders"
             )
         with transaction(self.conn):
             self.conn.execute(
@@ -573,10 +608,27 @@ class TenantBusinessService:
         if len(rows) == 1:
             return rows[0]
         raise TenantBusinessError("default provisioning server is required")
-    def provision_pending_subscription(self, actor_id: int, *, subscription_id: int) -> dict[str, Any]:
-        """Provision through the tenant's deterministic sales server selection."""
+    def provision_pending_subscription(
+        self, actor_id: int, *, subscription_id: int
+    ) -> dict[str, Any]:
+        """Provision to the server selected at purchase, with legacy fallback."""
         self._admin(actor_id)
-        server = self._provisioning_server()
+        row = self.conn.execute(
+            "SELECT s.order_id, o.selected_server_id "
+            "FROM tenant_subscriptions s "
+            "LEFT JOIN tenant_orders o "
+            "ON o.id=s.order_id AND o.tenant_id=s.tenant_id "
+            "WHERE s.id=? AND s.tenant_id=? "
+            "AND s.status='pending_provisioning'",
+            (int(subscription_id), self.tenant_id),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("subscription is not awaiting provisioning")
+        if row["selected_server_id"] is not None:
+            server = self._purchase_server(int(row["selected_server_id"]))
+        else:
+            # Backward compatibility for old orders and free-trial orders.
+            server = self._provisioning_server()
         return self.activate_subscription(
             actor_id,
             subscription_id=int(subscription_id),
@@ -2693,35 +2745,235 @@ class TenantBusinessService:
         result.update({"order_kind": "trial", "order_id": order_id})
         return result
 
-    def add_plan(self, actor_id: int, *, name: str, traffic_gb: int, duration_days: int, price: int, currency: str = "IRR") -> dict[str, Any]:
+    def list_plan_categories(
+        self, *, public: bool = True
+    ) -> list[dict[str, Any]]:
+        query = (
+            "SELECT c.*, "
+            "(SELECT COUNT(*) FROM tenant_sale_plans p "
+            " WHERE p.tenant_id=c.tenant_id AND p.category_id=c.id "
+            " AND p.status!='archived') AS plan_count "
+            "FROM tenant_plan_categories c WHERE c.tenant_id=?"
+        )
+        args: list[Any] = [self.tenant_id]
+        if public:
+            query += " AND c.status='active'"
+        query += " ORDER BY c.priority ASC, c.id ASC"
+        return [
+            dict(row)
+            for row in self.conn.execute(query, tuple(args)).fetchall()
+        ]
+
+    def plan_category(
+        self, category_id: int, *, public: bool = True
+    ) -> dict[str, Any]:
+        query = (
+            "SELECT c.*, "
+            "(SELECT COUNT(*) FROM tenant_sale_plans p "
+            " WHERE p.tenant_id=c.tenant_id AND p.category_id=c.id "
+            " AND p.status!='archived') AS plan_count "
+            "FROM tenant_plan_categories c "
+            "WHERE c.id=? AND c.tenant_id=?"
+        )
+        args: list[Any] = [int(category_id), self.tenant_id]
+        if public:
+            query += " AND status='active'"
+        row = self.conn.execute(query, tuple(args)).fetchone()
+        if row is None:
+            raise TenantBusinessError("plan category not found")
+        return dict(row)
+
+    def add_plan_category_admin(
+        self,
+        actor_id: int,
+        *,
+        title: str,
+        priority: int = 0,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        now = iso_utc(utcnow())
+        clean_priority = int(priority)
+        with transaction(self.conn):
+            cursor = self.conn.execute(
+                "INSERT INTO tenant_plan_categories "
+                "(tenant_id,title,priority,status,created_at,updated_at) "
+                "VALUES (?,?,?,'active',?,?)",
+                (
+                    self.tenant_id,
+                    _text(title, 80),
+                    clean_priority,
+                    now,
+                    now,
+                ),
+            )
+        return self.plan_category(int(cursor.lastrowid or 0), public=False)
+
+    def update_plan_category_admin(
+        self,
+        actor_id: int,
+        *,
+        category_id: int,
+        title: str | None = None,
+        priority: int | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        current = self.plan_category(int(category_id), public=False)
+        updates: dict[str, Any] = {}
+        if title is not None:
+            updates["title"] = _text(title, 80)
+        if priority is not None:
+            updates["priority"] = int(priority)
+        if status is not None:
+            clean_status = str(status).strip().lower()
+            if clean_status not in ("active", "disabled"):
+                raise ValueError("invalid plan category status")
+            updates["status"] = clean_status
+        if not updates:
+            return current
+        updates["updated_at"] = iso_utc(utcnow())
+        assignments = ", ".join(f"{key}=?" for key in updates)
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                f"UPDATE tenant_plan_categories SET {assignments} "
+                "WHERE id=? AND tenant_id=?",
+                (*updates.values(), int(category_id), self.tenant_id),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("plan category not found")
+        return self.plan_category(int(category_id), public=False)
+
+    def assign_plan_category_admin(
+        self,
+        actor_id: int,
+        *,
+        plan_id: int,
+        category_id: int | None,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        self.plan(int(plan_id), public=False)
+        clean_category: int | None = None
+        if category_id is not None:
+            clean_category = int(category_id)
+            self.plan_category(clean_category, public=False)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_sale_plans SET category_id=?, updated_at=? "
+                "WHERE id=? AND tenant_id=?",
+                (clean_category, now, int(plan_id), self.tenant_id),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("plan not found")
+        return self.plan(int(plan_id), public=False)
+
+    def set_plan_priority_admin(
+        self, actor_id: int, *, plan_id: int, priority: int
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        self.plan(int(plan_id), public=False)
+        with transaction(self.conn):
+            self.conn.execute(
+                "UPDATE tenant_sale_plans SET priority=?, updated_at=? "
+                "WHERE id=? AND tenant_id=?",
+                (
+                    int(priority),
+                    iso_utc(utcnow()),
+                    int(plan_id),
+                    self.tenant_id,
+                ),
+            )
+        return self.plan(int(plan_id), public=False)
+
+    def add_plan(
+        self,
+        actor_id: int,
+        *,
+        name: str,
+        traffic_gb: int,
+        duration_days: int,
+        price: int,
+        currency: str = "IRR",
+        category_id: int | None = None,
+        priority: int = 0,
+    ) -> dict[str, Any]:
         self._admin(actor_id)
         if min(int(traffic_gb), int(duration_days)) <= 0 or int(price) < 0:
             raise ValueError("invalid plan values")
+        clean_category: int | None = None
+        if category_id is not None:
+            clean_category = int(category_id)
+            self.plan_category(clean_category, public=False)
         now = iso_utc(utcnow())
         with transaction(self.conn):
             cursor = self.conn.execute(
-                "INSERT INTO tenant_sale_plans (tenant_id, name, traffic_gb, duration_days, price, currency, status, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)",
-                (self.tenant_id, _text(name, 80), int(traffic_gb), int(duration_days), int(price), _text(currency, 8).upper(), now, now),
+                "INSERT INTO tenant_sale_plans "
+                "(tenant_id,name,traffic_gb,duration_days,price,currency,status,"
+                "category_id,priority,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,'active',?,?,?,?)",
+                (
+                    self.tenant_id,
+                    _text(name, 80),
+                    int(traffic_gb),
+                    int(duration_days),
+                    int(price),
+                    _text(currency, 8).upper(),
+                    clean_category,
+                    int(priority),
+                    now,
+                    now,
+                ),
             )
         return self.plan(int(cursor.lastrowid or 0), public=False)
 
     def plan(self, plan_id: int, *, public: bool = True) -> dict[str, Any]:
-        query = "SELECT * FROM tenant_sale_plans WHERE id = ? AND tenant_id = ?"
+        query = (
+            "SELECT p.*, c.title AS category_title, "
+            "c.priority AS category_priority, c.status AS category_status "
+            "FROM tenant_sale_plans p "
+            "LEFT JOIN tenant_plan_categories c "
+            "ON c.id=p.category_id AND c.tenant_id=p.tenant_id "
+            "WHERE p.id=? AND p.tenant_id=?"
+        )
         args: list[Any] = [int(plan_id), self.tenant_id]
         if public:
-            query += " AND status = 'active'"
+            query += (
+                " AND p.status='active' "
+                "AND (p.category_id IS NULL OR c.status='active')"
+            )
         row = self.conn.execute(query, tuple(args)).fetchone()
         if row is None:
             raise TenantBusinessError("plan not found")
         return dict(row)
 
-    def list_plans(self, *, public: bool = True) -> list[dict[str, Any]]:
-        query = "SELECT * FROM tenant_sale_plans WHERE tenant_id = ?"
+    def list_plans(
+        self,
+        *,
+        public: bool = True,
+        category_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        query = (
+            "SELECT p.*, c.title AS category_title, "
+            "c.priority AS category_priority, c.status AS category_status "
+            "FROM tenant_sale_plans p "
+            "LEFT JOIN tenant_plan_categories c "
+            "ON c.id=p.category_id AND c.tenant_id=p.tenant_id "
+            "WHERE p.tenant_id=?"
+        )
+        args: list[Any] = [self.tenant_id]
         if public:
-            query += " AND status = 'active'"
-        query += " ORDER BY price, id"
-        return [dict(row) for row in self.conn.execute(query, (self.tenant_id,)).fetchall()]
+            query += (
+                " AND p.status='active' "
+                "AND (p.category_id IS NULL OR c.status='active')"
+            )
+        if category_id is not None:
+            query += " AND p.category_id=?"
+            args.append(int(category_id))
+        query += " ORDER BY p.priority ASC, p.price ASC, p.id ASC"
+        return [
+            dict(row)
+            for row in self.conn.execute(query, tuple(args)).fetchall()
+        ]
 
     def add_payment_method(self, actor_id: int, *, kind: str, title: str, currency: str, destination: str, network: str = "", instructions: str = "") -> dict[str, Any]:
         self._admin(actor_id)
@@ -2752,21 +3004,33 @@ class TenantBusinessService:
             query += " AND currency = ?"; args.append(str(currency).upper())
         return [dict(row) for row in self.conn.execute(query + " ORDER BY id", tuple(args)).fetchall()]
 
-    def create_order(self, actor_id: int, plan_id: int) -> dict[str, Any]:
+    def create_order(
+        self,
+        actor_id: int,
+        plan_id: int,
+        *,
+        server_id: int | None = None,
+    ) -> dict[str, Any]:
         customer = self._customer(actor_id)
         plan = self.plan(plan_id, public=True)
+        selected_server_id: int | None = None
+        if server_id is not None:
+            selected = self._purchase_server(int(server_id))
+            selected_server_id = int(selected["id"])
         now = iso_utc(utcnow())
         with transaction(self.conn):
             cursor = self.conn.execute(
                 "INSERT INTO tenant_orders "
-                "(tenant_id, customer_id, plan_id, amount, currency, status, "
-                "created_at, updated_at, order_kind, original_amount, "
-                "discount_amount, wallet_amount) "
-                "VALUES (?, ?, ?, ?, ?, 'pending_payment', ?, ?, 'purchase', ?, 0, 0)",
+                "(tenant_id, customer_id, plan_id, selected_server_id, "
+                "amount, currency, status, created_at, updated_at, order_kind, "
+                "original_amount, discount_amount, wallet_amount) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'pending_payment', ?, ?, "
+                "'purchase', ?, 0, 0)",
                 (
                     self.tenant_id,
                     int(customer["id"]),
                     int(plan["id"]),
+                    selected_server_id,
                     int(plan["price"]),
                     str(plan["currency"]),
                     now,
@@ -2775,6 +3039,33 @@ class TenantBusinessService:
                 ),
             )
         return self.order(actor_id, int(cursor.lastrowid or 0))
+
+    def change_purchase_order_server(
+        self,
+        actor_id: int,
+        *,
+        order_id: int,
+        server_id: int,
+    ) -> dict[str, Any]:
+        customer = self._customer(actor_id)
+        selected = self._purchase_server(int(server_id))
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_orders SET selected_server_id=?, updated_at=? "
+                "WHERE id=? AND tenant_id=? AND customer_id=? "
+                "AND order_kind='purchase' AND status='pending_payment'",
+                (
+                    int(selected["id"]),
+                    now,
+                    int(order_id),
+                    self.tenant_id,
+                    int(customer["id"]),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("purchase order server cannot be changed")
+        return self.order(actor_id, int(order_id))
 
     def create_renewal_order(
         self, actor_id: int, *, subscription_id: int, plan_id: int
@@ -2831,9 +3122,16 @@ class TenantBusinessService:
         customer = self._customer(actor_id)
         row = self.conn.execute(
             "SELECT o.*, p.name AS plan_name, p.traffic_gb, p.duration_days, "
+            "p.category_id, c.title AS category_title, "
+            "srv.label AS selected_server_label, "
             "o.order_kind AS operation, "
             "ro.subscription_id AS renewal_subscription_id "
-            "FROM tenant_orders o JOIN tenant_sale_plans p ON p.id=o.plan_id "
+            "FROM tenant_orders o "
+            "JOIN tenant_sale_plans p ON p.id=o.plan_id "
+            "LEFT JOIN tenant_plan_categories c "
+            "ON c.id=p.category_id AND c.tenant_id=o.tenant_id "
+            "LEFT JOIN tenant_servers srv "
+            "ON srv.id=o.selected_server_id AND srv.tenant_id=o.tenant_id "
             "LEFT JOIN tenant_renewal_orders ro ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
             "WHERE o.id=? AND o.tenant_id=? AND o.customer_id=?",
             (int(order_id), self.tenant_id, int(customer["id"])),
@@ -2845,11 +3143,16 @@ class TenantBusinessService:
         self._admin(actor_id)
         rows = self.conn.execute(
             "SELECT o.*, c.display_name, p.name AS plan_name, "
+            "pc.title AS category_title, srv.label AS selected_server_label, "
             "o.order_kind AS operation, "
             "ro.subscription_id AS renewal_subscription_id "
             "FROM tenant_orders o "
             "JOIN tenant_customers c ON c.id=o.customer_id "
             "JOIN tenant_sale_plans p ON p.id=o.plan_id "
+            "LEFT JOIN tenant_plan_categories pc "
+            "ON pc.id=p.category_id AND pc.tenant_id=o.tenant_id "
+            "LEFT JOIN tenant_servers srv "
+            "ON srv.id=o.selected_server_id AND srv.tenant_id=o.tenant_id "
             "LEFT JOIN tenant_renewal_orders ro ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
             "WHERE o.tenant_id=? ORDER BY o.id DESC",
             (self.tenant_id,),
@@ -5144,10 +5447,15 @@ class TenantBusinessService:
         row = self.conn.execute(
             "SELECT o.*, c.display_name, c.username, c.telegram_user_id, "
             "p.name AS plan_name, p.traffic_gb, p.duration_days, "
+            "pc.title AS category_title, srv.label AS selected_server_label, "
             "o.order_kind AS operation, ro.subscription_id AS renewal_subscription_id "
             "FROM tenant_orders o "
             "JOIN tenant_customers c ON c.id=o.customer_id AND c.tenant_id=o.tenant_id "
             "JOIN tenant_sale_plans p ON p.id=o.plan_id AND p.tenant_id=o.tenant_id "
+            "LEFT JOIN tenant_plan_categories pc "
+            "ON pc.id=p.category_id AND pc.tenant_id=o.tenant_id "
+            "LEFT JOIN tenant_servers srv "
+            "ON srv.id=o.selected_server_id AND srv.tenant_id=o.tenant_id "
             "LEFT JOIN tenant_renewal_orders ro "
             "ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
             "WHERE o.tenant_id=? AND o.id=?",
@@ -5174,10 +5482,15 @@ class TenantBusinessService:
             args.extend([numeric, numeric, numeric])
         rows = self.conn.execute(
             "SELECT o.*, c.display_name, c.username, c.telegram_user_id, "
-            "p.name AS plan_name, o.order_kind AS operation "
+            "p.name AS plan_name, pc.title AS category_title, "
+            "srv.label AS selected_server_label, o.order_kind AS operation "
             "FROM tenant_orders o "
             "JOIN tenant_customers c ON c.id=o.customer_id AND c.tenant_id=o.tenant_id "
             "JOIN tenant_sale_plans p ON p.id=o.plan_id AND p.tenant_id=o.tenant_id "
+            "LEFT JOIN tenant_plan_categories pc "
+            "ON pc.id=p.category_id AND pc.tenant_id=o.tenant_id "
+            "LEFT JOIN tenant_servers srv "
+            "ON srv.id=o.selected_server_id AND srv.tenant_id=o.tenant_id "
             "WHERE o.tenant_id=? AND ("
             "c.display_name LIKE ? COLLATE NOCASE OR "
             "COALESCE(c.username,'') LIKE ? COLLATE NOCASE OR "
