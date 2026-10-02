@@ -8,8 +8,14 @@ from __future__ import annotations
 
 import random
 import sqlite3
+from contextvars import ContextVar
+from typing import Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton as TelegramInlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
@@ -154,39 +160,187 @@ def _checkout_markup(
     return InlineKeyboardMarkup(rows)
 
 
+_BUTTON_SETTINGS: ContextVar[dict[str, Any]] = ContextVar(
+    "tenant_userbot_button_settings", default={}
+)
+
+BUTTON_THEME_META = {
+    "smart": {
+        "title": "✨ هوشمند",
+        "description": "خرید و تایید سبز، هشدار قرمز و مسیرهای اصلی آبی",
+    },
+    "shop": {
+        "title": "🛒 فروشگاهی",
+        "description": "اکشن‌های خرید، کیف پول، هدیه و پرداخت پررنگ‌تر",
+    },
+    "pro": {
+        "title": "💼 حرفه‌ای",
+        "description": "رنگ محدود به اکشن‌های مهم و مسیرهای مدیریتی",
+    },
+    "minimal": {
+        "title": "🕊 مینیمال",
+        "description": "فقط تاییدهای مهم و عملیات خطرناک رنگ می‌گیرند",
+    },
+}
+
+_DANGER_TOKENS = (
+    "❌", "🗑", "🚫", "لغو", "حذف", "بستن", "غیرفعال",
+    "disable", "delete", "remove", "reject", "cancel", "close",
+)
+_SUCCESS_TOKENS = (
+    "✅", "➕", "💳", "💰", "🎁", "🔥", "تایید", "تأیید",
+    "پرداخت", "خرید", "تمدید", "افزودن", "ارسال", "ساخت", "فعال",
+    "approve", "confirm", "pay", "buy", "renew", "add", "send", "enable",
+)
+_STRONG_SUCCESS_TOKENS = (
+    "✅", "تایید", "تأیید", "پرداخت کردم", "تایید و پرداخت",
+    "ارسال", "افزودن", "approve", "confirm", "send", "add",
+)
+_SHOP_TOKENS = (
+    "💳", "💰", "🎁", "🔥", "🏷", "خرید", "تمدید", "پرداخت",
+    "کیف پول", "شارژ", "کارت", "کوپن", "هدیه", "پلن", "بسته",
+    "قیمت", "wallet", "coupon", "gift", "plan", "price",
+)
+_PRIMARY_TOKENS = (
+    "🔙", "↩️", "➡️", "⬅️", "◀️", "▶️", "📊", "📈", "📋",
+    "📁", "⚙️", "🌐", "🔗", "🔄", "بازگشت", "وضعیت", "لیست",
+    "تنظیم", "راهنما", "جستجو", "noop", "back", "status", "list",
+    "settings", "menu", "guide", "search",
+)
+
+
+def _normalize_button_theme(value: Any) -> str:
+    theme = str(value or "smart").strip().lower()
+    return theme if theme in BUTTON_THEME_META else "smart"
+
+
+def _contains_any(haystack: str, tokens: tuple[str, ...]) -> bool:
+    return any(token in haystack for token in tokens)
+
+
+def _infer_button_style(
+    text: Any,
+    callback_data: Any = None,
+    *,
+    theme: str = "smart",
+) -> str | None:
+    haystack = f"{str(text or '')} {str(callback_data or '')}".lower()
+    selected = _normalize_button_theme(theme)
+    if _contains_any(haystack, _DANGER_TOKENS):
+        return "danger"
+    if selected == "minimal":
+        return (
+            "success"
+            if _contains_any(haystack, _STRONG_SUCCESS_TOKENS)
+            else None
+        )
+    if selected == "pro":
+        if _contains_any(haystack, _STRONG_SUCCESS_TOKENS):
+            return "success"
+        return "primary" if _contains_any(haystack, _PRIMARY_TOKENS) else None
+    if selected == "shop":
+        if (
+            _contains_any(haystack, _SUCCESS_TOKENS)
+            or _contains_any(haystack, _SHOP_TOKENS)
+        ):
+            return "success"
+        return "primary"
+    if _contains_any(haystack, _SUCCESS_TOKENS):
+        return "success"
+    if _contains_any(haystack, _PRIMARY_TOKENS):
+        return "primary"
+    return "primary"
+
+
+def _set_button_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
+    clean = dict(settings or {})
+    _BUTTON_SETTINGS.set(clean)
+    return clean
+
+
+def InlineKeyboardButton(
+    text: str,
+    *args: Any,
+    settings: dict[str, Any] | None = None,
+    style: str | None = None,
+    **kwargs: Any,
+) -> TelegramInlineKeyboardButton:
+    """Tenant-aware button constructor used by every UserBot inline keyboard."""
+    current = dict(settings) if settings is not None else dict(_BUTTON_SETTINGS.get())
+    api_kwargs = dict(kwargs.pop("api_kwargs", None) or {})
+    if bool(current.get("colored_buttons", True)):
+        selected_style = style or _infer_button_style(
+            text,
+            kwargs.get("callback_data"),
+            theme=str(current.get("button_theme") or "smart"),
+        )
+        if selected_style and "style" not in api_kwargs:
+            api_kwargs["style"] = selected_style
+    if api_kwargs:
+        kwargs["api_kwargs"] = api_kwargs
+    return TelegramInlineKeyboardButton(text, *args, **kwargs)
+
+
 def _button(
     text: str,
     *,
     callback_data: str | None = None,
     url: str | None = None,
     settings: dict | None = None,
-) -> InlineKeyboardButton:
-    settings = settings or {}
-    if not bool(settings.get("colored_buttons", True)):
-        return InlineKeyboardButton(text, callback_data=callback_data, url=url)
-    theme = str(settings.get("button_theme") or "smart").strip().lower()
-    haystack = f"{text} {callback_data or ''}".lower()
-    danger = any(token in haystack for token in ("❌", "🗑", "🚫", "لغو", "حذف"))
-    success = any(token in haystack for token in ("✅", "💳", "💰", "🎁", "خرید", "تمدید", "پرداخت"))
-    primary = any(token in haystack for token in ("📊", "📋", "⚙️", "🔗", "راهنما", "وضعیت", "لیست"))
-    style = None
-    if danger:
-        style = "danger"
-    elif theme == "minimal":
-        style = "success" if success and ("✅" in text or "پرداخت" in text) else None
-    elif theme == "pro":
-        style = "success" if success else ("primary" if primary else None)
-    elif theme == "shop":
-        style = "success" if success else "primary"
-    else:
-        style = "success" if success else ("primary" if primary else "primary")
-    api_kwargs = {"style": style} if style else None
+) -> TelegramInlineKeyboardButton:
     return InlineKeyboardButton(
         text,
         callback_data=callback_data,
         url=url,
-        api_kwargs=api_kwargs,
+        settings=settings,
     )
+
+
+def _column_rows(
+    buttons: list[TelegramInlineKeyboardButton],
+    columns: int,
+) -> list[list[TelegramInlineKeyboardButton]]:
+    cols = max(1, min(int(columns or 1), 3))
+    return [buttons[i:i + cols] for i in range(0, len(buttons), cols)]
+
+
+def _ordered_indexed(
+    items: list[Any],
+    *,
+    shuffle_enabled: bool,
+) -> list[tuple[int, Any]]:
+    indexed = list(enumerate(items))
+    if shuffle_enabled and len(indexed) > 1:
+        random.shuffle(indexed)
+    return indexed
+
+
+_CONFIG_URI_PREFIXES = (
+    "vless://",
+    "vmess://",
+    "trojan://",
+    "hysteria2://",
+    "hy2://",
+    "ss://",
+    "ssr://",
+    "tuic://",
+    "wireguard://",
+)
+
+
+def _extract_config_items(content: str) -> list[str]:
+    raw = str(content or "").strip()
+    if not raw:
+        return []
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    uri_lines = [
+        line for line in lines
+        if line.lower().startswith(_CONFIG_URI_PREFIXES)
+    ]
+    # Preserve opaque/base64/mixed panel output as one atomic config.
+    if len(uri_lines) >= 2 and len(uri_lines) == len(lines):
+        return uri_lines
+    return [raw]
 
 
 def _menu(spec: RuntimeBotSpec, business) -> InlineKeyboardMarkup:
