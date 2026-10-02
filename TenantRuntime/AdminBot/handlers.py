@@ -11,9 +11,7 @@ from html import escape
 from typing import Any
 
 from telegram import (
-    InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
     ReplyKeyboardMarkup,
     Update,
 )
@@ -31,6 +29,11 @@ from telegram.ext import (
 from Gateway.catalog import RuntimeBotSpec
 from Shared.timeutils import parse_utc, utcnow
 from TenantRuntime.business import TenantBusinessError
+from TenantRuntime.button_styles import (
+    inline_button as InlineKeyboardButton,
+    keyboard_button as KeyboardButton,
+    set_button_settings,
+)
 from TenantRuntime.common import _deny_update, _services, runtime_access_gate, runtime_error
 
 def _money_lines(items: list[dict]) -> list[str]:
@@ -562,7 +565,8 @@ def _menu(spec: RuntimeBotSpec) -> InlineKeyboardMarkup:
 
 
 async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    spec, _, state_store, _ = _services(context)
+    spec, _, state_store, business = _services(context)
+    set_button_settings(business.runtime_userbot_settings())
     if spec.role != "admin":
         raise RuntimeError("AdminBot handler registered for non-admin role")
     user_id = int(update.effective_user.id) if update.effective_user else 0
@@ -592,6 +596,7 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     spec, policy, state_store, business = _services(context)
+    set_button_settings(business.runtime_userbot_settings())
     if spec.role != "admin":
         raise RuntimeError("AdminBot handler registered for non-admin role")
     user_id = int(update.effective_user.id) if update.effective_user else 0
@@ -640,6 +645,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await show_status(update, context)
         return
     spec, _, _, business = _services(context)
+    set_button_settings(business.runtime_userbot_settings())
     if spec.role != "admin":
         raise RuntimeError("AdminBot callback registered for non-admin role")
     actor = int(update.effective_user.id) if update.effective_user else 0
@@ -2224,6 +2230,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     spec, _, _, business = _services(context)
+    set_button_settings(business.runtime_userbot_settings())
     if spec.role != "admin":
         raise RuntimeError("AdminBot text handler registered for non-admin role")
     actor = int(update.effective_user.id) if update.effective_user else 0
@@ -2974,6 +2981,7 @@ async def userbot_admin_media(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     spec, _, _, business = _services(context)
+    set_button_settings(business.runtime_userbot_settings())
     if spec.role != "admin":
         raise RuntimeError("AdminBot media handler registered for non-admin role")
     actor = int(update.effective_user.id) if update.effective_user else 0
@@ -2996,6 +3004,7 @@ async def userbot_admin_document(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     spec, _, _, business = _services(context)
+    set_button_settings(business.runtime_userbot_settings())
     if spec.role != "admin":
         raise RuntimeError("AdminBot media handler registered for non-admin role")
     actor = int(update.effective_user.id) if update.effective_user else 0
