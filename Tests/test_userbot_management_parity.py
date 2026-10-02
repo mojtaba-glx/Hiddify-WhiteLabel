@@ -86,6 +86,13 @@ def test_tenant_userbot_settings_roundtrip(conn, factories, cipher) -> None:
     assert defaults["button_theme"] == "smart"
     assert defaults["reminder_days"] == 3
     assert defaults["show_renew_in_main_menu"] is True
+    assert defaults["renew_policy"] == "advanced"
+    assert defaults["renew_volume_mode"] == "reset"
+    assert defaults["renew_time_mode"] == "reset"
+    assert defaults["renew_max_days"] == 3
+    assert defaults["renew_max_remaining_gb"] == 3
+    assert defaults["renew_unlimited_volume"] is False
+    assert defaults["renew_unlimited_time"] is False
     assert defaults["shuffle_server_layout"] is True
     assert defaults["shuffle_config_layout"] is True
     assert defaults["enable_discount_code"] is True
@@ -466,6 +473,53 @@ def test_admin_theme_screen_has_all_four_themes() -> None:
         "رنگی بودن دکمه‌ها",
     ):
         assert label in source
+
+
+def test_admin_renewal_policy_controls_match_reference_structure() -> None:
+    source = open(
+        "TenantRuntime/AdminBot/userbot_management.py",
+        encoding="utf-8",
+    ).read()
+    for label in (
+        "تنظیم شیوه تمدید",
+        "پیشفرض",
+        "پیشرفته",
+        "منصفانه",
+        "حجم افزایشی",
+        "حجم ریست",
+        "زمان افزایشی",
+        "زمان ریست",
+        "حداکثر زمان مجاز برای تمدید",
+        "حداکثر حجم باقی‌مانده",
+        "حجم نامحدود∞",
+        "زمان نامحدود∞",
+    ):
+        assert label in source
+    for callback in (
+        "userbot:settings:buy_renew:renew_mode_info",
+        "userbot:settings:buy_renew:renew_policy:default",
+        "userbot:settings:buy_renew:renew_policy:advanced",
+        "userbot:settings:buy_renew:renew_policy:fair",
+        "userbot:settings:buy_renew:renew_rollover:volume:add",
+        "userbot:settings:buy_renew:renew_rollover:volume:reset",
+        "userbot:settings:buy_renew:renew_rollover:time:add",
+        "userbot:settings:buy_renew:renew_rollover:time:reset",
+        "userbot:settings:buy_renew:renew_limit:days",
+        "userbot:settings:buy_renew:renew_limit:usage",
+    ):
+        assert callback in source
+
+
+def test_userbot_renewal_policy_is_enforced_in_all_entry_points() -> None:
+    source = open(
+        "TenantRuntime/UserBot/handlers.py",
+        encoding="utf-8",
+    ).read()
+    assert "def _renewable_subscriptions" in source
+    assert source.count("renewal_eligibility(") >= 3
+    assert "renewal_not_allowed_text()" in source
+    assert "renew_unlimited_volume_from_gb" in source
+    assert "renew_unlimited_time_from_days" in source
 
 
 def test_purchase_catalog_category_and_selected_server_are_tenant_scoped(
