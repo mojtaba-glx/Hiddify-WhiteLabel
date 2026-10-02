@@ -6,6 +6,7 @@ import json
 import sqlite3
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +15,7 @@ HELPER = ROOT / "scripts" / "update_snapshot.py"
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["python3", str(HELPER), *args],
+        [sys.executable, str(HELPER), *args],
         capture_output=True,
         text=True,
         timeout=15,
