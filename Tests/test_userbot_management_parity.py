@@ -123,8 +123,8 @@ def test_user_menu_reacts_to_admin_settings(conn, factories, cipher) -> None:
     labels = sum(_labels(user_handlers._menu(spec, service)), [])
     assert "💳خرید اشتراک" not in labels
     assert "🔥تست رایگان" not in labels
-    assert "🤝 دعوت دوستان" not in labels
-    assert "🎁 دریافت هدیه" not in labels
+    assert "💌دعوت دوستان" not in labels
+    assert "🎁دریافت هدیه" not in labels
 
     service.set_userbot_setting_admin(7001, key="enable_buy", value=True)
     service.set_userbot_setting_admin(
@@ -136,8 +136,74 @@ def test_user_menu_reacts_to_admin_settings(conn, factories, cipher) -> None:
     labels = sum(_labels(user_handlers._menu(spec, service)), [])
     assert "💳خرید اشتراک" in labels
     assert "🔥تست رایگان" in labels
-    assert "🤝 دعوت دوستان" in labels
-    assert "🎁 دریافت هدیه" in labels
+    assert "💌دعوت دوستان" in labels
+    assert "🎁دریافت هدیه" in labels
+
+
+def test_userbot_customer_main_menu_matches_sellbot_navigation(
+    conn, factories, cipher
+) -> None:
+    _tenant, service = _service(conn, factories, cipher)
+    spec = SimpleNamespace(tenant_name="Speed Test")
+    service.update_growth_settings(
+        7001, referral_enabled=True, trial_enabled=True
+    )
+
+    labels = _labels(user_handlers._menu(spec, service))
+    assert labels == [
+        ["📊وضعیت اشتراک"],
+        ["♾تمدید اشتراک", "💳خرید اشتراک"],
+        ["🔗اتصال اشتراک"],
+        ["🔥تست رایگان", "💰کیف پول"],
+        ["📩پشتیبانی", "📚راهنما", "❗️سوالات متداول"],
+        ["💌دعوت دوستان"],
+        ["🎁دریافت هدیه"],
+    ]
+
+
+def test_userbot_main_navigation_callbacks_are_real() -> None:
+    runtime = open(
+        "TenantRuntime/UserBot/handlers.py",
+        encoding="utf-8",
+    ).read()
+    for callback in (
+        'data == "runtime:status"',
+        'data == "shop:renewmenu"',
+        'data == "shop:buy"',
+        'data == "shop:connect"',
+        'data == "shop:trial"',
+        'data == "shop:wallet"',
+        'data == "shop:tickets"',
+        'data == "shop:guide"',
+        'data == "shop:faq"',
+        'data == "shop:referral"',
+        'data == "shop:gift"',
+    ):
+        assert callback in runtime
+
+
+def test_status_screen_keeps_account_order_and_subscription_navigation() -> None:
+    runtime = open(
+        "TenantRuntime/UserBot/handlers.py",
+        encoding="utf-8",
+    ).read()
+    for callback in (
+        'callback_data="shop:account"',
+        'callback_data="shop:orders"',
+        'callback_data="shop:subs"',
+        'callback_data="shop:connect"',
+    ):
+        assert callback in runtime
+
+
+def test_faq_navigation_is_always_available(
+    conn, factories, cipher
+) -> None:
+    _tenant, service = _service(conn, factories, cipher)
+    spec = SimpleNamespace(tenant_name="Speed Test")
+    service.set_userbot_setting_admin(7001, key="faq_text", value="")
+    labels = sum(_labels(user_handlers._menu(spec, service)), [])
+    assert "❗️سوالات متداول" in labels
 
 
 def test_renew_main_menu_setting_is_functional(
