@@ -8,7 +8,7 @@ import pytest
 
 from Shared.timeutils import iso_utc, parse_utc, utcnow
 from TenantRuntime.business import TenantBusinessError, TenantBusinessService
-from TenantRuntime.panels import PanelUserResult, RenewRequest
+from TenantRuntime.panels import PanelUserResult, RenewRequest, UsageResult
 
 
 GIB = 1024 ** 3
@@ -29,6 +29,14 @@ class RenewalPanel:
             expires_at=request.expires_at,
             last_online=iso_utc(utcnow()),
             subscription_url=f"{target.endpoint}/sub/{external_ref}",
+        )
+
+    def usage(self, *, target, secret: str, external_ref: str):
+        assert secret
+        return UsageResult(
+            usage_bytes=10 * GIB,
+            active=True,
+            last_online=iso_utc(utcnow()),
         )
 
 
