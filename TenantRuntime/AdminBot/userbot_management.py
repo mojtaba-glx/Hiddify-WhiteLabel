@@ -497,6 +497,8 @@ async def _send_order_detail(update: Update, business: Any, actor: int, order_id
         f"👤 خریدار: {order.get('display_name') or '-'}\n"
         f"📅 تاریخ: {order.get('created_at') or '-'}\n"
         f"📦 پلن: {order.get('plan_name') or '-'}\n"
+        f"📂 دسته: {order.get('category_title') or 'بدون دسته'}\n"
+        f"🛰 سرور خرید: {order.get('selected_server_label') or 'پیش‌فرض/قدیمی'}\n"
         f"💰 قیمت: {int(order.get('amount') or 0):,} {order.get('currency') or ''}\n"
         f"📊 وضعیت: {order.get('status') or '-'}\n"
         f"🔁 نوع: {order.get('operation') or 'purchase'}",
