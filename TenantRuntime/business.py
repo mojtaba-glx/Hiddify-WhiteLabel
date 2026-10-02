@@ -34,6 +34,36 @@ class TenantBusinessError(RuntimeError):
     pass
 
 
+USERBOT_SETTING_DEFAULTS: dict[str, Any] = {
+    "enable_buy": True,
+    "enable_renew": True,
+    "show_renew_in_main_menu": True,
+    "show_user_page_link": True,
+    "show_username": True,
+    "shuffle_configs": True,
+    "show_direct_config": True,
+    "show_sub_link": True,
+    "show_smart_link": True,
+    "welcome_message": "",
+    "faq_text": "",
+    "guide_text": "راهنمای استفاده هنوز توسط مدیر تنظیم نشده است.",
+    "servers_list_text": "",
+    "plans_list_text": "",
+    "ticket_panel_text": "",
+    "show_gift_button": True,
+    "force_join_enabled": False,
+    "force_join_channel": "",
+    "event_channel_enabled": False,
+    "event_channel_id": "",
+    "channel_id": "",
+    "button_theme": "smart",
+    "colored_buttons": True,
+    "plan_sort_mode": "id",
+    "plan_columns": 1,
+    "server_columns": 1,
+}
+
+
 def _text(value: object, maximum: int, *, required: bool = True) -> str:
     result = str(value or "").strip()
     if required and not result:
@@ -4545,6 +4575,452 @@ class TenantBusinessService:
             (self.tenant_id, max(1, min(int(limit), 100))),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def runtime_userbot_settings(self) -> dict[str, Any]:
+        rows = self.conn.execute(
+            "SELECT key, value FROM tenant_userbot_settings WHERE tenant_id=?",
+            (self.tenant_id,),
+        ).fetchall()
+        result = dict(USERBOT_SETTING_DEFAULTS)
+        for row in rows:
+            try:
+                result[str(row["key"])] = json.loads(str(row["value"]))
+            except Exception:
+                continue
+        return result
+
+    def userbot_settings_admin(self, actor_id: int) -> dict[str, Any]:
+        self._admin(actor_id)
+        return self.runtime_userbot_settings()
+
+    def set_userbot_setting_admin(
+        self, actor_id: int, *, key: str, value: Any
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        name = str(key or "").strip()
+        if name not in USERBOT_SETTING_DEFAULTS:
+            raise ValueError("unsupported UserBot setting")
+        if isinstance(USERBOT_SETTING_DEFAULTS[name], bool):
+            clean: Any = bool(value)
+        elif isinstance(USERBOT_SETTING_DEFAULTS[name], int):
+            clean = int(value)
+            if clean < 1:
+                raise ValueError("setting must be positive")
+        else:
+            clean = str(value or "").strip()
+            if len(clean) > 4000:
+                raise ValueError("setting text is too long")
+            if name == "button_theme" and clean not in (
+                "smart", "classic", "minimal"
+            ):
+                raise ValueError("invalid button theme")
+            if name == "plan_sort_mode" and clean not in (
+                "id", "price_asc", "price_desc", "traffic_asc", "traffic_desc"
+            ):
+                raise ValueError("invalid plan sort mode")
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            self.conn.execute(
+                "INSERT INTO tenant_userbot_settings "
+                "(tenant_id, key, value, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(tenant_id, key) DO UPDATE SET "
+                "value=excluded.value, updated_at=excluded.updated_at",
+                (
+                    self.tenant_id,
+                    name,
+                    json.dumps(clean, ensure_ascii=False),
+                    now,
+                ),
+            )
+        return self.runtime_userbot_settings()
+
+    def toggle_userbot_setting_admin(
+        self, actor_id: int, *, key: str
+    ) -> dict[str, Any]:
+        current = self.userbot_settings_admin(actor_id)
+        if key not in USERBOT_SETTING_DEFAULTS or not isinstance(
+            USERBOT_SETTING_DEFAULTS[key], bool
+        ):
+            raise ValueError("setting is not boolean")
+        return self.set_userbot_setting_admin(
+            actor_id, key=key, value=not bool(current[key])
+        )
+
+    def list_customers_admin(
+        self,
+        actor_id: int,
+        *,
+        query: str = "",
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        term = str(query or "").strip().lstrip("@")
+        sql = (
+            "SELECT c.*, "
+            "(SELECT COUNT(*) FROM tenant_subscriptions s "
+            " WHERE s.tenant_id=c.tenant_id AND s.customer_id=c.id) AS subscriptions_total, "
+            "(SELECT COUNT(*) FROM tenant_orders o "
+            " WHERE o.tenant_id=c.tenant_id AND o.customer_id=c.id) AS orders_count, "
+            "(SELECT COUNT(*) FROM tenant_orders o "
+            " WHERE o.tenant_id=c.tenant_id AND o.customer_id=c.id "
+            " AND o.status IN ('paid','fulfilled')) AS paid_orders "
+            "FROM tenant_customers c WHERE c.tenant_id=?"
+        )
+        args: list[Any] = [self.tenant_id]
+        if term:
+            like = f"%{term}%"
+            sql += (
+                " AND (c.display_name LIKE ? COLLATE NOCASE "
+                "OR COALESCE(c.username,'') LIKE ? COLLATE NOCASE"
+            )
+            args.extend([like, like])
+            try:
+                numeric = int(term)
+            except (TypeError, ValueError):
+                numeric = 0
+            if numeric > 0:
+                sql += " OR c.telegram_user_id=? OR c.id=?"
+                args.extend([numeric, numeric])
+            sql += ")"
+        sql += " ORDER BY c.id DESC LIMIT ?"
+        args.append(max(1, min(int(limit), 1000)))
+        return [
+            dict(row)
+            for row in self.conn.execute(sql, tuple(args)).fetchall()
+        ]
+
+    def customer_wallet_admin(
+        self, actor_id: int, *, customer_id: int
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        owned = self.conn.execute(
+            "SELECT 1 FROM tenant_customers WHERE tenant_id=? AND id=?",
+            (self.tenant_id, int(customer_id)),
+        ).fetchone()
+        if owned is None:
+            raise TenantBusinessError("customer not found")
+        accounts = [
+            dict(row)
+            for row in self.conn.execute(
+                "SELECT * FROM tenant_wallet_accounts "
+                "WHERE tenant_id=? AND customer_id=? ORDER BY currency",
+                (self.tenant_id, int(customer_id)),
+            ).fetchall()
+        ]
+        history = [
+            dict(row)
+            for row in self.conn.execute(
+                "SELECT * FROM tenant_wallet_transactions "
+                "WHERE tenant_id=? AND customer_id=? ORDER BY id DESC LIMIT 30",
+                (self.tenant_id, int(customer_id)),
+            ).fetchall()
+        ]
+        return {"accounts": accounts, "history": history}
+
+    def reset_customer_trial_admin(
+        self, actor_id: int, *, customer_id: int
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        row = self.conn.execute(
+            "SELECT * FROM tenant_customers WHERE tenant_id=? AND id=?",
+            (self.tenant_id, int(customer_id)),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("customer not found")
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            self.conn.execute(
+                "DELETE FROM tenant_trial_claims "
+                "WHERE tenant_id=? AND customer_id=?",
+                (self.tenant_id, int(customer_id)),
+            )
+            self.conn.execute(
+                "UPDATE tenant_customers SET trial_used_at=NULL, updated_at=? "
+                "WHERE tenant_id=? AND id=?",
+                (now, self.tenant_id, int(customer_id)),
+            )
+        return self.customer_profile_admin(actor_id, customer_id=int(customer_id))
+
+    def customer_orders_admin(
+        self, actor_id: int, *, customer_id: int
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        return [
+            dict(row)
+            for row in self.conn.execute(
+                "SELECT o.*, p.name AS plan_name, o.order_kind AS operation "
+                "FROM tenant_orders o JOIN tenant_sale_plans p "
+                "ON p.id=o.plan_id AND p.tenant_id=o.tenant_id "
+                "WHERE o.tenant_id=? AND o.customer_id=? ORDER BY o.id DESC",
+                (self.tenant_id, int(customer_id)),
+            ).fetchall()
+        ]
+
+    def customer_receipts_admin(
+        self, actor_id: int, *, customer_id: int
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        return [
+            dict(row)
+            for row in self.conn.execute(
+                "SELECT r.*, o.amount, o.currency, o.order_kind AS operation "
+                "FROM tenant_receipts r JOIN tenant_orders o "
+                "ON o.id=r.order_id AND o.tenant_id=r.tenant_id "
+                "WHERE r.tenant_id=? AND o.customer_id=? ORDER BY r.id DESC",
+                (self.tenant_id, int(customer_id)),
+            ).fetchall()
+        ]
+
+    def order_admin(self, actor_id: int, *, order_id: int) -> dict[str, Any]:
+        self._admin(actor_id)
+        row = self.conn.execute(
+            "SELECT o.*, c.display_name, c.username, c.telegram_user_id, "
+            "p.name AS plan_name, p.traffic_gb, p.duration_days, "
+            "o.order_kind AS operation, ro.subscription_id AS renewal_subscription_id "
+            "FROM tenant_orders o "
+            "JOIN tenant_customers c ON c.id=o.customer_id AND c.tenant_id=o.tenant_id "
+            "JOIN tenant_sale_plans p ON p.id=o.plan_id AND p.tenant_id=o.tenant_id "
+            "LEFT JOIN tenant_renewal_orders ro "
+            "ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
+            "WHERE o.tenant_id=? AND o.id=?",
+            (self.tenant_id, int(order_id)),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("order not found")
+        return dict(row)
+
+    def search_orders_admin(
+        self, actor_id: int, query: str
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        term = str(query or "").strip().lstrip("#")
+        like = f"%{term}%"
+        args: list[Any] = [self.tenant_id, like, like, like]
+        extra = ""
+        try:
+            numeric = int(term)
+        except (TypeError, ValueError):
+            numeric = 0
+        if numeric > 0:
+            extra = " OR o.id=? OR c.telegram_user_id=? OR c.id=?"
+            args.extend([numeric, numeric, numeric])
+        rows = self.conn.execute(
+            "SELECT o.*, c.display_name, c.username, c.telegram_user_id, "
+            "p.name AS plan_name, o.order_kind AS operation "
+            "FROM tenant_orders o "
+            "JOIN tenant_customers c ON c.id=o.customer_id AND c.tenant_id=o.tenant_id "
+            "JOIN tenant_sale_plans p ON p.id=o.plan_id AND p.tenant_id=o.tenant_id "
+            "WHERE o.tenant_id=? AND ("
+            "c.display_name LIKE ? COLLATE NOCASE OR "
+            "COALESCE(c.username,'') LIKE ? COLLATE NOCASE OR "
+            "p.name LIKE ? COLLATE NOCASE"
+            + extra
+            + ") ORDER BY o.id DESC LIMIT 100",
+            tuple(args),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_receipts_history_admin(
+        self,
+        actor_id: int,
+        *,
+        status: str | None = None,
+        kind: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        sql = (
+            "SELECT r.*, o.amount, o.currency, o.customer_id, "
+            "o.order_kind AS operation, c.display_name, c.username, "
+            "c.telegram_user_id, m.kind AS payment_kind, m.title AS payment_title "
+            "FROM tenant_receipts r "
+            "JOIN tenant_orders o ON o.id=r.order_id AND o.tenant_id=r.tenant_id "
+            "JOIN tenant_customers c ON c.id=o.customer_id AND c.tenant_id=o.tenant_id "
+            "JOIN tenant_payment_methods m ON m.id=r.payment_method_id "
+            "AND m.tenant_id=r.tenant_id WHERE r.tenant_id=?"
+        )
+        args: list[Any] = [self.tenant_id]
+        if status is not None:
+            normalized = str(status).strip().lower()
+            if normalized not in ("pending", "approved", "rejected"):
+                raise ValueError("invalid receipt status")
+            sql += " AND r.status=?"
+            args.append(normalized)
+        if kind is not None:
+            sql += " AND m.kind=?"
+            args.append(str(kind).strip().lower())
+        sql += " ORDER BY r.id DESC LIMIT 300"
+        return [
+            dict(row)
+            for row in self.conn.execute(sql, tuple(args)).fetchall()
+        ]
+
+    def receipt_admin(self, actor_id: int, *, receipt_id: int) -> dict[str, Any]:
+        self._admin(actor_id)
+        row = self.conn.execute(
+            "SELECT r.*, o.amount, o.currency, o.customer_id, "
+            "o.order_kind AS operation, o.status AS order_status, "
+            "c.display_name, c.username, c.telegram_user_id, "
+            "m.kind AS payment_kind, m.title AS payment_title "
+            "FROM tenant_receipts r "
+            "JOIN tenant_orders o ON o.id=r.order_id AND o.tenant_id=r.tenant_id "
+            "JOIN tenant_customers c ON c.id=o.customer_id AND c.tenant_id=o.tenant_id "
+            "JOIN tenant_payment_methods m ON m.id=r.payment_method_id "
+            "AND m.tenant_id=r.tenant_id "
+            "WHERE r.tenant_id=? AND r.id=?",
+            (self.tenant_id, int(receipt_id)),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("receipt not found")
+        return dict(row)
+
+    def list_coupon_redemptions_admin(
+        self, actor_id: int, *, coupon_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        sql = (
+            "SELECT r.*, cp.code, c.display_name, c.telegram_user_id "
+            "FROM tenant_coupon_redemptions r "
+            "JOIN tenant_coupons cp ON cp.id=r.coupon_id AND cp.tenant_id=r.tenant_id "
+            "JOIN tenant_customers c ON c.id=r.customer_id AND c.tenant_id=r.tenant_id "
+            "WHERE r.tenant_id=?"
+        )
+        args: list[Any] = [self.tenant_id]
+        if coupon_id is not None:
+            sql += " AND r.coupon_id=?"
+            args.append(int(coupon_id))
+        sql += " ORDER BY r.id DESC LIMIT 300"
+        return [
+            dict(row)
+            for row in self.conn.execute(sql, tuple(args)).fetchall()
+        ]
+
+    def delete_coupon_admin(self, actor_id: int, *, coupon_id: int) -> None:
+        self._admin(actor_id)
+        uses = self.conn.execute(
+            "SELECT COUNT(*) FROM tenant_coupon_redemptions "
+            "WHERE tenant_id=? AND coupon_id=?",
+            (self.tenant_id, int(coupon_id)),
+        ).fetchone()
+        if int(uses[0] or 0) > 0:
+            raise TenantBusinessError(
+                "used coupon cannot be deleted; disable it instead"
+            )
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "DELETE FROM tenant_coupons WHERE tenant_id=? AND id=?",
+                (self.tenant_id, int(coupon_id)),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("coupon not found")
+
+    def referrals_admin(self, actor_id: int) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        rows = self.conn.execute(
+            "SELECT r.*, "
+            "i.display_name AS inviter_name, i.telegram_user_id AS inviter_telegram_id, "
+            "e.display_name AS invitee_name, e.telegram_user_id AS invitee_telegram_id "
+            "FROM tenant_referrals r "
+            "JOIN tenant_customers i ON i.id=r.inviter_customer_id AND i.tenant_id=r.tenant_id "
+            "JOIN tenant_customers e ON e.id=r.invitee_customer_id AND e.tenant_id=r.tenant_id "
+            "WHERE r.tenant_id=? ORDER BY r.id DESC LIMIT 500",
+            (self.tenant_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def referral_rewards_admin(self, actor_id: int) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        rows = self.conn.execute(
+            "SELECT rw.*, "
+            "i.display_name AS inviter_name, e.display_name AS invitee_name "
+            "FROM tenant_referral_rewards rw "
+            "JOIN tenant_customers i ON i.id=rw.inviter_customer_id AND i.tenant_id=rw.tenant_id "
+            "JOIN tenant_customers e ON e.id=rw.invitee_customer_id AND e.tenant_id=rw.tenant_id "
+            "WHERE rw.tenant_id=? ORDER BY rw.id DESC LIMIT 500",
+            (self.tenant_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_payment_methods_admin(self, actor_id: int) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        return [
+            dict(row)
+            for row in self.conn.execute(
+                "SELECT * FROM tenant_payment_methods "
+                "WHERE tenant_id=? ORDER BY id DESC",
+                (self.tenant_id,),
+            ).fetchall()
+        ]
+
+    def set_payment_method_status_admin(
+        self, actor_id: int, *, method_id: int, enabled: bool
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_payment_methods SET status=?, updated_at=? "
+                "WHERE tenant_id=? AND id=?",
+                (
+                    "active" if enabled else "disabled",
+                    iso_utc(utcnow()),
+                    self.tenant_id,
+                    int(method_id),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("payment method not found")
+        row = self.conn.execute(
+            "SELECT * FROM tenant_payment_methods WHERE tenant_id=? AND id=?",
+            (self.tenant_id, int(method_id)),
+        ).fetchone()
+        assert row is not None
+        return dict(row)
+
+    def broadcast_targets_admin(
+        self, actor_id: int, *, segment: str
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        normalized = str(segment or "").strip().lower()
+        if normalized not in (
+            "all",
+            "expired_all",
+            "no_order",
+            "expired_1w",
+            "expired_2w",
+            "expired_4w",
+            "expired_8w",
+        ):
+            raise ValueError("invalid broadcast segment")
+        sql = "SELECT DISTINCT c.id, c.telegram_user_id, c.display_name FROM tenant_customers c WHERE c.tenant_id=?"
+        args: list[Any] = [self.tenant_id]
+        if normalized == "no_order":
+            sql += (
+                " AND NOT EXISTS (SELECT 1 FROM tenant_orders o "
+                "WHERE o.tenant_id=c.tenant_id AND o.customer_id=c.id)"
+            )
+        elif normalized.startswith("expired"):
+            days_map = {
+                "expired_all": 0,
+                "expired_1w": 7,
+                "expired_2w": 14,
+                "expired_4w": 28,
+                "expired_8w": 56,
+            }
+            days = days_map[normalized]
+            threshold = iso_utc(utcnow() - timedelta(days=days))
+            sql += (
+                " AND EXISTS (SELECT 1 FROM tenant_subscriptions s "
+                "WHERE s.tenant_id=c.tenant_id AND s.customer_id=c.id "
+                "AND s.status='expired'"
+            )
+            if days > 0:
+                sql += " AND s.expires_at<=?"
+                args.append(threshold)
+            sql += ")"
+        sql += " ORDER BY c.id"
+        return [
+            dict(row)
+            for row in self.conn.execute(sql, tuple(args)).fetchall()
+        ]
 
     def customer_account_summary(self, actor_id: int) -> dict[str, Any]:
         customer = self._customer(actor_id, active=False)
