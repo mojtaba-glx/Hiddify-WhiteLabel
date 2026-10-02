@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 from html import escape
+from typing import Any
 
 from telegram import (
     InlineKeyboardButton,
