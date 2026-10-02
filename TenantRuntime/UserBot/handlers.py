@@ -140,22 +140,31 @@ def _checkout_markup(
     pay_row: list[InlineKeyboardButton] = []
     if bool(settings.get("enable_discount_code", True)):
         pay_row.append(
-            InlineKeyboardButton(
-                "🎟 کد تخفیف", callback_data=f"shop:coupon:{int(order_id)}"
+            _button(
+                "🎟 کد تخفیف",
+                callback_data=f"shop:coupon:{int(order_id)}",
+                settings=settings,
             )
         )
     pay_row.append(
-        InlineKeyboardButton(
-            "💰 پرداخت کیف پول", callback_data=f"shop:walletpay:{int(order_id)}"
+        _button(
+            "💰 پرداخت کیف پول",
+            callback_data=f"shop:walletpay:{int(order_id)}",
+            settings=settings,
         )
     )
     rows = [
         pay_row,
-        [InlineKeyboardButton(
+        [_button(
             "💳 روش‌های پرداخت",
             callback_data=f"shop:paymethods:{int(order_id)}",
+            settings=settings,
         )],
-        [InlineKeyboardButton(back_label, callback_data=back_callback)],
+        [_button(
+            back_label,
+            callback_data=back_callback,
+            settings=settings,
+        )],
     ]
     return InlineKeyboardMarkup(rows)
 
