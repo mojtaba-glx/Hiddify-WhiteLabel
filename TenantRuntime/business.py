@@ -2758,8 +2758,12 @@ class TenantBusinessService:
         self, category_id: int, *, public: bool = True
     ) -> dict[str, Any]:
         query = (
-            "SELECT * FROM tenant_plan_categories "
-            "WHERE id=? AND tenant_id=?"
+            "SELECT c.*, "
+            "(SELECT COUNT(*) FROM tenant_sale_plans p "
+            " WHERE p.tenant_id=c.tenant_id AND p.category_id=c.id "
+            " AND p.status!='archived') AS plan_count "
+            "FROM tenant_plan_categories c "
+            "WHERE c.id=? AND c.tenant_id=?"
         )
         args: list[Any] = [int(category_id), self.tenant_id]
         if public:
