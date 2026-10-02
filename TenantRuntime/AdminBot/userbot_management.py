@@ -1160,20 +1160,51 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
         return
 
     if section == "ui":
+        current_theme = str(s.get("button_theme") or "smart")
+        theme_meta = {
+            "smart": (
+                "✨ هوشمند",
+                "خرید و تایید سبز، هشدار قرمز و مسیرهای اصلی آبی",
+            ),
+            "shop": (
+                "🛒 فروشگاهی",
+                "خرید، کیف پول، هدیه و پرداخت پررنگ‌تر نمایش داده می‌شوند",
+            ),
+            "pro": (
+                "💼 حرفه‌ای",
+                "رنگ فقط برای اکشن‌های مهم و مسیرهای مدیریتی استفاده می‌شود",
+            ),
+            "minimal": (
+                "🕊 مینیمال",
+                "فقط تاییدهای مهم و عملیات خطرناک رنگ می‌گیرند",
+            ),
+        }
         rows = [
             [InlineKeyboardButton(
                 f"رنگی بودن دکمه‌ها | {_bool_icon(s.get('colored_buttons'))}",
                 callback_data="userbot:settings:ui:colored_buttons",
             )],
-            [InlineKeyboardButton("✨ هوشمند", callback_data="userbot:settings:ui:theme:smart")],
-            [InlineKeyboardButton("🛒 فروشگاهی", callback_data="userbot:settings:ui:theme:shop")],
-            [InlineKeyboardButton("💼 حرفه‌ای", callback_data="userbot:settings:ui:theme:pro")],
-            [InlineKeyboardButton("🕊 مینیمال", callback_data="userbot:settings:ui:theme:minimal")],
-            [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
         ]
+        for key, (title, _description) in theme_meta.items():
+            rows.append([
+                InlineKeyboardButton(
+                    f"{'✅ ' if current_theme == key else '▫️ '}{title}",
+                    callback_data=f"userbot:settings:ui:theme:{key}",
+                )
+            ])
+        rows.append([
+            InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")
+        ])
+        current_title, current_description = theme_meta.get(
+            current_theme, theme_meta["smart"]
+        )
         await _edit_or_send(
             update,
-            f"🎨 تنظیم ظاهر دکمه‌ها\nطرح فعلی: {s.get('button_theme')}",
+            "🎨 تنظیم ظاهر و رنگ دکمه‌های UserBot\n"
+            f"وضعیت رنگ‌ها: {'روشن ✅' if s.get('colored_buttons') else 'خاموش ❌'}\n"
+            f"طرح فعلی: {current_title}\n"
+            f"توضیح: {current_description}\n\n"
+            "این تنظیم روی تمام دکمه‌های Inline ربات کاربران اعمال می‌شود.",
             InlineKeyboardMarkup(rows),
         )
         return
