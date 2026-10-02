@@ -93,11 +93,13 @@ sudo whitelabel version
 1. Refuses to overwrite tracked local source changes.
 2. Fetches `origin/main`.
 3. Updates the checkout.
-4. Installs pinned Python requirements.
-5. Runs the complete offline pytest suite **before downtime**.
-6. If tests fail, restores the previous source commit.
+4. Refreshes pinned Python requirements only when `requirements.txt` changed.
+5. Runs a fast local preflight: Python bytecode compilation, Bash syntax checks
+   and release-plan validation. The complete pytest suite remains a CI gate in
+   GitHub Actions rather than running on the production server.
+6. If the quick preflight fails, restores the previous source commit.
 7. Creates a private consistent SQLite + `.env` rollback snapshot.
-8. Stops the running bots only after tests and snapshot creation succeed.
+8. Stops the running bots only after preflight and snapshot creation succeed.
 9. Applies pending database migrations.
 10. Re-renders systemd units and shard instances.
 11. Starts services and runs health checks.
