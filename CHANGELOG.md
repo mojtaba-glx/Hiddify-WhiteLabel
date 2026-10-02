@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.10.2 — Tenant AdminBot server management parity
+
+- Rebuilt the Tenant AdminBot server list and server-detail screens to follow the Hiddify-SellBot AdminBot labels, layout and navigation.
+- Added a step-by-step server wizard for Hiddify, X-UI Sanaei/Alireza and X-NET with bottom-keyboard cancellation and encrypted credential storage.
+- Added working server edit, safe delete, capacity and priority controls.
+- Added server-scoped user listing, user sync/enable/disable/delete-panel actions, search, plan view, subscription-domain view, frozen-node report and server sync.
+- Added explicit parent-server relations for Multi-node so nodes can belong to the same main server model used by Hiddify-SellBot; legacy NULL-parent nodes remain compatible.
+- Added working node add/remove flows from the selected server.
+- Added regression tests for tenant-scoped server CRUD/topology and the exact SellBot server-menu labels.
+
 ## v0.10.1 — Tenant AdminBot menu parity, stage 1
 
 - Rebuilt the Tenant AdminBot main menu as a persistent Telegram reply keyboard matching Hiddify-SellBot's proven AdminBot layout.

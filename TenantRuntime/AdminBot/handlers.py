@@ -7,6 +7,7 @@ User-shop handlers are intentionally kept out of this package.
 from __future__ import annotations
 
 import sqlite3
+from html import escape
 
 from telegram import (
     InlineKeyboardButton,
@@ -227,6 +228,127 @@ def admin_main_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         selective=True,
     )
+
+
+def _server_cancel_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("❌ لغو")]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        selective=True,
+    )
+
+
+def _server_provider_title(server: dict) -> str:
+    kind = str(server.get("panel_kind") or "").lower()
+    if kind == "xui":
+        flavor = str(server.get("xui_flavor") or "").lower()
+        return "X-UI سنایی" if flavor == "sanaei" else "X-UI علیرضا"
+    if kind == "xnet":
+        return "X-NET"
+    if kind == "hiddify":
+        return "Hiddify"
+    return kind or "نامشخص"
+
+
+def _server_list_view(business) -> tuple[str, InlineKeyboardMarkup]:
+    rows = [
+        [InlineKeyboardButton(
+            str(item.get("label") or f"سرور #{item['id']}"),
+            callback_data=f"srv:view:{int(item['id'])}",
+        )]
+        for item in business.list_servers()
+    ]
+    rows.append([
+        InlineKeyboardButton("افزودن سرور➕", callback_data="srv:add")
+    ])
+    return (
+        "‏🖥 مدیریت سرورها\n⬇️ لیست سرور های شما",
+        InlineKeyboardMarkup(rows),
+    )
+
+
+def _server_detail_view(
+    business, actor: int, server_id: int
+) -> tuple[str, InlineKeyboardMarkup]:
+    server = business.server_admin_summary(actor, server_id=int(server_id))
+    title = escape(str(server.get("label") or f"سرور #{server_id}"))
+    endpoint = str(server.get("endpoint") or "").strip()
+    if endpoint.startswith(("http://", "https://")):
+        title_line = f'<a href="{escape(endpoint, quote=True)}">🖥 سرور: {title}</a>'
+    else:
+        title_line = f"🖥 سرور: {title}"
+    limit = int(server.get("users_limit") or 0)
+    limit_text = str(limit) if limit > 0 else "نامحدود"
+    provider = escape(_server_provider_title(server))
+    credential = "✅" if server.get("credential_configured") else "❌"
+    text = (
+        f"{title_line}\n"
+        "❖ • -------------------------- • ❖\n"
+        f"👤 تعداد کاربران: {int(server.get('users_count') or 0)} از {limit_text}\n"
+        f"📋 تعداد پلن ها: {int(server.get('plans_count') or 0)}\n"
+        f"🟩 اولویت: {int(server.get('priority') or 0)}\n"
+        f"📦 پنل: {provider}\n"
+        f"🔐 دسترسی پنل: {credential}"
+    )
+    rows = [
+        [InlineKeyboardButton("👤لیست کاربران", callback_data=f"srv:users:{server_id}")],
+        [InlineKeyboardButton("🛡️عملیات کاربری", callback_data=f"srv:userops:{server_id}")],
+        [InlineKeyboardButton("📋پلن ها", callback_data=f"srv:plans:{server_id}")],
+        [InlineKeyboardButton("🔗لیست دامنه‌ها", callback_data=f"srv:domains:{server_id}")],
+        [InlineKeyboardButton("✏️ویرایش سرور", callback_data=f"srv:edit:{server_id}")],
+        [InlineKeyboardButton("🗑️حذف سرور", callback_data=f"srv:delete:{server_id}")],
+        [InlineKeyboardButton("⚙️لیست نودها", callback_data=f"srv:nodes:{server_id}")],
+        [InlineKeyboardButton("🔄همگام سازی نودها", callback_data=f"srv:sync:{server_id}")],
+        [InlineKeyboardButton("❄️ کاربران یخ‌زده این سرور", callback_data=f"srv:frozen:{server_id}")],
+        [InlineKeyboardButton("↩️بازگشت", callback_data="biz:servers")],
+    ]
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _server_edit_view(server: dict) -> InlineKeyboardMarkup:
+    sid = int(server["id"])
+    kind = str(server.get("panel_kind") or "")
+    rows = [
+        [InlineKeyboardButton("📌ویرایش عنوان", callback_data=f"srv:editf:{sid}:label")],
+        [InlineKeyboardButton("🌐ویرایش آدرس پنل", callback_data=f"srv:editf:{sid}:endpoint")],
+        [InlineKeyboardButton("🗿ویرایش محدودیت کاربر", callback_data=f"srv:editf:{sid}:users_limit")],
+        [InlineKeyboardButton("🔢ویرایش اولویت ترتیب", callback_data=f"srv:editf:{sid}:priority")],
+    ]
+    if kind == "hiddify":
+        rows.extend([
+            [InlineKeyboardButton("🔐ویرایش کد مسیر ادمین", callback_data=f"srv:editf:{sid}:admin_path")],
+            [InlineKeyboardButton("🔐ویرایش کد مسیر کاربران", callback_data=f"srv:editf:{sid}:user_path")],
+            [InlineKeyboardButton("🔑ویرایش کلید ادمین (UUID/API)", callback_data=f"srv:editf:{sid}:credential")],
+        ])
+    elif kind == "xui":
+        rows.extend([
+            [InlineKeyboardButton("🔑ویرایش دسترسی پنل", callback_data=f"srv:editf:{sid}:credential")],
+            [InlineKeyboardButton("🔗ویرایش دامنه ساب", callback_data=f"srv:editf:{sid}:xui_public_origin")],
+            [InlineKeyboardButton("🧩ویرایش اینباند", callback_data=f"srv:editf:{sid}:xui_inbound_ids")],
+        ])
+    elif kind == "xnet":
+        rows.extend([
+            [InlineKeyboardButton("🔑ویرایش توکن API X-NET", callback_data=f"srv:editf:{sid}:credential")],
+            [InlineKeyboardButton("🔗ویرایش دامنه ساب", callback_data=f"srv:editf:{sid}:xnet_public_origin")],
+            [InlineKeyboardButton("🧩ویرایش اینباند", callback_data=f"srv:editf:{sid}:xnet_inbound_ids")],
+        ])
+    rows.extend([
+        [InlineKeyboardButton("🗑️حذف سرور", callback_data=f"srv:delete:{sid}")],
+        [InlineKeyboardButton("🔙بازگشت", callback_data=f"srv:view:{sid}")],
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _reply_server_prompt(update: Update, text: str) -> None:
+    if update.callback_query and update.callback_query.message:
+        await update.callback_query.message.reply_text(
+            text, reply_markup=_server_cancel_keyboard()
+        )
+    elif update.effective_message:
+        await update.effective_message.reply_text(
+            text, reply_markup=_server_cancel_keyboard()
+        )
 
 
 def _menu(spec: RuntimeBotSpec) -> InlineKeyboardMarkup:
@@ -757,58 +879,511 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 reply_markup=InlineKeyboardMarkup(rows),
             ); return
         if data == "biz:servers":
-            rows = [[InlineKeyboardButton(f"{'⭐ ' if int(item.get('is_default') or 0) else '🖥 '}{item['label']} · {item['panel_kind']} · {item['status']}", callback_data=f"biz:server:{item['id']}")] for item in business.list_servers()]
-            rows += [[InlineKeyboardButton("➕ سرور", callback_data="biz:addserver")], [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")]]
-            await update.callback_query.edit_message_text("🖥 سرورهای این tenant\n⭐ = سرور پیش‌فرض فروش", reply_markup=InlineKeyboardMarkup(rows)); return
-        if data == "biz:addserver":
-            context.user_data["biz_flow"] = {"kind": "server"}
+            text, keyboard = _server_list_view(business)
             await update.callback_query.edit_message_text(
-                "فرمت Hiddify:\n"
-                "نام | hiddify | آدرس | مسیر ادمین | مسیر کاربر\n\n"
-                "فرمت X-UI:\n"
-                "نام | xui | آدرس پنل | sanaei/alireza | inboundها | آدرس عمومی اشتراک | مسیر اشتراک\n"
-                "inbound خالی = اولین inbound، عدد 0 = همه، یا مثل 1,2,3\n"
-                "مسیر اشتراک در صورت خالی بودن /sub/ است.\n\n"
-                "فرمت X-Net:\n"
-                "نام | xnet | آدرس API/پنل | inboundها | دامنه عمومی اشتراک | پورت اشتراک | مسیر اشتراک\n"
-                "شناسه inbound می‌تواند مثل in-9457dabf باشد؛ 0 = همه.\n"
-                "پورت خالی/0 = 2096 و مسیر خالی = sub.",
-                reply_markup=_menu(spec),
-            ); return
-        if data.startswith("biz:server:"):
+                text, reply_markup=keyboard
+            )
+            return
+
+        if data == "srv:add":
+            context.user_data.pop("biz_flow", None)
+            await update.callback_query.edit_message_text(
+                "نوع پنل سرور را انتخاب کنید:",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "هیدیفای (Hiddify)",
+                        callback_data="srv:addtype:hiddify",
+                    )],
+                    [
+                        InlineKeyboardButton(
+                            "🔵 X-UI علیرضا (alireza0)",
+                            callback_data="srv:addtype:xui_alireza",
+                        ),
+                        InlineKeyboardButton(
+                            "🟢 X-UI سنایی (3x-ui)",
+                            callback_data="srv:addtype:xui_sanaei",
+                        ),
+                    ],
+                    [InlineKeyboardButton(
+                        "🟣 X-NET (Sing-box)",
+                        callback_data="srv:addtype:xnet",
+                    )],
+                    [InlineKeyboardButton("🔙بازگشت", callback_data="biz:servers")],
+                ]),
+            )
+            return
+
+        if data.startswith("srv:addtype:"):
+            selected = data.split(":", 2)[2]
+            provider = "hiddify"
+            flavor = ""
+            if selected == "xui_sanaei":
+                provider, flavor = "xui", "sanaei"
+            elif selected == "xui_alireza":
+                provider, flavor = "xui", "alireza"
+            elif selected == "xnet":
+                provider = "xnet"
+            elif selected != "hiddify":
+                raise ValueError("invalid server type")
+            context.user_data["biz_flow"] = {
+                "kind": "server_add_title",
+                "provider": provider,
+                "flavor": flavor,
+            }
+            await _reply_server_prompt(
+                update, "لطفاً عنوان سرور را وارد کنید:"
+            )
+            return
+
+        if data.startswith("srv:view:"):
+            server_id = int(data.rsplit(":", 1)[1])
+            text, keyboard = _server_detail_view(business, actor, server_id)
+            await update.callback_query.edit_message_text(
+                text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            return
+
+        if data.startswith("srv:users:"):
+            server_id = int(data.rsplit(":", 1)[1])
+            items = business.server_subscriptions(actor, server_id=server_id)
+            lines = ["👤 لیست کاربران"]
+            rows = []
+            if not items:
+                lines.append("\nکاربری روی این سرور ثبت نشده است.")
+            for item in items[:40]:
+                used = int(item.get("usage_bytes") or 0) / (1024 ** 3)
+                total = int(item.get("traffic_bytes") or 0) / (1024 ** 3)
+                lines.append(
+                    f"\n#{item['id']} · {item['display_name']} · {item['plan_name']}\n"
+                    f"{used:.2f}/{total:.0f}GB · {item['status']}"
+                )
+                rows.append([InlineKeyboardButton(
+                    f"👤 #{item['id']} · {str(item['display_name'])[:25]}",
+                    callback_data=f"srv:user:{server_id}:{int(item['id'])}",
+                )])
+            rows.append([InlineKeyboardButton(
+                "بازگشت🔙", callback_data=f"srv:view:{server_id}"
+            )])
+            await update.callback_query.edit_message_text(
+                "\n".join(lines), reply_markup=InlineKeyboardMarkup(rows)
+            )
+            return
+
+        if data.startswith("srv:user:"):
+            parts = data.split(":")
+            if len(parts) != 4:
+                raise ValueError("invalid server user callback")
+            server_id, subscription_id = int(parts[2]), int(parts[3])
+            matches = [
+                item for item in business.server_subscriptions(
+                    actor, server_id=server_id
+                )
+                if int(item["id"]) == subscription_id
+            ]
+            if not matches:
+                raise TenantBusinessError("subscription not found on server")
+            item = matches[0]
+            used = int(item.get("usage_bytes") or 0) / (1024 ** 3)
+            total = int(item.get("traffic_bytes") or 0) / (1024 ** 3)
+            text = (
+                f"👤 کاربر #{subscription_id}\n"
+                f"نام: {item['display_name']}\n"
+                f"پلن: {item['plan_name']}\n"
+                f"وضعیت: {item['status']}\n"
+                f"مصرف: {used:.2f} از {total:.0f} گیگ\n"
+                f"انقضا: {item.get('expires_at') or '-'}"
+            )
+            rows = [[InlineKeyboardButton(
+                "🔄 همگام‌سازی",
+                callback_data=f"srv:useract:{server_id}:{subscription_id}:sync",
+            )]]
+            if item["status"] in ("active", "disabled"):
+                enabled = item["status"] != "active"
+                rows.append([InlineKeyboardButton(
+                    "✅ فعال‌سازی" if enabled else "⛔ غیرفعال‌سازی",
+                    callback_data=(
+                        f"srv:useract:{server_id}:{subscription_id}:"
+                        + ("enable" if enabled else "disable")
+                    ),
+                )])
+            rows.extend([
+                [InlineKeyboardButton(
+                    "🗑 حذف از پنل",
+                    callback_data=f"srv:useract:{server_id}:{subscription_id}:delete",
+                )],
+                [InlineKeyboardButton(
+                    "بازگشت🔙", callback_data=f"srv:users:{server_id}"
+                )],
+            ])
+            await update.callback_query.edit_message_text(
+                text, reply_markup=InlineKeyboardMarkup(rows)
+            )
+            return
+
+        if data.startswith("srv:useract:"):
+            parts = data.split(":")
+            if len(parts) != 5:
+                raise ValueError("invalid server user action")
+            server_id = int(parts[2])
+            subscription_id = int(parts[3])
+            action = parts[4]
+            if action == "sync":
+                result = business.sync_subscription_usage(
+                    actor, subscription_id=subscription_id
+                )
+                msg = (
+                    f"✅ همگام شد.\nوضعیت: {result['status']}\n"
+                    f"مصرف: {result['usage_bytes']/(1024**3):.2f}GB"
+                )
+            elif action in ("enable", "disable"):
+                result = business.set_subscription_enabled(
+                    actor,
+                    subscription_id=subscription_id,
+                    enabled=action == "enable",
+                )
+                msg = f"✅ وضعیت کاربر: {result['status']}"
+            elif action == "delete":
+                result = business.delete_subscription_from_panel(
+                    actor, subscription_id=subscription_id
+                )
+                msg = f"✅ کاربر از پنل حذف/غیرفعال شد. وضعیت: {result['status']}"
+            else:
+                raise ValueError("invalid server user action")
+            await update.callback_query.edit_message_text(
+                msg,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "بازگشت🔙", callback_data=f"srv:users:{server_id}"
+                    )
+                ]]),
+            )
+            return
+
+        if data.startswith("srv:userops:"):
+            server_id = int(data.rsplit(":", 1)[1])
+            await update.callback_query.edit_message_text(
+                "🛡️ عملیات کاربری",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "جستجوی کاربر🔍",
+                        callback_data=f"srv:usersearch:{server_id}",
+                    )],
+                    [InlineKeyboardButton(
+                        "🔄 همگام‌سازی کاربران این سرور",
+                        callback_data=f"srv:sync:{server_id}",
+                    )],
+                    [InlineKeyboardButton(
+                        "👤لیست کاربران",
+                        callback_data=f"srv:users:{server_id}",
+                    )],
+                    [InlineKeyboardButton(
+                        "بازگشت🔙", callback_data=f"srv:view:{server_id}"
+                    )],
+                ]),
+            )
+            return
+
+        if data.startswith("srv:usersearch:"):
+            server_id = int(data.rsplit(":", 1)[1])
+            business.server(server_id)
+            context.user_data["biz_flow"] = {
+                "kind": "server_user_search",
+                "server_id": server_id,
+            }
+            await _reply_server_prompt(
+                update,
+                "🔍 نام، یوزرنیم، Telegram ID یا شناسه سرویس را بفرستید:",
+            )
+            return
+
+        if data.startswith("srv:plans:"):
+            server_id = int(data.rsplit(":", 1)[1])
+            items = [
+                item for item in business.list_plans(public=False)
+                if not str(item.get("name") or "").startswith("__WHITELABEL_")
+            ]
+            text = "📋 پلن ها\n" + (
+                "\n".join(
+                    f"• {x['name']} · {x['traffic_gb']}GB · "
+                    f"{x['duration_days']} روز · {x['price']:,} {x['currency']}"
+                    for x in items
+                )
+                or "موردی نیست."
+            )
+            await update.callback_query.edit_message_text(
+                text,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "بازگشت🔙", callback_data=f"srv:view:{server_id}"
+                    )
+                ]]),
+            )
+            return
+
+        if data.startswith("srv:domains:"):
             server_id = int(data.rsplit(":", 1)[1])
             server = business.server(server_id)
-            panel = business.panel_status(server_id)
-            provider_info = ""
-            if server["panel_kind"] == "xui":
-                provider_info = (
-                    f"\nنسخه X-UI: {server.get('xui_flavor') or '-'}"
-                    f"\nInboundها: {server.get('xui_inbound_ids') or 'اولین فعال'}"
-                    f"\nآدرس عمومی اشتراک: {server.get('xui_public_origin') or 'خود دامنه پنل'}"
-                    f"\nمسیر اشتراک: {server.get('xui_sub_path') or '/sub/'}"
-                )
-            elif server["panel_kind"] == "xnet":
-                provider_info = (
-                    f"\nInboundها: {server.get('xnet_inbound_ids') or 'اولین فعال'}"
-                    f"\nآدرس عمومی اشتراک: {server.get('xnet_public_origin') or 'دامنه API/پنل'}"
-                    f"\nپورت اشتراک: {server.get('xnet_sub_port') or 2096}"
-                    f"\nمسیر اشتراک: {server.get('xnet_sub_path') or 'sub'}"
-                )
-            text = (
-                f"🖥 {server['label']}\n"
-                f"نوع پنل: {server['panel_kind']}\n"
-                f"آدرس: {server.get('endpoint') or 'ثبت نشده'}\n"
-                f"مسیر ادمین: {server.get('admin_path') or '-'}\n"
-                f"مسیر کاربر: {server.get('user_path') or '-'}"
-                f"{provider_info}\n"
-                f"کلید دسترسی: {'✅ ثبت شده' if panel['configured'] else '❌ ثبت نشده'}\n"
-                f"سرور پیش‌فرض فروش: {'⭐ بله' if int(server.get('is_default') or 0) else 'خیر'}"
+            kind = str(server.get("panel_kind") or "")
+            if kind == "xui":
+                domain = server.get("xui_public_origin") or server.get("endpoint") or "—"
+                path = server.get("xui_sub_path") or "/sub/"
+                field = "xui_public_origin"
+            elif kind == "xnet":
+                domain = server.get("xnet_public_origin") or server.get("endpoint") or "—"
+                path = server.get("xnet_sub_path") or "sub"
+                field = "xnet_public_origin"
+            else:
+                domain = server.get("endpoint") or "—"
+                path = server.get("user_path") or "—"
+                field = "endpoint"
+            await update.callback_query.edit_message_text(
+                "🔗 مدیریت دامنه‌ها\n"
+                "❖ • -------------------------- • ❖\n"
+                f"🌐 دامنه/آدرس: {domain}\n"
+                f"🔗 مسیر اشتراک: {path}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "✏️ ویرایش دامنه",
+                        callback_data=f"srv:editf:{server_id}:{field}",
+                    )],
+                    [InlineKeyboardButton(
+                        "بازگشت🔙", callback_data=f"srv:view:{server_id}"
+                    )],
+                ]),
             )
-            rows = [[InlineKeyboardButton("🔐 ثبت یا تعویض دسترسی پنل", callback_data=f"biz:secret:{server_id}")]]
-            if server["panel_kind"] in ("hiddify", "xui", "xnet") and panel["configured"] and not int(server.get("is_default") or 0):
-                rows.append([InlineKeyboardButton("⭐ انتخاب به عنوان سرور فروش", callback_data=f"biz:defaultserver:{server_id}")])
-            rows.append([InlineKeyboardButton("↩️ سرورها", callback_data="biz:servers")])
-            await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows)); return
+            return
+
+        if data.startswith("srv:edit:"):
+            server_id = int(data.rsplit(":", 1)[1])
+            server = business.server(server_id)
+            text, _ = _server_detail_view(business, actor, server_id)
+            await update.callback_query.edit_message_text(
+                text,
+                reply_markup=_server_edit_view(server),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            return
+
+        if data.startswith("srv:editf:"):
+            parts = data.split(":", 3)
+            if len(parts) != 4:
+                raise ValueError("invalid server edit callback")
+            server_id = int(parts[2])
+            field = parts[3]
+            server = business.server(server_id)
+            allowed_fields = {
+                "label", "endpoint", "users_limit", "priority",
+                "admin_path", "user_path", "credential",
+                "xui_public_origin", "xui_inbound_ids",
+                "xnet_public_origin", "xnet_inbound_ids",
+            }
+            if field not in allowed_fields:
+                raise ValueError("invalid server edit field")
+            context.user_data["biz_flow"] = {
+                "kind": "server_edit_field",
+                "server_id": server_id,
+                "field": field,
+                "provider": str(server.get("panel_kind") or ""),
+                "flavor": str(server.get("xui_flavor") or ""),
+            }
+            prompts = {
+                "label": "📌 عنوان جدید سرور را وارد کنید:",
+                "endpoint": "🌐 آدرس کامل پنل را با http/https وارد کنید:",
+                "users_limit": "🗿 محدودیت تعداد کاربر را وارد کنید. 0 = نامحدود",
+                "priority": "🔢 اولویت ترتیب را وارد کنید. عدد بزرگ‌تر اولویت بیشتر دارد.",
+                "admin_path": "🔐 کد مسیر ادمین پنل را وارد کنید:",
+                "user_path": "🔐 کد مسیر کاربران را وارد کنید:",
+                "credential": "🔑 دسترسی جدید پنل را ارسال کنید.",
+                "xui_public_origin": "🔗 دامنه عمومی اشتراک را وارد کنید. برای استفاده از آدرس پنل «-» بفرستید.",
+                "xui_inbound_ids": "🧩 شناسه اینباندها را وارد کنید؛ 0 = همه.",
+                "xnet_public_origin": "🔗 دامنه عمومی اشتراک را وارد کنید. برای استفاده از آدرس پنل «-» بفرستید.",
+                "xnet_inbound_ids": "🧩 شناسه اینباندهای X-NET را وارد کنید؛ 0 = همه.",
+            }
+            if field == "credential" and server.get("panel_kind") == "xui":
+                if str(server.get("xui_flavor") or "") == "sanaei":
+                    prompts[field] = "🔑 API Token پنل Sanaei را ارسال کنید."
+                else:
+                    prompts[field] = "🔑 نام کاربری | رمز عبور | Secret Header اختیاری"
+            elif field == "credential" and server.get("panel_kind") == "xnet":
+                prompts[field] = (
+                    "🔑 API Token X-NET را بفرستید؛ یا "
+                    "API Token | نام کاربری | رمز عبور"
+                )
+            await _reply_server_prompt(update, prompts[field])
+            return
+
+        if data.startswith("srv:delete:"):
+            server_id = int(data.rsplit(":", 1)[1])
+            business.server(server_id)
+            await update.callback_query.edit_message_text(
+                "❓ آیا از حذف کامل این سرور مطمئن هستید؟\n"
+                "اگر سرویس فعالی به سرور متصل باشد، حذف برای امنیت متوقف می‌شود.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "✅ بله، حذف شود",
+                        callback_data=f"srv:deleteok:{server_id}",
+                    ),
+                    InlineKeyboardButton(
+                        "لغو❌", callback_data=f"srv:view:{server_id}"
+                    ),
+                ]]),
+            )
+            return
+
+        if data.startswith("srv:deleteok:"):
+            server_id = int(data.rsplit(":", 1)[1])
+            deleted = business.delete_server(actor, server_id=server_id)
+            text, keyboard = _server_list_view(business)
+            await update.callback_query.edit_message_text(
+                f"✅ سرور «{deleted['label']}» حذف شد.\n\n{text}",
+                reply_markup=keyboard,
+            )
+            return
+
+        if data.startswith("srv:nodes:"):
+            server_id = int(data.rsplit(":", 1)[1])
+            server = business.server(server_id)
+            nodes = business.list_nodes(parent_server_id=server_id)
+            lines = [f"⚙️ لیست نودها — {server['label']}"]
+            rows = []
+            if not nodes:
+                lines.append("\nنودی برای این سرور ثبت نشده است.")
+            for node in nodes:
+                lines.append(
+                    f"\n• {node['label']} · {node.get('server_label') or '-'} "
+                    f"· {node.get('location') or '-'} · {node['status']}"
+                )
+                rows.append([InlineKeyboardButton(
+                    f"🗑 حذف نود {str(node['label'])[:25]}",
+                    callback_data=f"srv:nodedel:{server_id}:{int(node['id'])}",
+                )])
+            rows.extend([
+                [InlineKeyboardButton(
+                    "➕ افزودن نود", callback_data=f"srv:nodeadd:{server_id}"
+                )],
+                [InlineKeyboardButton(
+                    "بازگشت🔙", callback_data=f"srv:view:{server_id}"
+                )],
+            ])
+            await update.callback_query.edit_message_text(
+                "\n".join(lines), reply_markup=InlineKeyboardMarkup(rows)
+            )
+            return
+
+        if data.startswith("srv:nodeadd:"):
+            parent_id = int(data.rsplit(":", 1)[1])
+            parent = business.server(parent_id)
+            candidates = [
+                item for item in business.list_servers()
+                if int(item["id"]) != parent_id and item["status"] == "active"
+            ]
+            rows = [[InlineKeyboardButton(
+                str(item["label"]),
+                callback_data=f"srv:nodepick:{parent_id}:{int(item['id'])}",
+            )] for item in candidates]
+            rows.append([InlineKeyboardButton(
+                "بازگشت🔙", callback_data=f"srv:nodes:{parent_id}"
+            )])
+            text = (
+                f"➕ افزودن نود به «{parent['label']}»\n"
+                "سروری که باید به عنوان نود متصل شود را انتخاب کنید."
+            )
+            if not candidates:
+                text += "\n\nابتدا یک سرور دیگر اضافه کنید."
+            await update.callback_query.edit_message_text(
+                text, reply_markup=InlineKeyboardMarkup(rows)
+            )
+            return
+
+        if data.startswith("srv:nodepick:"):
+            parts = data.split(":")
+            if len(parts) != 4:
+                raise ValueError("invalid node selection")
+            parent_id, target_id = int(parts[2]), int(parts[3])
+            target = business.server(target_id)
+            business.add_node(
+                actor,
+                label=str(target["label"]),
+                server_id=target_id,
+                parent_server_id=parent_id,
+                location="",
+            )
+            await update.callback_query.edit_message_text(
+                "✅ نود اضافه شد.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "⚙️ لیست نودها",
+                        callback_data=f"srv:nodes:{parent_id}",
+                    )
+                ]]),
+            )
+            return
+
+        if data.startswith("srv:nodedel:"):
+            parts = data.split(":")
+            if len(parts) != 4:
+                raise ValueError("invalid node delete")
+            parent_id, node_id = int(parts[2]), int(parts[3])
+            business.delete_node(
+                actor, node_id=node_id, parent_server_id=parent_id
+            )
+            await update.callback_query.edit_message_text(
+                "✅ نود از این سرور حذف شد.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "⚙️ لیست نودها",
+                        callback_data=f"srv:nodes:{parent_id}",
+                    )
+                ]]),
+            )
+            return
+
+        if data.startswith("srv:sync:"):
+            server_id = int(data.rsplit(":", 1)[1])
+            result = business.sync_server_subscriptions(
+                actor, server_id=server_id
+            )
+            await update.callback_query.edit_message_text(
+                "✅ همگام‌سازی انجام شد.\n"
+                f"موفق: {result['synced']} · "
+                f"منقضی: {result['expired']} · خطا: {result['errors']}",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "بازگشت🔙", callback_data=f"srv:view:{server_id}"
+                    )
+                ]]),
+            )
+            return
+
+        if data.startswith("srv:frozen:"):
+            server_id = int(data.rsplit(":", 1)[1])
+            rows_data = business.server_frozen_subscriptions(
+                actor, server_id=server_id
+            )
+            lines = ["❄️ کاربران یخ‌زده این سرور"]
+            if not rows_data:
+                lines.append("\n✅ رکورد یخ‌زده‌ای برای این سرور وجود ندارد.")
+            for item in rows_data[:50]:
+                lines.append(
+                    f"\n• سرویس #{item['subscription_id']} · "
+                    f"{item['display_name']} · {item['plan_name']}\n"
+                    f"خطا: {item.get('last_error') or '-'} · "
+                    f"تلاش ناموفق: {int(item.get('fail_count') or 0)}"
+                )
+            await update.callback_query.edit_message_text(
+                "\n".join(lines),
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "بازگشت🔙", callback_data=f"srv:view:{server_id}"
+                    )
+                ]]),
+            )
+            return
+
         if data.startswith("biz:secret:"):
             server_id = int(data.rsplit(":", 1)[1])
             server = business.server(server_id)
@@ -1152,22 +1727,9 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             context.user_data.pop("biz_flow", None)
 
             if text == BTN_SERVERS:
-                items = business.list_servers()
-                rows = [
-                    [InlineKeyboardButton(
-                        f"{'⭐ ' if int(item.get('is_default') or 0) else '🖥 '}"
-                        f"{item['label']} · {item['panel_kind']} · {item['status']}",
-                        callback_data=f"biz:server:{item['id']}",
-                    )]
-                    for item in items
-                ]
-                rows.extend([
-                    [InlineKeyboardButton("➕ سرور", callback_data="biz:addserver")],
-                    [InlineKeyboardButton("↩️ منوی اصلی", callback_data="runtime:home")],
-                ])
+                server_text, server_keyboard = _server_list_view(business)
                 await update.effective_message.reply_text(
-                    "🖥 مدیریت سرورها\n⭐ = سرور پیش‌فرض فروش",
-                    reply_markup=InlineKeyboardMarkup(rows),
+                    server_text, reply_markup=server_keyboard
                 )
                 return
 
@@ -1207,6 +1769,309 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 await update.effective_message.reply_text(
                     "📫 بکاپ Tenant هنوز به‌صورت مستقل و امن منتقل نشده است. "
                     "بکاپ سراسری Master به ادمین Tenant نمایش داده نمی‌شود."
+                )
+                return
+
+        if isinstance(flow, dict) and str(flow.get("kind") or "").startswith("server_"):
+            kind = str(flow.get("kind") or "")
+            if text == "❌ لغو":
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    "❌ عملیات سرور لغو شد.",
+                    reply_markup=admin_main_keyboard(),
+                )
+                return
+
+            def optional(value: str) -> str:
+                return "" if value.strip() in ("-", "—") else value.strip()
+
+            if kind == "server_user_search":
+                server_id = int(flow["server_id"])
+                items = business.server_subscriptions(
+                    actor, server_id=server_id, query=text
+                )
+                context.user_data.pop("biz_flow", None)
+                rows = [[InlineKeyboardButton(
+                    f"👤 #{item['id']} · {str(item['display_name'])[:25]}",
+                    callback_data=f"srv:user:{server_id}:{int(item['id'])}",
+                )] for item in items]
+                rows.append([InlineKeyboardButton(
+                    "بازگشت🔙", callback_data=f"srv:userops:{server_id}"
+                )])
+                await update.effective_message.reply_text(
+                    (
+                        f"✅ {len(items)} نتیجه پیدا شد."
+                        if items else "❌ کاربری پیدا نشد."
+                    ),
+                    reply_markup=InlineKeyboardMarkup(rows),
+                )
+                return
+
+            if kind == "server_edit_field":
+                server_id = int(flow["server_id"])
+                field = str(flow["field"])
+                provider = str(flow.get("provider") or "")
+                flavor = str(flow.get("flavor") or "")
+                if field == "credential":
+                    try:
+                        await update.effective_message.delete()
+                    except Exception:
+                        pass
+                    if provider == "xui":
+                        if flavor == "sanaei":
+                            business.set_xui_credential(
+                                actor, server_id=server_id, api_token=text
+                            )
+                        else:
+                            parts = [part.strip() for part in text.split("|")]
+                            if len(parts) not in (2, 3):
+                                raise ValueError("invalid X-UI credential")
+                            business.set_xui_credential(
+                                actor,
+                                server_id=server_id,
+                                username=parts[0],
+                                password=parts[1],
+                                secret_header=parts[2] if len(parts) == 3 else "",
+                            )
+                    elif provider == "xnet":
+                        parts = [part.strip() for part in text.split("|")]
+                        if len(parts) == 1:
+                            business.set_xnet_credential(
+                                actor, server_id=server_id, api_token=parts[0]
+                            )
+                        elif len(parts) == 3:
+                            business.set_xnet_credential(
+                                actor,
+                                server_id=server_id,
+                                api_token=parts[0],
+                                username=parts[1],
+                                password=parts[2],
+                            )
+                        else:
+                            raise ValueError("invalid X-NET credential")
+                    else:
+                        business.set_panel_credential(
+                            actor, server_id=server_id, secret=text
+                        )
+                else:
+                    value: object = optional(text)
+                    if field in ("users_limit", "priority"):
+                        value = int(text.replace(",", "").strip())
+                    if field == "endpoint" and value and not str(value).startswith(("http://", "https://")):
+                        raise ValueError("invalid endpoint")
+                    business.update_server(
+                        actor, server_id=server_id, **{field: value}
+                    )
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    "✅ اطلاعات سرور ذخیره شد.",
+                    reply_markup=admin_main_keyboard(),
+                )
+                return
+
+            # New-server wizard. Secrets are requested only at the final step
+            # and never stored in user_data.
+            if kind == "server_add_title":
+                flow["label"] = text[:80]
+                flow["kind"] = "server_add_endpoint"
+                await update.effective_message.reply_text(
+                    "🌐 آدرس کامل پنل را وارد کنید:\nمثال: https://panel.example.com",
+                    reply_markup=_server_cancel_keyboard(),
+                )
+                return
+
+            if kind == "server_add_endpoint":
+                if not text.startswith(("http://", "https://")):
+                    raise ValueError("invalid panel URL")
+                flow["endpoint"] = text
+                provider = str(flow["provider"])
+                if provider == "hiddify":
+                    flow["kind"] = "server_add_admin_path"
+                    prompt = "🔑 کد مسیر ادمین پنل را وارد کنید. اگر نیاز نیست «-» بفرستید."
+                elif provider == "xui":
+                    flow["kind"] = "server_add_inbounds"
+                    prompt = "🧩 شناسه اینباندها را وارد کنید؛ 0 = همه یا مثل 1,2,3"
+                else:
+                    flow["kind"] = "server_add_inbounds"
+                    prompt = "🧩 شناسه اینباندهای X-NET را وارد کنید؛ 0 = همه یا مثل in-xxxx"
+                await update.effective_message.reply_text(
+                    prompt, reply_markup=_server_cancel_keyboard()
+                )
+                return
+
+            if kind == "server_add_admin_path":
+                flow["admin_path"] = optional(text)
+                flow["kind"] = "server_add_user_path"
+                await update.effective_message.reply_text(
+                    "🔐 کد مسیر کاربران را وارد کنید. اگر نیاز نیست «-» بفرستید.",
+                    reply_markup=_server_cancel_keyboard(),
+                )
+                return
+
+            if kind == "server_add_user_path":
+                flow["user_path"] = optional(text)
+                flow["kind"] = "server_add_limit"
+                await update.effective_message.reply_text(
+                    "🗿 محدودیت تعداد کاربر این سرور را وارد کنید. 0 = نامحدود",
+                    reply_markup=_server_cancel_keyboard(),
+                )
+                return
+
+            if kind == "server_add_inbounds":
+                flow["inbound_ids"] = optional(text)
+                flow["kind"] = "server_add_public_origin"
+                await update.effective_message.reply_text(
+                    "🔗 دامنه عمومی اشتراک را وارد کنید. برای استفاده از آدرس پنل «-» بفرستید.",
+                    reply_markup=_server_cancel_keyboard(),
+                )
+                return
+
+            if kind == "server_add_public_origin":
+                flow["public_origin"] = optional(text)
+                provider = str(flow["provider"])
+                flow["kind"] = (
+                    "server_add_xnet_port"
+                    if provider == "xnet"
+                    else "server_add_sub_path"
+                )
+                prompt = (
+                    "🔌 پورت اشتراک X-NET را وارد کنید. 0 = پیش‌فرض 2096"
+                    if provider == "xnet"
+                    else "🔗 مسیر اشتراک را وارد کنید. برای پیش‌فرض «-» بفرستید."
+                )
+                await update.effective_message.reply_text(
+                    prompt, reply_markup=_server_cancel_keyboard()
+                )
+                return
+
+            if kind == "server_add_xnet_port":
+                port = int(text.strip())
+                if port < 0 or port > 65535:
+                    raise ValueError("invalid port")
+                flow["xnet_sub_port"] = port
+                flow["kind"] = "server_add_sub_path"
+                await update.effective_message.reply_text(
+                    "🔗 مسیر اشتراک X-NET را وارد کنید. برای پیش‌فرض «-» بفرستید.",
+                    reply_markup=_server_cancel_keyboard(),
+                )
+                return
+
+            if kind == "server_add_sub_path":
+                flow["sub_path"] = optional(text)
+                flow["kind"] = "server_add_limit"
+                await update.effective_message.reply_text(
+                    "🗿 محدودیت تعداد کاربر این سرور را وارد کنید. 0 = نامحدود",
+                    reply_markup=_server_cancel_keyboard(),
+                )
+                return
+
+            if kind == "server_add_limit":
+                limit = int(text.replace(",", "").strip())
+                if limit < 0:
+                    raise ValueError("invalid limit")
+                flow["users_limit"] = limit
+                flow["kind"] = "server_add_priority"
+                await update.effective_message.reply_text(
+                    "🔢 اولویت ترتیب سرور را وارد کنید. عدد بزرگ‌تر اولویت بیشتر دارد.",
+                    reply_markup=_server_cancel_keyboard(),
+                )
+                return
+
+            if kind == "server_add_priority":
+                priority = int(text.replace(",", "").strip())
+                if priority < 0:
+                    raise ValueError("invalid priority")
+                flow["priority"] = priority
+                provider = str(flow["provider"])
+                if provider == "xui" and str(flow.get("flavor") or "") == "alireza":
+                    flow["kind"] = "server_add_xui_username"
+                    prompt = "👤 نام کاربری پنل X-UI علیرضا را وارد کنید:"
+                else:
+                    flow["kind"] = "server_add_secret"
+                    prompt = (
+                        "🔑 API Key پنل Hiddify را ارسال کنید."
+                        if provider == "hiddify"
+                        else (
+                            "🔑 API Token پنل Sanaei را ارسال کنید."
+                            if provider == "xui"
+                            else "🔑 Bearer Token مدیریت X-NET را ارسال کنید."
+                        )
+                    )
+                await update.effective_message.reply_text(
+                    prompt, reply_markup=_server_cancel_keyboard()
+                )
+                return
+
+            if kind == "server_add_xui_username":
+                flow["xui_username"] = text.strip()
+                flow["kind"] = "server_add_secret"
+                await update.effective_message.reply_text(
+                    "🔑 رمز عبور پنل X-UI علیرضا را ارسال کنید.",
+                    reply_markup=_server_cancel_keyboard(),
+                )
+                return
+
+            if kind == "server_add_secret":
+                provider = str(flow["provider"])
+                flavor = str(flow.get("flavor") or "")
+                try:
+                    await update.effective_message.delete()
+                except Exception:
+                    pass
+                kwargs: dict[str, Any] = {
+                    "label": str(flow["label"]),
+                    "panel_kind": provider,
+                    "endpoint": str(flow["endpoint"]),
+                    "users_limit": int(flow.get("users_limit") or 0),
+                    "priority": int(flow.get("priority") or 0),
+                }
+                if provider == "hiddify":
+                    kwargs.update({
+                        "admin_path": str(flow.get("admin_path") or ""),
+                        "user_path": str(flow.get("user_path") or ""),
+                    })
+                elif provider == "xui":
+                    kwargs.update({
+                        "xui_flavor": flavor,
+                        "xui_inbound_ids": str(flow.get("inbound_ids") or ""),
+                        "xui_public_origin": str(flow.get("public_origin") or ""),
+                        "xui_sub_path": str(flow.get("sub_path") or ""),
+                    })
+                elif provider == "xnet":
+                    kwargs.update({
+                        "xnet_inbound_ids": str(flow.get("inbound_ids") or ""),
+                        "xnet_public_origin": str(flow.get("public_origin") or ""),
+                        "xnet_sub_port": int(flow.get("xnet_sub_port") or 0),
+                        "xnet_sub_path": str(flow.get("sub_path") or ""),
+                    })
+                server = business.add_server(actor, **kwargs)
+                try:
+                    if provider == "hiddify":
+                        business.set_panel_credential(
+                            actor, server_id=int(server["id"]), secret=text
+                        )
+                    elif provider == "xui" and flavor == "sanaei":
+                        business.set_xui_credential(
+                            actor, server_id=int(server["id"]), api_token=text
+                        )
+                    elif provider == "xui":
+                        business.set_xui_credential(
+                            actor,
+                            server_id=int(server["id"]),
+                            username=str(flow["xui_username"]),
+                            password=text,
+                        )
+                    else:
+                        business.set_xnet_credential(
+                            actor, server_id=int(server["id"]), api_token=text
+                        )
+                except Exception:
+                    business.delete_server(actor, server_id=int(server["id"]))
+                    raise
+                context.user_data.pop("biz_flow", None)
+                await update.effective_chat.send_message(
+                    "✅ سرور با موفقیت اضافه شد.",
+                    reply_markup=admin_main_keyboard(),
                 )
                 return
 

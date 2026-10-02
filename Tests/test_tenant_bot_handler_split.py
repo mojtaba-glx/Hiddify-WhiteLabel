@@ -50,3 +50,25 @@ def test_admin_main_menu_matches_sellbot_layout() -> None:
     ]
     assert keyboard.resize_keyboard is True
     assert keyboard.selective is True
+
+
+
+def test_admin_server_menu_uses_sellbot_labels() -> None:
+    source = (ROOT / "TenantRuntime" / "AdminBot" / "handlers.py").read_text(
+        encoding="utf-8"
+    )
+    for label in (
+        "‏🖥 مدیریت سرورها",
+        "⬇️ لیست سرور های شما",
+        "افزودن سرور➕",
+        "👤لیست کاربران",
+        "🛡️عملیات کاربری",
+        "📋پلن ها",
+        "🔗لیست دامنه‌ها",
+        "✏️ویرایش سرور",
+        "🗑️حذف سرور",
+        "⚙️لیست نودها",
+        "🔄همگام سازی نودها",
+        "❄️ کاربران یخ‌زده این سرور",
+    ):
+        assert label in source

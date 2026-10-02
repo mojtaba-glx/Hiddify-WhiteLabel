@@ -57,3 +57,54 @@ def test_ticket_and_smart_link_are_tenant_scoped(conn, factories) -> None:
     assert ticket["status"] == "open"
     assert link["code"] and len(service.list_tickets_admin(7001)) == 1
     assert len(service.list_smart_links(7001)) == 1
+
+
+
+def test_server_admin_crud_priority_and_parent_nodes(conn, factories) -> None:
+    _, service = _service(conn, factories)
+    main = service.add_server(
+        7001,
+        label="Turkey",
+        panel_kind="hiddify",
+        endpoint="https://tr.example.com",
+        users_limit=500,
+        priority=10,
+    )
+    node_server = service.add_server(
+        7001,
+        label="France",
+        panel_kind="xnet",
+        endpoint="https://fr.example.com",
+        users_limit=300,
+        priority=5,
+    )
+    updated = service.update_server(
+        7001,
+        server_id=int(main["id"]),
+        label="Turkey Main",
+        priority=20,
+    )
+    assert updated["label"] == "Turkey Main"
+    assert int(updated["users_limit"]) == 500
+    assert int(updated["priority"]) == 20
+
+    node = service.add_node(
+        7001,
+        label="France",
+        server_id=int(node_server["id"]),
+        parent_server_id=int(main["id"]),
+    )
+    scoped = service.list_nodes(parent_server_id=int(main["id"]))
+    assert [int(item["id"]) for item in scoped] == [int(node["id"])]
+
+    summary = service.server_admin_summary(7001, server_id=int(main["id"]))
+    assert summary["users_count"] == 0
+    assert summary["plans_count"] == 0
+    assert summary["nodes_count"] == 1
+
+    service.delete_node(
+        7001, node_id=int(node["id"]), parent_server_id=int(main["id"])
+    )
+    deleted = service.delete_server(7001, server_id=int(node_server["id"]))
+    assert deleted["label"] == "France"
+    assert [item["label"] for item in service.list_servers()] == ["Turkey Main"]

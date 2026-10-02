@@ -108,6 +108,8 @@ class TenantBusinessService:
         xnet_public_origin: str = "",
         xnet_sub_port: int = 0,
         xnet_sub_path: str = "",
+        users_limit: int = 0,
+        priority: int = 0,
     ) -> dict[str, Any]:
         self._admin(actor_id)
         provider_kind = str(panel_kind or "").strip().lower()
@@ -158,6 +160,11 @@ class TenantBusinessService:
         if provider_kind == "xnet" and not xnet_path:
             xnet_path = "sub"
 
+        limit_value = int(users_limit or 0)
+        priority_value = int(priority or 0)
+        if limit_value < 0 or priority_value < 0:
+            raise ValueError("users_limit/priority must be non-negative")
+
         now = iso_utc(utcnow())
         with transaction(self.conn):
             cursor = self.conn.execute(
@@ -166,8 +173,8 @@ class TenantBusinessService:
                 "admin_path, user_path, xui_flavor, xui_inbound_ids, "
                 "xui_public_origin, xui_sub_path, xnet_inbound_ids, "
                 "xnet_public_origin, xnet_sub_port, xnet_sub_path, "
-                "status, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "users_limit, priority, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
                 "'active', ?, ?)",
                 (
                     self.tenant_id,
@@ -185,6 +192,8 @@ class TenantBusinessService:
                     _text(xnet_public_origin, 250, required=False) or None,
                     port or None,
                     _text(xnet_path, 160, required=False) or None,
+                    limit_value,
+                    priority_value,
                     now,
                     now,
                 ),
@@ -216,6 +225,226 @@ class TenantBusinessService:
                 (self.tenant_id,),
             ).fetchall()
         ]
+    def update_server(
+        self,
+        actor_id: int,
+        *,
+        server_id: int,
+        **changes: Any,
+    ) -> dict[str, Any]:
+        """Update non-secret server metadata without crossing tenant scope."""
+        self._admin(actor_id)
+        current = self.server(int(server_id))
+        allowed = {
+            "label",
+            "endpoint",
+            "admin_path",
+            "user_path",
+            "xui_inbound_ids",
+            "xui_public_origin",
+            "xui_sub_path",
+            "xnet_inbound_ids",
+            "xnet_public_origin",
+            "xnet_sub_port",
+            "xnet_sub_path",
+            "users_limit",
+            "priority",
+            "status",
+        }
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError("unsupported server field")
+        if not changes:
+            return current
+
+        normalized: dict[str, Any] = {}
+        for key, value in changes.items():
+            if key == "label":
+                normalized[key] = _text(value, 80)
+            elif key in ("endpoint", "xui_public_origin", "xnet_public_origin"):
+                normalized[key] = _text(value, 250, required=False) or None
+            elif key in ("admin_path", "user_path", "xui_inbound_ids", "xui_sub_path", "xnet_sub_path"):
+                normalized[key] = _text(value, 160, required=False) or None
+            elif key == "xnet_inbound_ids":
+                normalized[key] = _text(value, 320, required=False) or None
+            elif key == "xnet_sub_port":
+                port = int(value or 0)
+                if port < 0 or port > 65535:
+                    raise ValueError("invalid X-NET subscription port")
+                normalized[key] = port or None
+            elif key in ("users_limit", "priority"):
+                number = int(value or 0)
+                if number < 0:
+                    raise ValueError("server number must be non-negative")
+                normalized[key] = number
+            elif key == "status":
+                status = str(value or "").strip().lower()
+                if status not in ("active", "offline", "disabled"):
+                    raise ValueError("invalid server status")
+                normalized[key] = status
+
+        assignments = ", ".join(f"{key}=?" for key in normalized)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                f"UPDATE tenant_servers SET {assignments}, updated_at=? "
+                "WHERE id=? AND tenant_id=?",
+                (*normalized.values(), now, int(server_id), self.tenant_id),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("server not found")
+        return self.server(int(server_id))
+
+    def server_admin_summary(
+        self, actor_id: int, *, server_id: int
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        server = self.server(int(server_id))
+        users_row = self.conn.execute(
+            "SELECT COUNT(DISTINCT subscription_id) AS total FROM ("
+            " SELECT subscription_id FROM tenant_subscription_nodes "
+            " WHERE tenant_id=? AND server_id=? AND external_ref IS NOT NULL"
+            " UNION "
+            " SELECT id AS subscription_id FROM tenant_subscriptions "
+            " WHERE tenant_id=? AND server_id=? AND external_ref IS NOT NULL"
+            ")",
+            (self.tenant_id, int(server_id), self.tenant_id, int(server_id)),
+        ).fetchone()
+        plans_row = self.conn.execute(
+            "SELECT COUNT(*) AS total FROM tenant_sale_plans "
+            "WHERE tenant_id=? AND status!='archived'",
+            (self.tenant_id,),
+        ).fetchone()
+        nodes_row = self.conn.execute(
+            "SELECT COUNT(*) AS total FROM tenant_nodes "
+            "WHERE tenant_id=? AND (parent_server_id=? OR "
+            "(parent_server_id IS NULL AND server_id!=?))",
+            (self.tenant_id, int(server_id), int(server_id)),
+        ).fetchone()
+        frozen_row = self.conn.execute(
+            "SELECT COUNT(DISTINCT subscription_id) AS total "
+            "FROM tenant_subscription_nodes "
+            "WHERE tenant_id=? AND server_id=? "
+            "AND (frozen_at IS NOT NULL OR fail_count>0 OR last_error IS NOT NULL)",
+            (self.tenant_id, int(server_id)),
+        ).fetchone()
+        result = dict(server)
+        result.update(
+            {
+                "users_count": int(users_row["total"] if users_row else 0),
+                "plans_count": int(plans_row["total"] if plans_row else 0),
+                "nodes_count": int(nodes_row["total"] if nodes_row else 0),
+                "frozen_count": int(frozen_row["total"] if frozen_row else 0),
+                "credential_configured": bool(
+                    self.panel_status(int(server_id))["configured"]
+                ),
+            }
+        )
+        return result
+
+    def server_subscriptions(
+        self, actor_id: int, *, server_id: int, query: str = ""
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        self.server(int(server_id))
+        needle = str(query or "").strip()
+        like = f"%{needle}%"
+        sql = (
+            "SELECT DISTINCT s.*, c.display_name, c.username, "
+            "p.name AS plan_name FROM tenant_subscriptions s "
+            "JOIN tenant_customers c ON c.id=s.customer_id "
+            "JOIN tenant_sale_plans p ON p.id=s.plan_id "
+            "LEFT JOIN tenant_subscription_nodes n "
+            "ON n.tenant_id=s.tenant_id AND n.subscription_id=s.id "
+            "WHERE s.tenant_id=? AND (s.server_id=? OR n.server_id=?)"
+        )
+        args: list[Any] = [self.tenant_id, int(server_id), int(server_id)]
+        if needle:
+            sql += (
+                " AND (c.display_name LIKE ? OR c.username LIKE ? "
+                "OR CAST(c.telegram_user_id AS TEXT) LIKE ? "
+                "OR CAST(s.id AS TEXT) LIKE ?)"
+            )
+            args.extend([like, like, like, like])
+        sql += " ORDER BY s.id DESC LIMIT 100"
+        return [dict(row) for row in self.conn.execute(sql, tuple(args)).fetchall()]
+
+    def server_frozen_subscriptions(
+        self, actor_id: int, *, server_id: int
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        self.server(int(server_id))
+        rows = self.conn.execute(
+            "SELECT n.*, s.status AS subscription_status, "
+            "c.display_name, p.name AS plan_name "
+            "FROM tenant_subscription_nodes n "
+            "JOIN tenant_subscriptions s ON s.id=n.subscription_id "
+            "AND s.tenant_id=n.tenant_id "
+            "JOIN tenant_customers c ON c.id=s.customer_id "
+            "JOIN tenant_sale_plans p ON p.id=s.plan_id "
+            "WHERE n.tenant_id=? AND n.server_id=? "
+            "AND (n.frozen_at IS NOT NULL OR n.fail_count>0 OR n.last_error IS NOT NULL) "
+            "ORDER BY n.id DESC LIMIT 100",
+            (self.tenant_id, int(server_id)),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def sync_server_subscriptions(
+        self, actor_id: int, *, server_id: int
+    ) -> dict[str, int]:
+        self._admin(actor_id)
+        rows = self.server_subscriptions(actor_id, server_id=int(server_id))
+        synced = expired = errors = 0
+        for row in rows:
+            if str(row.get("status") or "") not in ("active", "disabled"):
+                continue
+            try:
+                result = self.sync_subscription_usage(
+                    actor_id, subscription_id=int(row["id"])
+                )
+                synced += 1
+                expired += int(str(result.get("status") or "") == "expired")
+            except TenantBusinessError:
+                errors += 1
+        return {"synced": synced, "expired": expired, "errors": errors}
+
+    def delete_server(self, actor_id: int, *, server_id: int) -> dict[str, Any]:
+        """Delete configuration only when no live subscription mapping depends on it."""
+        self._admin(actor_id)
+        server = self.server(int(server_id))
+        primary = self.conn.execute(
+            "SELECT COUNT(*) AS total FROM tenant_subscriptions "
+            "WHERE tenant_id=? AND server_id=?",
+            (self.tenant_id, int(server_id)),
+        ).fetchone()
+        mapped = self.conn.execute(
+            "SELECT COUNT(*) AS total FROM tenant_subscription_nodes "
+            "WHERE tenant_id=? AND server_id=? AND external_ref IS NOT NULL",
+            (self.tenant_id, int(server_id)),
+        ).fetchone()
+        if int(primary["total"] if primary else 0) or int(mapped["total"] if mapped else 0):
+            raise TenantBusinessError(
+                "server still has subscription mappings; move or remove them first"
+            )
+        with transaction(self.conn):
+            self.conn.execute(
+                "DELETE FROM tenant_nodes WHERE tenant_id=? "
+                "AND (server_id=? OR parent_server_id=?)",
+                (self.tenant_id, int(server_id), int(server_id)),
+            )
+            self.conn.execute(
+                "DELETE FROM tenant_panel_credentials "
+                "WHERE tenant_id=? AND server_id=?",
+                (self.tenant_id, int(server_id)),
+            )
+            changed = self.conn.execute(
+                "DELETE FROM tenant_servers WHERE tenant_id=? AND id=?",
+                (self.tenant_id, int(server_id)),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("server not found")
+        return {"id": int(server_id), "label": str(server["label"])}
+
     def set_default_server(self, actor_id: int, *, server_id: int) -> dict[str, Any]:
         """Choose the only server automatic sales provisioning may target."""
         self._admin(actor_id)
@@ -267,7 +496,7 @@ class TenantBusinessService:
                 "(COALESCE(s.provider_kind,s.panel_kind)='xui' "
                 "AND s.xui_flavor IN ('sanaei','alireza')) OR "
                 "COALESCE(s.provider_kind,s.panel_kind)='xnet') "
-                "ORDER BY s.is_default DESC, s.id ASC",
+                "ORDER BY s.is_default DESC, s.priority DESC, s.id ASC",
                 (self.tenant_id,),
             ).fetchall()
         ]
@@ -496,33 +725,100 @@ class TenantBusinessService:
             raise TenantBusinessError(
                 "panel credential cannot be decrypted"
             ) from exc
-    def add_node(self, actor_id: int, *, label: str, server_id: int | None = None, location: str = "") -> dict[str, Any]:
+    def add_node(
+        self,
+        actor_id: int,
+        *,
+        label: str,
+        server_id: int | None = None,
+        location: str = "",
+        parent_server_id: int | None = None,
+    ) -> dict[str, Any]:
         self._admin(actor_id)
         if server_id is not None:
             self.server(int(server_id))
+        if parent_server_id is not None:
+            self.server(int(parent_server_id))
+        if (
+            server_id is not None
+            and parent_server_id is not None
+            and int(server_id) == int(parent_server_id)
+        ):
+            raise TenantBusinessError("a server cannot be its own node")
         now = iso_utc(utcnow())
         with transaction(self.conn):
             cursor = self.conn.execute(
-                "INSERT INTO tenant_nodes (tenant_id, server_id, label, location, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?)",
-                (self.tenant_id, int(server_id) if server_id else None, _text(label, 80), _text(location, 80, required=False) or None, now, now),
+                "INSERT INTO tenant_nodes "
+                "(tenant_id, server_id, parent_server_id, label, location, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 'active', ?, ?)",
+                (
+                    self.tenant_id,
+                    int(server_id) if server_id else None,
+                    int(parent_server_id) if parent_server_id else None,
+                    _text(label, 80),
+                    _text(location, 80, required=False) or None,
+                    now,
+                    now,
+                ),
             )
-        row = self.conn.execute("SELECT * FROM tenant_nodes WHERE id = ? AND tenant_id = ?", (int(cursor.lastrowid or 0), self.tenant_id)).fetchone()
+        row = self.conn.execute(
+            "SELECT * FROM tenant_nodes WHERE id=? AND tenant_id=?",
+            (int(cursor.lastrowid or 0), self.tenant_id),
+        ).fetchone()
         assert row is not None
         return dict(row)
 
-    def list_nodes(self) -> list[dict[str, Any]]:
+    def list_nodes(
+        self, *, parent_server_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        query = (
+            "SELECT n.*, s.label AS server_label, "
+            "COALESCE(s.provider_kind,s.panel_kind) AS provider_kind, "
+            "p.label AS parent_server_label "
+            "FROM tenant_nodes n "
+            "LEFT JOIN tenant_servers s "
+            "ON s.id=n.server_id AND s.tenant_id=n.tenant_id "
+            "LEFT JOIN tenant_servers p "
+            "ON p.id=n.parent_server_id AND p.tenant_id=n.tenant_id "
+            "WHERE n.tenant_id=?"
+        )
+        args: list[Any] = [self.tenant_id]
+        if parent_server_id is not None:
+            self.server(int(parent_server_id))
+            query += " AND (n.parent_server_id=? OR n.parent_server_id IS NULL)"
+            args.append(int(parent_server_id))
+        query += " ORDER BY n.id DESC"
         return [
             dict(row)
-            for row in self.conn.execute(
-                "SELECT n.*, s.label AS server_label, "
-                "COALESCE(s.provider_kind,s.panel_kind) AS provider_kind "
-                "FROM tenant_nodes n "
-                "LEFT JOIN tenant_servers s "
-                "ON s.id=n.server_id AND s.tenant_id=n.tenant_id "
-                "WHERE n.tenant_id=? ORDER BY n.id DESC",
-                (self.tenant_id,),
-            ).fetchall()
+            for row in self.conn.execute(query, tuple(args)).fetchall()
         ]
+
+    def delete_node(
+        self, actor_id: int, *, node_id: int, parent_server_id: int | None = None
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        row = self.conn.execute(
+            "SELECT * FROM tenant_nodes WHERE id=? AND tenant_id=?",
+            (int(node_id), self.tenant_id),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("node not found")
+        item = dict(row)
+        if (
+            parent_server_id is not None
+            and item.get("parent_server_id") is not None
+            and int(item["parent_server_id"]) != int(parent_server_id)
+        ):
+            raise TenantBusinessError("node does not belong to this server")
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "DELETE FROM tenant_nodes WHERE id=? AND tenant_id=?",
+                (int(node_id), self.tenant_id),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("node not found")
+        return item
+
     def _desired_subscription_servers(
         self, primary_server_id: int
     ) -> list[dict[str, Any]]:
@@ -535,12 +831,14 @@ class TenantBusinessService:
                 "LEFT JOIN tenant_nodes n "
                 "ON n.server_id=s.id AND n.tenant_id=s.tenant_id "
                 "AND n.status='active' "
+                "AND (n.parent_server_id=? OR n.parent_server_id IS NULL) "
                 "WHERE s.tenant_id=? AND s.status='active' "
                 "AND (s.id=? OR n.id IS NOT NULL) "
                 "AND COALESCE(s.provider_kind,s.panel_kind) "
                 "IN ('hiddify','xui','xnet') "
                 "ORDER BY CASE WHEN s.id=? THEN 0 ELSE 1 END, s.id",
                 (
+                    int(primary_server_id),
                     self.tenant_id,
                     int(primary_server_id),
                     int(primary_server_id),
