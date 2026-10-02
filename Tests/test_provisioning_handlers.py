@@ -78,10 +78,18 @@ def test_staged_full_provision_keeps_only_encrypted_admin_draft(conn) -> None:
     asyncio.run(on_text(user_update, context))
     user_update.effective_message.delete.assert_awaited_once()
     assert "flow" not in context.user_data
-    assert user_update.effective_chat.send_message.await_count == 2
-    secret_call = user_update.effective_chat.send_message.await_args_list[0]
-    assert secret_call.kwargs["protect_content"] is True
-    rendered = " ".join(str(call) for call in user_update.effective_chat.send_message.await_args_list)
+    calls = user_update.effective_chat.send_message.await_args_list
+    assert len(calls) == 3
+    secret_calls = [
+        call for call in calls if call.kwargs.get("protect_content") is True
+    ]
+    assert len(secret_calls) == 1
+    remove_calls = [
+        call for call in calls
+        if isinstance(call.kwargs.get("reply_markup"), ReplyKeyboardRemove)
+    ]
+    assert len(remove_calls) == 1
+    rendered = " ".join(str(call) for call in calls)
     assert admin_token not in rendered and user_token not in rendered
     dump = "\n".join(conn.iterdump())
     assert admin_token not in dump and user_token not in dump
