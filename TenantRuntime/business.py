@@ -35,32 +35,62 @@ class TenantBusinessError(RuntimeError):
 
 
 USERBOT_SETTING_DEFAULTS: dict[str, Any] = {
+    # Purchase / renewal switches mirrored from Hiddify-SellBot.
     "enable_buy": True,
     "enable_renew": True,
     "show_renew_in_main_menu": True,
+
+    # Subscription presentation.
     "show_user_page_link": True,
     "show_username": True,
     "shuffle_configs": True,
+    "shuffle_server_layout": True,
+    "shuffle_config_layout": True,
     "show_direct_config": True,
     "show_sub_link": True,
+    # WhiteLabel's multi-node smart link is the functional equivalent used by
+    # the tenant runtime. Keep the legacy key for already provisioned tenants.
     "show_smart_link": True,
+
+    # Texts editable from Tenant AdminBot.
     "welcome_message": "",
     "faq_text": "",
-    "guide_text": "راهنمای استفاده هنوز توسط مدیر تنظیم نشده است.",
+    "guide_text": "انتخاب سیستم عامل ⬇️",
+    "guide_android_text": "",
+    "guide_ios_text": "",
+    "guide_windows_text": "",
+    "guide_mac_text": "",
+    "guide_linux_text": "",
     "servers_list_text": "",
     "plans_list_text": "",
     "ticket_panel_text": "",
+    "force_join_help_text": (
+        "برای فعال شدن عضویت اجباری، UserBot باید در کانال مقصد دسترسی "
+        "لازم برای بررسی عضویت کاربران را داشته باشد."
+    ),
+
+    # Marketing / visibility.
     "show_gift_button": True,
+    "show_user_status": True,
+    "enable_discount_code": True,
+
+    # Force join and event/channel settings.
     "force_join_enabled": False,
     "force_join_channel": "",
     "event_channel_enabled": False,
     "event_channel_id": "",
     "channel_id": "",
+
+    # Telegram button styling.
     "button_theme": "smart",
     "colored_buttons": True,
+
+    # Plan/server list layout.
     "plan_sort_mode": "id",
     "plan_columns": 1,
     "server_columns": 1,
+
+    # Subscription reminders.
     "reminder_enabled": True,
     "reminder_days": 3,
     "reminder_remaining_gb": 3,
@@ -5050,6 +5080,28 @@ class TenantBusinessService:
                 (now, self.tenant_id, int(customer_id)),
             )
         return self.customer_profile_admin(actor_id, customer_id=int(customer_id))
+
+    def reset_all_customer_trials_admin(self, actor_id: int) -> int:
+        """Reset free-trial eligibility for every customer in this tenant only."""
+        self._admin(actor_id)
+        now = iso_utc(utcnow())
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM tenant_customers "
+            "WHERE tenant_id=? AND trial_used_at IS NOT NULL",
+            (self.tenant_id,),
+        ).fetchone()
+        affected = int(row[0] or 0) if row is not None else 0
+        with transaction(self.conn):
+            self.conn.execute(
+                "DELETE FROM tenant_trial_claims WHERE tenant_id=?",
+                (self.tenant_id,),
+            )
+            self.conn.execute(
+                "UPDATE tenant_customers SET trial_used_at=NULL, updated_at=? "
+                "WHERE tenant_id=? AND trial_used_at IS NOT NULL",
+                (now, self.tenant_id),
+            )
+        return affected
 
     def customer_orders_admin(
         self, actor_id: int, *, customer_id: int
