@@ -801,7 +801,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
                 for p in plans
             ]
-            rows = [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
+            rows = _column_rows(buttons, columns)
             if not rows:
                 rows = [[InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")]]
             rows.append([InlineKeyboardButton("↩️ منو", callback_data="runtime:home")])
@@ -1021,28 +1021,164 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             configs = business.subscription_configs(
                 actor, subscription_id=subscription_id
             )
-            if (
-                bool(settings.get("shuffle_configs", True))
-                or bool(settings.get("shuffle_server_layout", True))
-            ):
-                random.shuffle(configs)
-            text_parts = ["📄 کانفیگ‌های مستقیم"]
-            for item in configs:
-                text_parts.extend([
-                    "",
-                    f"🖥 {item['server']}",
-                    str(item["content"]),
-                ])
-            text = "\n".join(text_parts)
-            if len(text) > 3900:
-                text = text[:3850] + "\n…"
-            await update.callback_query.edit_message_text(
-                text,
-                reply_markup=InlineKeyboardMarkup([[
+            ordered_servers = _ordered_indexed(
+                configs,
+                shuffle_enabled=bool(
+                    settings.get("shuffle_server_layout", True)
+                ),
+            )
+            server_buttons = [
+                InlineKeyboardButton(
+                    f"🖥 {item.get('server') or f'سرور {index + 1}'}",
+                    callback_data=(
+                        f"shop:configserver:{subscription_id}:{index}"
+                    ),
+                )
+                for index, item in ordered_servers
+            ]
+            rows = _column_rows(
+                server_buttons,
+                int(settings.get("server_columns") or 1),
+            )
+            rows.extend([
+                [
                     InlineKeyboardButton(
-                        "↩️ اشتراک‌های من", callback_data="shop:subs"
+                        "🔗 اتصال اشتراک",
+                        callback_data="shop:connect",
                     )
-                ]]),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "↩️ اشتراک‌های من",
+                        callback_data="shop:subs",
+                    )
+                ],
+            ])
+            await update.callback_query.edit_message_text(
+                "📄 کانفیگ‌های مستقیم\n"
+                "سرور موردنظر را انتخاب کنید:",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+
+        if data.startswith("shop:configserver:"):
+            _, _, raw_subscription_id, raw_server_index = data.split(":", 3)
+            subscription_id = int(raw_subscription_id)
+            server_index = int(raw_server_index)
+            configs = business.subscription_configs(
+                actor, subscription_id=subscription_id
+            )
+            if server_index < 0 or server_index >= len(configs):
+                raise TenantBusinessError("config server is unavailable")
+            selected = configs[server_index]
+            config_items = _extract_config_items(str(selected.get("content") or ""))
+            if not config_items:
+                raise TenantBusinessError("configs are unavailable")
+
+            if len(config_items) == 1:
+                body = config_items[0]
+                if len(body) > 3800:
+                    body = body[:3750] + "\n…"
+                await update.callback_query.edit_message_text(
+                    f"🖥 {selected.get('server') or 'سرور'}\n\n{body}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton(
+                                "🔙 بازگشت به سرورها",
+                                callback_data=f"shop:configs:{subscription_id}",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "🏠 منو",
+                                callback_data="runtime:home",
+                            )
+                        ],
+                    ]),
+                    disable_web_page_preview=True,
+                )
+                return
+
+            ordered_configs = _ordered_indexed(
+                config_items,
+                shuffle_enabled=bool(settings.get("shuffle_configs", True)),
+            )
+            config_buttons = [
+                InlineKeyboardButton(
+                    f"📄 کانفیگ {config_index + 1}",
+                    callback_data=(
+                        f"shop:configitem:{subscription_id}:"
+                        f"{server_index}:{config_index}"
+                    ),
+                )
+                for config_index, _content in ordered_configs
+            ]
+            if (
+                bool(settings.get("shuffle_config_layout", True))
+                and len(config_buttons) > 1
+            ):
+                random.shuffle(config_buttons)
+            rows = _column_rows(config_buttons, 2)
+            rows.extend([
+                [
+                    InlineKeyboardButton(
+                        "🔙 بازگشت به سرورها",
+                        callback_data=f"shop:configs:{subscription_id}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🏠 منو",
+                        callback_data="runtime:home",
+                    )
+                ],
+            ])
+            await update.callback_query.edit_message_text(
+                f"🖥 {selected.get('server') or 'سرور'}\n"
+                "کانفیگ موردنظر را انتخاب کنید:",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+
+        if data.startswith("shop:configitem:"):
+            parts = data.split(":")
+            if len(parts) != 5:
+                raise TenantBusinessError("invalid config item")
+            subscription_id = int(parts[2])
+            server_index = int(parts[3])
+            config_index = int(parts[4])
+            configs = business.subscription_configs(
+                actor, subscription_id=subscription_id
+            )
+            if server_index < 0 or server_index >= len(configs):
+                raise TenantBusinessError("config server is unavailable")
+            selected = configs[server_index]
+            config_items = _extract_config_items(str(selected.get("content") or ""))
+            if config_index < 0 or config_index >= len(config_items):
+                raise TenantBusinessError("config is unavailable")
+            body = config_items[config_index]
+            if len(body) > 3800:
+                body = body[:3750] + "\n…"
+            await update.callback_query.edit_message_text(
+                f"🖥 {selected.get('server') or 'سرور'}\n"
+                f"📄 کانفیگ {config_index + 1}\n\n{body}",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "🔙 بازگشت به کانفیگ‌ها",
+                            callback_data=(
+                                f"shop:configserver:{subscription_id}:"
+                                f"{server_index}"
+                            ),
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "🏠 منو",
+                            callback_data="runtime:home",
+                        )
+                    ],
+                ]),
                 disable_web_page_preview=True,
             )
             return
@@ -1055,11 +1191,27 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if owned is None or owned["status"] not in ("active", "disabled", "expired"):
                 raise TenantBusinessError("subscription cannot be renewed")
             plans = business.list_plans()
-            rows = [[InlineKeyboardButton(
-                f"{p['name']} · {p['traffic_gb']}GB · {p['duration_days']} روز · {p['price']:,} {p['currency']}",
-                callback_data=f"shop:renewplan:{subscription_id}:{p['id']}"
-            )] for p in plans] or [[InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")]]
-            rows.append([InlineKeyboardButton("↩️ اشتراک‌های من", callback_data="shop:subs")])
+            plan_buttons = [
+                InlineKeyboardButton(
+                    f"{p['name']} · {p['traffic_gb']}GB · "
+                    f"{p['duration_days']} روز · {p['price']:,} {p['currency']}",
+                    callback_data=f"shop:renewplan:{subscription_id}:{p['id']}",
+                )
+                for p in plans
+            ]
+            rows = _column_rows(
+                plan_buttons,
+                int(settings.get("plan_columns") or 1),
+            )
+            if not rows:
+                rows = [[
+                    InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")
+                ]]
+            rows.append([
+                InlineKeyboardButton(
+                    "↩️ اشتراک‌های من", callback_data="shop:subs"
+                )
+            ])
             await update.callback_query.edit_message_text(
                 f"♻️ پلن تمدید اشتراک #{subscription_id} را انتخاب کنید.",
                 reply_markup=InlineKeyboardMarkup(rows),
