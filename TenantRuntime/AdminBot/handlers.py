@@ -2918,6 +2918,28 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
 
 
+async def userbot_admin_media(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    spec, _, _, business = _services(context)
+    if spec.role != "admin":
+        raise RuntimeError("AdminBot media handler registered for non-admin role")
+    actor = int(update.effective_user.id) if update.effective_user else 0
+    from TenantRuntime.AdminBot import userbot_management
+    handled = await userbot_management.handle_media(
+        update,
+        context,
+        business=business,
+        actor=actor,
+        admin_main_keyboard=admin_main_keyboard,
+    )
+    if not handled and update.effective_message:
+        await update.effective_message.reply_text(
+            "از منوی ربات استفاده کنید.",
+            reply_markup=admin_main_keyboard(),
+        )
+
+
 async def userbot_admin_document(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -2949,6 +2971,9 @@ def register_admin_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("menu", show_home), group=0)
     application.add_handler(CommandHandler("status", show_status), group=0)
     application.add_handler(CallbackQueryHandler(on_callback), group=0)
+    application.add_handler(
+        MessageHandler(filters.PHOTO | filters.VIDEO, userbot_admin_media), group=0
+    )
     application.add_handler(
         MessageHandler(filters.Document.ALL, userbot_admin_document), group=0
     )

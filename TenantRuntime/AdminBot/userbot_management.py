@@ -847,23 +847,6 @@ def _channel_admin_menu(draft: dict[str, Any]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-async def _channel_menu(update: Update, business: Any, actor: int) -> None:
-    settings = business.userbot_settings_admin(actor)
-    draft = _channel_draft(update._effective_message._bot._request[0] if False else None) if False else None
-    # The no-op expression above intentionally avoids storing global state; draft
-    # is always read from the current Telegram context by caller.
-    channel = str(settings.get("channel_id") or "").strip() or "تنظیم نشده"
-    context_draft = {"kind": "", "buttons": []}
-    await _edit_or_send(
-        update,
-        "📢 مدیریت پست کانال\n"
-        f"🎯 مقصد: {channel}\n\n"
-        "از این بخش پست متنی، عکس یا ویدئو را با دکمه و پیش‌نمایش "
-        "ساخته و با توکن ربات کاربران منتشر می‌کنید.",
-        _channel_admin_menu(context_draft),
-    )
-
-
 async def _show_channel_menu(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
