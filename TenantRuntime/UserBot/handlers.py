@@ -31,6 +31,7 @@ from telegram.ext import (
 from Gateway.catalog import RuntimeBotSpec
 from TenantRuntime.business import TenantBusinessError
 from TenantRuntime.button_styles import keyboard_button as KeyboardButton
+from Shared.timeutils import parse_utc, utcnow
 from TenantRuntime.common import _deny_update, _services, runtime_access_gate, runtime_error
 
 def _money_lines(items: list[dict]) -> list[str]:
