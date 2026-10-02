@@ -865,8 +865,25 @@ async def _restore_backup(business: Any, data: bytes) -> None:
             if not isinstance(rows, list):
                 raise ValueError("invalid backup rows")
             if table in ("tenant_sale_plans", "tenant_payment_methods", "tenant_coupons"):
+                # IDs are global primary keys. Reject a crafted/foreign backup
+                # before an UPSERT could ever overwrite another tenant's row.
+                for row in rows:
+                    if not isinstance(row, dict):
+                        raise ValueError("invalid backup row")
+                    row_id = int(row.get("id") or 0)
+                    if row_id <= 0:
+                        raise ValueError("invalid backup row id")
+                    existing = business.conn.execute(
+                        f"SELECT tenant_id FROM {table} WHERE id=?",
+                        (row_id,),
+                    ).fetchone()
+                    if (
+                        existing is not None
+                        and int(existing["tenant_id"]) != int(business.tenant_id)
+                    ):
+                        raise ValueError("backup row id belongs to another tenant")
                 # Do not delete rows referenced by financial/service history.
-                # Existing IDs are upserted; missing current rows stay untouched.
+                # Existing same-tenant IDs are upserted; missing rows stay untouched.
                 pass
             else:
                 business.conn.execute(f"DELETE FROM {table} WHERE tenant_id=?", (business.tenant_id,))
@@ -908,9 +925,9 @@ async def handle_callback(
     data = str(query.data or "")
     if not (data.startswith("userbot:") or data.startswith("channelpost:")):
         return False
-    await query.answer()
 
     if data == "userbot:noop":
+        await query.answer()
         return True
     if data == "userbot:menu":
         await send_userbot_main_menu(update, context); return True
