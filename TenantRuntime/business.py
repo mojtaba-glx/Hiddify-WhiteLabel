@@ -3744,6 +3744,406 @@ class TenantBusinessService:
             for row in rows
         ]
 
+    def subscription_admin(
+        self, actor_id: int, *, subscription_id: int
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        row = self.conn.execute(
+            "SELECT s.*, c.display_name, c.username, c.telegram_user_id, "
+            "p.name AS plan_name, p.duration_days AS plan_duration_days, "
+            "p.traffic_gb AS plan_traffic_gb, srv.label AS server_label "
+            "FROM tenant_subscriptions s "
+            "JOIN tenant_customers c ON c.id=s.customer_id AND c.tenant_id=s.tenant_id "
+            "JOIN tenant_sale_plans p ON p.id=s.plan_id AND p.tenant_id=s.tenant_id "
+            "LEFT JOIN tenant_servers srv ON srv.id=s.server_id AND srv.tenant_id=s.tenant_id "
+            "WHERE s.id=? AND s.tenant_id=?",
+            (int(subscription_id), self.tenant_id),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("subscription not found")
+        return dict(row)
+
+    def search_subscriptions_admin(
+        self, actor_id: int, query: str, *, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        term = _text(query, 200)
+        plain = term.strip().lstrip("@").strip()
+        like = f"%{plain}%"
+        args: list[Any] = [
+            self.tenant_id,
+            like,
+            like,
+            like,
+            like,
+        ]
+        numeric = 0
+        try:
+            numeric = int(plain.lstrip("#"))
+        except (TypeError, ValueError):
+            numeric = 0
+        id_clause = ""
+        if numeric > 0:
+            id_clause = (
+                " OR s.id=? OR c.id=? OR c.telegram_user_id=? "
+                "OR o.id=?"
+            )
+            args.extend([numeric, numeric, numeric, numeric])
+        args.append(max(1, min(int(limit), 500)))
+        rows = self.conn.execute(
+            "SELECT s.*, c.display_name, c.username, c.telegram_user_id, "
+            "p.name AS plan_name, srv.label AS server_label "
+            "FROM tenant_subscriptions s "
+            "JOIN tenant_customers c ON c.id=s.customer_id AND c.tenant_id=s.tenant_id "
+            "JOIN tenant_sale_plans p ON p.id=s.plan_id AND p.tenant_id=s.tenant_id "
+            "LEFT JOIN tenant_servers srv ON srv.id=s.server_id AND srv.tenant_id=s.tenant_id "
+            "LEFT JOIN tenant_orders o ON o.id=s.order_id AND o.tenant_id=s.tenant_id "
+            "WHERE s.tenant_id=? AND ("
+            "c.display_name LIKE ? COLLATE NOCASE OR "
+            "COALESCE(c.username,'') LIKE ? COLLATE NOCASE OR "
+            "COALESCE(s.external_ref,'') LIKE ? COLLATE NOCASE OR "
+            "COALESCE(srv.label,'') LIKE ? COLLATE NOCASE"
+            + id_clause
+            + ") ORDER BY CASE s.status WHEN 'active' THEN 0 "
+            "WHEN 'disabled' THEN 1 WHEN 'pending_provisioning' THEN 2 "
+            "ELSE 3 END, s.id DESC LIMIT ?",
+            tuple(args),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_subscriptions_tracking_admin(
+        self,
+        actor_id: int,
+        *,
+        status: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        query = (
+            "SELECT s.*, c.display_name, c.username, c.telegram_user_id, "
+            "p.name AS plan_name, srv.label AS server_label "
+            "FROM tenant_subscriptions s "
+            "JOIN tenant_customers c ON c.id=s.customer_id AND c.tenant_id=s.tenant_id "
+            "JOIN tenant_sale_plans p ON p.id=s.plan_id AND p.tenant_id=s.tenant_id "
+            "LEFT JOIN tenant_servers srv ON srv.id=s.server_id AND srv.tenant_id=s.tenant_id "
+            "WHERE s.tenant_id=?"
+        )
+        args: list[Any] = [self.tenant_id]
+        if status is not None:
+            normalized = str(status).strip().lower()
+            if normalized not in ("active", "disabled", "expired", "pending_provisioning"):
+                raise ValueError("invalid subscription status")
+            query += " AND s.status=?"
+            args.append(normalized)
+        query += " ORDER BY s.id DESC LIMIT ?"
+        args.append(max(1, min(int(limit), 500)))
+        return [
+            dict(row)
+            for row in self.conn.execute(query, tuple(args)).fetchall()
+        ]
+
+    def review_old_subscriptions_admin(
+        self,
+        actor_id: int,
+        *,
+        kind: str,
+        now: datetime | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        moment = now or utcnow()
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        normalized = str(kind or "").strip().lower()
+        base = (
+            "SELECT DISTINCT s.*, c.display_name, c.username, c.telegram_user_id, "
+            "p.name AS plan_name, srv.label AS server_label "
+            "FROM tenant_subscriptions s "
+            "JOIN tenant_customers c ON c.id=s.customer_id AND c.tenant_id=s.tenant_id "
+            "JOIN tenant_sale_plans p ON p.id=s.plan_id AND p.tenant_id=s.tenant_id "
+            "LEFT JOIN tenant_servers srv ON srv.id=s.server_id AND srv.tenant_id=s.tenant_id "
+            "LEFT JOIN tenant_subscription_nodes n "
+            "ON n.subscription_id=s.id AND n.tenant_id=s.tenant_id "
+            "WHERE s.tenant_id=? "
+        )
+        args: list[Any] = [self.tenant_id]
+        if normalized == "stale_zero":
+            base += (
+                "AND ((s.status IN ('active','disabled') AND s.expires_at<=?) "
+                "OR s.enforcement_pending=1 OR n.status='error' "
+                "OR n.fail_count>0 OR n.frozen_at IS NOT NULL) "
+            )
+            args.append(iso_utc(moment))
+        elif normalized == "unstarted":
+            base += (
+                "AND s.status='pending_provisioning' AND s.created_at<=? "
+            )
+            args.append(iso_utc(moment - timedelta(days=1)))
+        else:
+            raise ValueError("invalid review kind")
+        base += "ORDER BY s.id DESC LIMIT ?"
+        args.append(max(1, min(int(limit), 500)))
+        return [
+            dict(row)
+            for row in self.conn.execute(base, tuple(args)).fetchall()
+        ]
+
+    def admin_subscription_link(
+        self, actor_id: int, *, subscription_id: int
+    ) -> str:
+        subscription = self.subscription_admin(
+            actor_id, subscription_id=int(subscription_id)
+        )
+        if subscription["status"] != "active" or self._subscription_is_due(subscription):
+            raise TenantBusinessError("subscription is not active")
+        if subscription["server_id"] is None or not subscription["external_ref"]:
+            raise TenantBusinessError("subscription is not provisioned")
+        smart_url = self._smart_url(subscription_id=int(subscription_id))
+        if smart_url:
+            return smart_url
+        server = self.server(int(subscription["server_id"]))
+        try:
+            return self.panel_adapter.subscription_link(
+                target=self._panel_target(server),
+                external_ref=str(subscription["external_ref"]),
+            )
+        except PanelError as exc:
+            raise TenantBusinessError("subscription link is unavailable") from exc
+
+    def edit_subscription_terms_admin(
+        self,
+        actor_id: int,
+        *,
+        subscription_id: int,
+        traffic_gb: int | None = None,
+        duration_days: int | None = None,
+        reset_usage: bool = False,
+        reset_days: bool = False,
+    ) -> dict[str, Any]:
+        subscription = self.subscription_admin(
+            actor_id, subscription_id=int(subscription_id)
+        )
+        if subscription["server_id"] is None or not subscription["external_ref"]:
+            raise TenantBusinessError("subscription is not provisioned")
+        if subscription["status"] == "expired" and duration_days is None and not reset_days:
+            raise TenantBusinessError("expired subscription requires a new duration")
+
+        next_traffic = int(subscription["traffic_bytes"])
+        if traffic_gb is not None:
+            if int(traffic_gb) <= 0:
+                raise ValueError("traffic must be positive")
+            next_traffic = int(traffic_gb) * 1024**3
+
+        now_dt = utcnow()
+        current_expiry = parse_utc(str(subscription["expires_at"]))
+        next_expiry = current_expiry
+        if duration_days is not None:
+            if int(duration_days) <= 0:
+                raise ValueError("duration must be positive")
+            next_expiry = now_dt + timedelta(days=int(duration_days))
+        elif reset_days:
+            plan = self.plan(int(subscription["plan_id"]), public=False)
+            next_expiry = now_dt + timedelta(days=int(plan["duration_days"]))
+
+        remaining_seconds = max(
+            86400,
+            int((next_expiry - now_dt).total_seconds()),
+        )
+        request_days = max(1, (remaining_seconds + 86399) // 86400)
+
+        self._ensure_primary_subscription_node(subscription)
+        mappings = self.conn.execute(
+            "SELECT * FROM tenant_subscription_nodes "
+            "WHERE tenant_id=? AND subscription_id=? AND external_ref IS NOT NULL "
+            "ORDER BY is_primary DESC, id",
+            (self.tenant_id, int(subscription_id)),
+        ).fetchall()
+        if not mappings:
+            raise TenantBusinessError("subscription has no panel targets")
+
+        results: list[tuple[sqlite3.Row, Any]] = []
+        original_disabled = str(subscription["status"]) == "disabled"
+        for mapping in mappings:
+            secret = ""
+            try:
+                _, target, secret = self._panel_material(int(mapping["server_id"]))
+                user = self.panel_adapter.renew(
+                    target=target,
+                    secret=secret,
+                    external_ref=str(mapping["external_ref"]),
+                    request=RenewRequest(
+                        traffic_bytes=next_traffic,
+                        duration_days=int(request_days),
+                        expires_at=iso_utc(next_expiry),
+                        reset_usage=bool(reset_usage),
+                        idempotency_key=(
+                            f"tenant:{self.tenant_id}:admin-edit:"
+                            f"{int(subscription_id)}:{int(mapping['server_id'])}:"
+                            f"{iso_utc(now_dt)}"
+                        ),
+                    ),
+                )
+                if original_disabled:
+                    user = self.panel_adapter.set_enabled(
+                        target=target,
+                        secret=secret,
+                        external_ref=str(mapping["external_ref"]),
+                        enabled=False,
+                    )
+                results.append((mapping, user))
+            except PanelError as exc:
+                raise TenantBusinessError("panel user update failed") from exc
+            finally:
+                secret = ""
+
+        primary_user = next(
+            (
+                user
+                for mapping, user in results
+                if int(mapping["is_primary"] or 0) == 1
+            ),
+            None,
+        )
+        if primary_user is None:
+            raise TenantBusinessError("primary panel target is unavailable")
+
+        state = "disabled" if original_disabled else "active"
+        now_text = iso_utc(now_dt)
+        with transaction(self.conn):
+            for mapping, user in results:
+                self._upsert_subscription_node(
+                    subscription_id=int(subscription_id),
+                    server_id=int(mapping["server_id"]),
+                    external_ref=user.external_ref,
+                    is_primary=bool(mapping["is_primary"]),
+                    status=state,
+                    usage_bytes=max(0, int(user.usage_bytes)),
+                    last_online=user.last_online,
+                )
+            changed = self.conn.execute(
+                "UPDATE tenant_subscriptions SET traffic_bytes=?, usage_bytes=?, "
+                "expires_at=?, status=?, expired_at=NULL, enforcement_pending=0, "
+                "enforcement_error=NULL, last_online=?, last_synced_at=?, updated_at=? "
+                "WHERE id=? AND tenant_id=?",
+                (
+                    next_traffic,
+                    max(0, int(primary_user.usage_bytes)),
+                    iso_utc(next_expiry),
+                    state,
+                    primary_user.last_online,
+                    now_text,
+                    now_text,
+                    int(subscription_id),
+                    self.tenant_id,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("subscription state changed")
+        return self.subscription_admin(
+            actor_id, subscription_id=int(subscription_id)
+        )
+
+    def daily_admin_report(
+        self,
+        actor_id: int,
+        *,
+        now: datetime | None = None,
+        tz_name: str = "Asia/Tehran",
+    ) -> dict[str, Any]:
+        """Completed previous-day accounting, mirroring SellBot's daily report semantics."""
+        self._admin(actor_id)
+        try:
+            zone = ZoneInfo(str(tz_name or "Asia/Tehran"))
+        except Exception:
+            zone = ZoneInfo("Asia/Tehran")
+            tz_name = "Asia/Tehran"
+        moment = now or utcnow()
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        local_now = moment.astimezone(zone)
+        report_day = local_now.date() - timedelta(days=1)
+        start_local = datetime.combine(
+            report_day, datetime.min.time(), tzinfo=zone
+        )
+        end_local = start_local + timedelta(days=1)
+        start = iso_utc(start_local.astimezone(timezone.utc))
+        end = iso_utc(end_local.astimezone(timezone.utc))
+
+        cash_rows = self.conn.execute(
+            "SELECT currency, COUNT(*) AS count, COALESCE(SUM(amount),0) AS amount "
+            "FROM ("
+            " SELECT o.currency AS currency, o.amount AS amount "
+            " FROM tenant_receipts r JOIN tenant_orders o "
+            " ON o.id=r.order_id AND o.tenant_id=r.tenant_id "
+            " WHERE r.tenant_id=? AND r.status='approved' "
+            " AND r.reviewed_at>=? AND r.reviewed_at<? "
+            " UNION ALL "
+            " SELECT w.currency AS currency, w.amount AS amount "
+            " FROM tenant_wallet_topups w "
+            " WHERE w.tenant_id=? AND w.status='paid' "
+            " AND w.paid_at>=? AND w.paid_at<?"
+            ") GROUP BY currency ORDER BY currency",
+            (self.tenant_id, start, end, self.tenant_id, start, end),
+        ).fetchall()
+        service_rows = self.conn.execute(
+            "SELECT o.currency, "
+            "SUM(CASE WHEN o.order_kind='purchase' THEN 1 ELSE 0 END) AS buy_count, "
+            "COALESCE(SUM(CASE WHEN o.order_kind='purchase' THEN o.amount ELSE 0 END),0) AS buy_amount, "
+            "SUM(CASE WHEN o.order_kind='renewal' THEN 1 ELSE 0 END) AS renew_count, "
+            "COALESCE(SUM(CASE WHEN o.order_kind='renewal' THEN o.amount ELSE 0 END),0) AS renew_amount, "
+            "SUM(CASE WHEN o.wallet_amount>0 THEN 1 ELSE 0 END) AS wallet_count, "
+            "COALESCE(SUM(o.wallet_amount),0) AS wallet_amount "
+            "FROM tenant_orders o WHERE o.tenant_id=? "
+            "AND o.status IN ('paid','fulfilled') "
+            "AND o.order_kind IN ('purchase','renewal') "
+            "AND o.paid_at>=? AND o.paid_at<? "
+            "GROUP BY o.currency ORDER BY o.currency",
+            (self.tenant_id, start, end),
+        ).fetchall()
+        receipt_counts = self.conn.execute(
+            "SELECT "
+            "SUM(CASE WHEN status='approved' THEN 1 ELSE 0 END) AS approved, "
+            "SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) AS rejected "
+            "FROM tenant_receipts WHERE tenant_id=? "
+            "AND reviewed_at>=? AND reviewed_at<?",
+            (self.tenant_id, start, end),
+        ).fetchone()
+        topup_counts = self.conn.execute(
+            "SELECT "
+            "SUM(CASE WHEN status='paid' THEN 1 ELSE 0 END) AS approved, "
+            "SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) AS rejected "
+            "FROM tenant_wallet_topups WHERE tenant_id=? "
+            "AND updated_at>=? AND updated_at<?",
+            (self.tenant_id, start, end),
+        ).fetchone()
+        created = self.conn.execute(
+            "SELECT COUNT(*) FROM tenant_customers "
+            "WHERE tenant_id=? AND created_at>=? AND created_at<?",
+            (self.tenant_id, start, end),
+        ).fetchone()
+        return {
+            "report_day": report_day.isoformat(),
+            "timezone": str(tz_name),
+            "cash": self._money_totals(cash_rows),
+            "services": [
+                {
+                    "currency": str(row["currency"]),
+                    "buy_count": int(row["buy_count"] or 0),
+                    "buy_amount": int(row["buy_amount"] or 0),
+                    "renew_count": int(row["renew_count"] or 0),
+                    "renew_amount": int(row["renew_amount"] or 0),
+                    "wallet_count": int(row["wallet_count"] or 0),
+                    "wallet_amount": int(row["wallet_amount"] or 0),
+                }
+                for row in service_rows
+            ],
+            "approved_receipts": int(receipt_counts["approved"] or 0),
+            "rejected_receipts": int(receipt_counts["rejected"] or 0),
+            "approved_topups": int(topup_counts["approved"] or 0),
+            "rejected_topups": int(topup_counts["rejected"] or 0),
+            "new_customers": int(created[0] or 0),
+        }
+
     def sales_report(
         self,
         actor_id: int,
