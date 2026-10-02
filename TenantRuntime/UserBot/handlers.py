@@ -439,7 +439,7 @@ def _menu(spec: RuntimeBotSpec, business) -> InlineKeyboardMarkup:
 
 
 async def _force_join_allowed(update: Update, context: ContextTypes.DEFAULT_TYPE, business) -> bool:
-    settings = business.runtime_userbot_settings()
+    settings = _set_button_settings(business.runtime_userbot_settings())
     if not bool(settings.get("force_join_enabled", False)):
         return True
     channel = str(settings.get("force_join_channel") or "").strip()
@@ -560,7 +560,7 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
     except (TenantBusinessError, ValueError, sqlite3.Error):
         text = base
-    settings = business.runtime_userbot_settings()
+    settings = _set_button_settings(business.runtime_userbot_settings())
     status_markup = InlineKeyboardMarkup([
         [
             _button(
@@ -620,7 +620,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     actor = int(update.effective_user.id) if update.effective_user else 0
     if not await _force_join_allowed(update, context, business):
         return
-    settings = business.runtime_userbot_settings()
+    settings = _set_button_settings(business.runtime_userbot_settings())
     try:
         if data == "shop:account":
             summary = business.customer_account_summary(actor)
@@ -1191,6 +1191,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     spec, _, _, business = _services(context)
+    _set_button_settings(business.runtime_userbot_settings())
     if spec.role != "user":
         raise RuntimeError("UserBot text handler registered for non-user role")
     actor = int(update.effective_user.id) if update.effective_user else 0
@@ -1300,6 +1301,7 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if update.effective_message is None or not update.effective_message.photo:
         return
     spec, _, _, business = _services(context)
+    _set_button_settings(business.runtime_userbot_settings())
     flow = context.user_data.get("biz_flow")
     actor = int(update.effective_user.id) if update.effective_user else 0
     if not await _force_join_allowed(update, context, business):
