@@ -17,6 +17,7 @@ GIB = 1024 ** 3
 class RenewalPanel:
     def __init__(self) -> None:
         self.renew_requests: list[RenewRequest] = []
+        self.usage_bytes = 10 * GIB
 
     def renew(self, *, target, secret: str, external_ref: str, request: RenewRequest):
         assert secret
@@ -34,7 +35,7 @@ class RenewalPanel:
     def usage(self, *, target, secret: str, external_ref: str):
         assert secret
         return UsageResult(
-            usage_bytes=10 * GIB,
+            usage_bytes=int(self.usage_bytes),
             active=True,
             last_online=iso_utc(utcnow()),
         )
@@ -153,7 +154,8 @@ def test_policy_profiles_map_to_expected_rollover_modes(
 def test_advanced_policy_requires_near_expiry_or_low_remaining_volume(
     conn, factories, cipher
 ) -> None:
-    _tenant, service = _service(conn, factories, cipher)
+    panel = RenewalPanel()
+    _tenant, service = _service(conn, factories, cipher, panel=panel)
     seeded = _active_subscription(conn, service)
     subscription_id = int(seeded["subscription_id"])
 
@@ -180,14 +182,14 @@ def test_advanced_policy_requires_near_expiry_or_low_remaining_volume(
     assert near_time["allowed"] is True
 
     conn.execute(
-        "UPDATE tenant_subscriptions SET expires_at=?, usage_bytes=? WHERE id=?",
+        "UPDATE tenant_subscriptions SET expires_at=? WHERE id=?",
         (
             iso_utc(utcnow() + timedelta(days=10)),
-            49 * GIB,
             subscription_id,
         ),
     )
     conn.commit()
+    panel.usage_bytes = 49 * GIB
     low_volume = service.renewal_eligibility(
         7101,
         subscription_id=subscription_id,
