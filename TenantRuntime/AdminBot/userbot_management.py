@@ -2035,8 +2035,6 @@ async def handle_callback(
         "userbot:settings:buy_renew:enable_buy": ("enable_buy", "buy_renew"),
         "userbot:settings:buy_renew:enable_renew": ("enable_renew", "buy_renew"),
         "userbot:settings:buy_renew:show_renew_in_main_menu": ("show_renew_in_main_menu", "buy_renew"),
-        "userbot:settings:buy_renew:renew_unlimited_volume": ("renew_unlimited_volume", "buy_renew"),
-        "userbot:settings:buy_renew:renew_unlimited_time": ("renew_unlimited_time", "buy_renew"),
         "userbot:settings:tx_plans:plan_categories_enabled": ("plan_categories_enabled", "tx_plans"),
         "userbot:settings:tx_plans:plan_sort_by_priority": ("plan_sort_by_priority", "tx_plans"),
         "userbot:settings:marketing:toggle:enable_discount_code": ("enable_discount_code", "marketing"),
@@ -2122,12 +2120,12 @@ async def handle_callback(
 
     if data.startswith("userbot:settings:buy_renew:renew_rollover:"):
         parts = data.split(":")
-        if len(parts) != 7:
+        if len(parts) != 6:
             raise ValueError("invalid renewal rollover callback")
         business.set_renewal_rollover_admin(
             actor,
-            kind=parts[5],
-            mode=parts[6],
+            kind=parts[4],
+            mode=parts[5],
         )
         await _settings_section(update, business, actor, "renew_policy")
         return True
