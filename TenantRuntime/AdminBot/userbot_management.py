@@ -1684,61 +1684,204 @@ async def handle_callback(
         await _publish_channel(update,context,business,actor); return True
 
     if data == "userbot:settings_menu":
-        await _settings_root(update,business,actor); return True
-    if data.startswith("userbot:settings:toggle:"):
-        parts=data.split(":"); key=parts[3]; back=":".join(parts[4:])
-        business.toggle_userbot_setting_admin(actor,key=key)
-        if back.startswith("userbot:settings:"):
-            await _settings_section(update,business,actor,back.rsplit(":",1)[1])
-        else:
-            await _settings_root(update,business,actor)
+        await _settings_root(update, business, actor)
         return True
-    if data.startswith("userbot:settings:value:"):
-        parts=data.split(":"); key=parts[3]; value=parts[4]; business.set_userbot_setting_admin(actor,key=key,value=value)
-        await _settings_section(update,business,actor,"ui"); return True
-    if data.startswith("userbot:settings:text:"):
-        key=data.rsplit(":",1)[1]; current=business.userbot_settings_admin(actor).get(key) or "—"
-        context.user_data[FLOW_KEY]={"kind":"setting_text","key":key}
-        await query.message.reply_text(f"📝 مقدار فعلی:\n{current}\n\nمتن جدید را ارسال کنید:",reply_markup=userbot_cancel_keyboard()); return True
-    if data == "userbot:settings:plansort":
-        s=business.userbot_settings_admin(actor); order=["id","price_asc","price_desc","traffic_asc","traffic_desc"]; current=str(s.get("plan_sort_mode")); value=order[(order.index(current)+1)%len(order)] if current in order else "id"; business.set_userbot_setting_admin(actor,key="plan_sort_mode",value=value); await _settings_section(update,business,actor,"tx_plans"); return True
-    if data == "userbot:settings:plancol":
-        s=business.userbot_settings_admin(actor); value=(int(s.get("plan_columns") or 1)%3)+1; business.set_userbot_setting_admin(actor,key="plan_columns",value=value); await _settings_section(update,business,actor,"tx_plans"); return True
-    if data == "userbot:settings:servercol":
-        s=business.userbot_settings_admin(actor); value=(int(s.get("server_columns") or 1)%3)+1; business.set_userbot_setting_admin(actor,key="server_columns",value=value); await _settings_section(update,business,actor,"tx_plans"); return True
-    if data == "userbot:settings:trial":
-        g=business.growth_settings(actor)
-        await _edit_or_send(update,
-            f"🎊 مشخصات اشتراک تستی\nوضعیت: {_bool_icon(g.get('trial_enabled'))}\nحجم: {g.get('trial_traffic_gb')}GB\nمدت: {g.get('trial_duration_days')} روز",
+
+    # Exact Hiddify-SellBot callback names. Keeping these stable makes the
+    # transferred keyboards testable and avoids menu buttons that only look
+    # correct but are not wired to the tenant runtime.
+    exact_toggles = {
+        "userbot:settings:subscription:show_user_page_link": ("show_user_page_link", "subscription"),
+        "userbot:settings:subscription:show_username": ("show_username", "subscription"),
+        "userbot:settings:subscription:shuffle_configs": ("shuffle_configs", "subscription"),
+        "userbot:settings:subscription:shuffle_server_layout": ("shuffle_server_layout", "subscription"),
+        "userbot:settings:subscription:shuffle_config_layout": ("shuffle_config_layout", "subscription"),
+        "userbot:settings:sub_link_status:show_direct_config": ("show_direct_config", "sub_link_status"),
+        "userbot:settings:sub_link_status:show_sub_link": ("show_sub_link", "sub_link_status"),
+        "userbot:settings:sub_link_status:show_smart_link": ("show_smart_link", "sub_link_status"),
+        "userbot:settings:buy_renew:enable_buy": ("enable_buy", "buy_renew"),
+        "userbot:settings:buy_renew:enable_renew": ("enable_renew", "buy_renew"),
+        "userbot:settings:buy_renew:show_renew_in_main_menu": ("show_renew_in_main_menu", "buy_renew"),
+        "userbot:settings:marketing:toggle:enable_discount_code": ("enable_discount_code", "marketing"),
+        "userbot:settings:marketing:toggle:show_gift_button": ("show_gift_button", "marketing"),
+        "userbot:settings:marketing:toggle:show_user_status": ("show_user_status", "marketing"),
+        "userbot:settings:force_join:toggle": ("force_join_enabled", "force_join"),
+        "userbot:settings:ui:colored_buttons": ("colored_buttons", "ui"),
+    }
+    if data in exact_toggles:
+        key, section = exact_toggles[data]
+        business.toggle_userbot_setting_admin(actor, key=key)
+        await _settings_section(update, business, actor, section)
+        return True
+
+    if data.startswith("userbot:settings:ui:theme:"):
+        theme = data.rsplit(":", 1)[1]
+        business.set_userbot_setting_admin(actor, key="button_theme", value=theme)
+        await _settings_section(update, business, actor, "ui")
+        return True
+
+    if data == "userbot:settings:texts:guide_menu":
+        await _settings_section(update, business, actor, "guide_texts")
+        return True
+    if data.startswith("userbot:settings:texts:edit:"):
+        key = data.rsplit(":", 1)[1]
+        current = business.userbot_settings_admin(actor).get(key) or "—"
+        context.user_data[FLOW_KEY] = {
+            "kind": "setting_text",
+            "key": key,
+            "return_section": "guide_texts" if key.startswith("guide_") or key == "guide_text" else "texts",
+        }
+        await query.message.reply_text(
+            f"📝 مقدار فعلی:\n{current}\n\nمتن جدید را ارسال کنید:",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+
+    if data == "userbot:settings:sub_link_status:set_base_url":
+        current = str(business.userbot_settings_admin(actor).get("smart_base_url") or "")
+        context.user_data[FLOW_KEY] = {
+            "kind": "setting_text",
+            "key": "smart_base_url",
+            "return_section": "sub_link_status",
+        }
+        await query.message.reply_text(
+            "🌐 دامنه عمومی سرویس لینک هوشمند را با http/https ارسال کنید.\n"
+            f"مقدار فعلی: {current or 'پیش‌فرض سرور'}\n"
+            "برای برگشت به مقدار پیش‌فرض، 0 ارسال کنید.",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+    if data == "userbot:settings:sub_link_status:ssl_help":
+        await _edit_or_send(
+            update,
+            "🔐 راهنمای SSL دامنه\n\n"
+            "دامنه باید به IP سرور Smart Subscription اشاره کند و HTTPS معتبر داشته باشد. "
+            "آدرس ذخیره‌شده باید فقط شامل scheme و host (و در صورت نیاز port/path پایه) باشد.\n"
+            "نمونه: https://sub.example.com",
+            InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:sub_link_status")
+            ]]),
+        )
+        return True
+
+    if data == "userbot:settings:buy_renew:plan_columns:menu":
+        s = business.userbot_settings_admin(actor)
+        rows = [
+            [InlineKeyboardButton(
+                f"{'✅ ' if int(s.get('plan_columns') or 1) == value else ''}{value} ستون",
+                callback_data=f"userbot:settings:buy_renew:plan_columns:{value}",
+            )]
+            for value in (1, 2, 3)
+        ]
+        rows.append([InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:buy_renew")])
+        await _edit_or_send(update, "📋 تعداد ستون‌های نمایش پلن‌ها", InlineKeyboardMarkup(rows))
+        return True
+    if data.startswith("userbot:settings:buy_renew:plan_columns:"):
+        value = int(data.rsplit(":", 1)[1])
+        business.set_userbot_setting_admin(actor, key="plan_columns", value=value)
+        await _settings_section(update, business, actor, "buy_renew")
+        return True
+
+    if data == "userbot:settings:buy_renew:server_columns:menu":
+        s = business.userbot_settings_admin(actor)
+        rows = [
+            [InlineKeyboardButton(
+                f"{'✅ ' if int(s.get('server_columns') or 1) == value else ''}{value} ستون",
+                callback_data=f"userbot:settings:buy_renew:server_columns:{value}",
+            )]
+            for value in (1, 2, 3)
+        ]
+        rows.append([InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:buy_renew")])
+        await _edit_or_send(update, "🛰 تعداد ستون‌های نمایش سرورها", InlineKeyboardMarkup(rows))
+        return True
+    if data.startswith("userbot:settings:buy_renew:server_columns:"):
+        value = int(data.rsplit(":", 1)[1])
+        business.set_userbot_setting_admin(actor, key="server_columns", value=value)
+        await _settings_section(update, business, actor, "buy_renew")
+        return True
+
+    if data == "userbot:settings:tx_plans:plan_sort_mode:menu":
+        s = business.userbot_settings_admin(actor)
+        current = str(s.get("plan_sort_mode") or "id")
+        choices = [
+            ("id", "پیش‌فرض"),
+            ("price_asc", "قیمت کم به زیاد"),
+            ("price_desc", "قیمت زیاد به کم"),
+            ("traffic_asc", "حجم کم به زیاد"),
+            ("traffic_desc", "حجم زیاد به کم"),
+        ]
+        rows = [[InlineKeyboardButton(
+            f"{'✅ ' if current == value else ''}{title}",
+            callback_data=f"userbot:settings:tx_plans:plan_sort_mode:{value}",
+        )] for value, title in choices]
+        rows.append([InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:tx_plans")])
+        await _edit_or_send(update, "🔢 ترتیب نمایش پلن‌ها", InlineKeyboardMarkup(rows))
+        return True
+    if data.startswith("userbot:settings:tx_plans:plan_sort_mode:"):
+        value = data.rsplit(":", 1)[1]
+        business.set_userbot_setting_admin(actor, key="plan_sort_mode", value=value)
+        await _settings_section(update, business, actor, "tx_plans")
+        return True
+
+    if data == "userbot:settings:subscription:trial_spec":
+        g = business.growth_settings(actor)
+        await _edit_or_send(
+            update,
+            "🎊 مشخصات اشتراک تستی\n"
+            f"وضعیت: {_bool_icon(g.get('trial_enabled'))}\n"
+            f"حجم: {g.get('trial_traffic_gb')}GB\n"
+            f"مدت: {g.get('trial_duration_days')} روز",
             InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔥 روشن/خاموش تست",callback_data="userbot:settings:trial:toggle")],
-                [InlineKeyboardButton("📊 حجم تست",callback_data="userbot:settings:trial:traffic")],
-                [InlineKeyboardButton("📆 مدت تست",callback_data="userbot:settings:trial:days")],
-                [InlineKeyboardButton("🔙بازگشت",callback_data="userbot:settings:subscription")],
-            ])
-        ); return True
-    if data.startswith("userbot:settings:trial:"):
-        action=data.rsplit(":",1)[1]; g=business.growth_settings(actor)
-        if action=="toggle":
-            g=business.update_growth_settings(
-                actor,trial_enabled=not bool(g["trial_enabled"])
+                [InlineKeyboardButton(
+                    f"🔥 وضعیت اشتراک تستی | {_bool_icon(g.get('trial_enabled'))}",
+                    callback_data="userbot:settings:trial_spec:enabled",
+                )],
+                [InlineKeyboardButton("📊 حجم اشتراک تستی", callback_data="userbot:settings:trial_spec:usage")],
+                [InlineKeyboardButton("📆 مدت اشتراک تستی", callback_data="userbot:settings:trial_spec:days")],
+                [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:subscription")],
+            ]),
+        )
+        return True
+    if data.startswith("userbot:settings:trial_spec:"):
+        action = data.rsplit(":", 1)[1]
+        g = business.growth_settings(actor)
+        if action == "enabled":
+            business.update_growth_settings(
+                actor, trial_enabled=not bool(g.get("trial_enabled"))
             )
+            # Re-render through the canonical entry callback.
+            g = business.growth_settings(actor)
             await _edit_or_send(
                 update,
-                f"🎊 مشخصات اشتراک تستی\nوضعیت: {_bool_icon(g.get('trial_enabled'))}\n"
-                f"حجم: {g.get('trial_traffic_gb')}GB\nمدت: {g.get('trial_duration_days')} روز",
+                "🎊 مشخصات اشتراک تستی\n"
+                f"وضعیت: {_bool_icon(g.get('trial_enabled'))}\n"
+                f"حجم: {g.get('trial_traffic_gb')}GB\n"
+                f"مدت: {g.get('trial_duration_days')} روز",
                 InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔥 روشن/خاموش تست",callback_data="userbot:settings:trial:toggle")],
-                    [InlineKeyboardButton("📊 حجم تست",callback_data="userbot:settings:trial:traffic")],
-                    [InlineKeyboardButton("📆 مدت تست",callback_data="userbot:settings:trial:days")],
-                    [InlineKeyboardButton("🔙بازگشت",callback_data="userbot:settings:subscription")],
+                    [InlineKeyboardButton(
+                        f"🔥 وضعیت اشتراک تستی | {_bool_icon(g.get('trial_enabled'))}",
+                        callback_data="userbot:settings:trial_spec:enabled",
+                    )],
+                    [InlineKeyboardButton("📊 حجم اشتراک تستی", callback_data="userbot:settings:trial_spec:usage")],
+                    [InlineKeyboardButton("📆 مدت اشتراک تستی", callback_data="userbot:settings:trial_spec:days")],
+                    [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:subscription")],
                 ]),
             )
             return True
-        context.user_data[FLOW_KEY]={"kind":"trial_edit","field":action}
-        await query.message.reply_text("مقدار عددی جدید را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
-    if data == "userbot:settings:reminders":
-        s=business.userbot_settings_admin(actor)
+        if action not in {"usage", "days"}:
+            raise ValueError("invalid trial setting")
+        context.user_data[FLOW_KEY] = {
+            "kind": "trial_edit",
+            "field": "traffic" if action == "usage" else "days",
+        }
+        await query.message.reply_text(
+            "مقدار عددی جدید را وارد کنید:",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+
+    if data == "userbot:settings:subscription:sub_status_reminder":
+        s = business.userbot_settings_admin(actor)
         await _edit_or_send(
             update,
             "🔔 یادآور وضعیت اشتراک\n"
@@ -1747,65 +1890,306 @@ async def handle_callback(
             f"یادآوری حجمی: {int(s.get('reminder_remaining_gb') or 3)} گیگ مانده",
             InlineKeyboardMarkup([
                 [InlineKeyboardButton(
-                    f"🔔 روشن/خاموش | {_bool_icon(s.get('reminder_enabled'))}",
-                    callback_data="userbot:settings:toggle:reminder_enabled:userbot:settings:reminders",
+                    f"🔔 یادآور وضعیت اشتراک | {_bool_icon(s.get('reminder_enabled'))}",
+                    callback_data="userbot:settings:sub_status_reminder:enabled",
                 )],
-                [InlineKeyboardButton("📅 ویرایش روز یادآوری",callback_data="userbot:settings:reminder:days")],
-                [InlineKeyboardButton("📊 ویرایش حجم یادآوری",callback_data="userbot:settings:reminder:gb")],
-                [InlineKeyboardButton("🔙بازگشت",callback_data="userbot:settings:subscription")],
+                [InlineKeyboardButton("📊 یادآور وضعیت مصرف", callback_data="userbot:settings:sub_status_reminder:usage")],
+                [InlineKeyboardButton("📆 یادآور وضعیت زمان", callback_data="userbot:settings:sub_status_reminder:days")],
+                [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:subscription")],
             ]),
-        ); return True
-    if data.startswith("userbot:settings:reminder:"):
-        field=data.rsplit(":",1)[1]
-        if field not in {"days","gb"}: raise ValueError("invalid reminder setting")
-        context.user_data[FLOW_KEY]={"kind":"reminder_edit","field":field}
+        )
+        return True
+    if data.startswith("userbot:settings:sub_status_reminder:"):
+        action = data.rsplit(":", 1)[1]
+        if action == "enabled":
+            business.toggle_userbot_setting_admin(actor, key="reminder_enabled")
+            s = business.userbot_settings_admin(actor)
+            await _edit_or_send(
+                update,
+                "🔔 یادآور وضعیت اشتراک\n"
+                f"وضعیت: {_bool_icon(s.get('reminder_enabled'))}\n"
+                f"یادآوری زمانی: {int(s.get('reminder_days') or 3)} روز مانده\n"
+                f"یادآوری حجمی: {int(s.get('reminder_remaining_gb') or 3)} گیگ مانده",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        f"🔔 یادآور وضعیت اشتراک | {_bool_icon(s.get('reminder_enabled'))}",
+                        callback_data="userbot:settings:sub_status_reminder:enabled",
+                    )],
+                    [InlineKeyboardButton("📊 یادآور وضعیت مصرف", callback_data="userbot:settings:sub_status_reminder:usage")],
+                    [InlineKeyboardButton("📆 یادآور وضعیت زمان", callback_data="userbot:settings:sub_status_reminder:days")],
+                    [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:subscription")],
+                ]),
+            )
+            return True
+        if action not in {"usage", "days"}:
+            raise ValueError("invalid reminder setting")
+        context.user_data[FLOW_KEY] = {
+            "kind": "reminder_edit",
+            "field": "gb" if action == "usage" else "days",
+        }
         await query.message.reply_text(
-            "📅 تعداد روز مانده را وارد کنید (1 تا 30):"
-            if field=="days"
-            else "📊 حجم باقی‌مانده را به گیگ وارد کنید (1 تا 1000):",
+            "📊 حجم باقی‌مانده را به گیگ وارد کنید (1 تا 1000):"
+            if action == "usage"
+            else "📅 تعداد روز مانده را وارد کنید (1 تا 30):",
             reply_markup=userbot_cancel_keyboard(),
-        ); return True
+        )
+        return True
+
+    if data == "userbot:settings:subscription:reset_free_trial":
+        await _edit_or_send(
+            update,
+            "⚠️ بازنشانی تست رایگان\n"
+            "این کار سابقه دریافت تست رایگان همه کاربران همین Tenant را پاک می‌کند. ادامه می‌دهید؟",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ بله، بازنشانی شود", callback_data="userbot:settings:subscription:reset_free_trial:yes")],
+                [InlineKeyboardButton("❌ لغو", callback_data="userbot:settings:subscription")],
+            ]),
+        )
+        return True
+    if data == "userbot:settings:subscription:reset_free_trial:yes":
+        count = business.reset_all_customer_trials_admin(actor)
+        await _edit_or_send(
+            update,
+            f"✅ تست رایگان برای {count} کاربر بازنشانی شد.",
+            InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:subscription")
+            ]]),
+        )
+        return True
+
     if data == "userbot:settings:force_join:set_channel":
-        context.user_data[FLOW_KEY]={"kind":"force_join_channel"}
-        await query.message.reply_text("📢 @channel یا -100... را ارسال کنید:",reply_markup=userbot_cancel_keyboard()); return True
+        context.user_data[FLOW_KEY] = {"kind": "force_join_channel"}
+        await query.message.reply_text(
+            "📢 @channel یا -100... را ارسال کنید:",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+    if data == "userbot:settings:force_join:help":
+        s = business.userbot_settings_admin(actor)
+        await _edit_or_send(
+            update,
+            "❓ راهنمای عضویت اجباری\n\n"
+            + str(s.get("force_join_help_text") or ""),
+            InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:force_join")
+            ]]),
+        )
+        return True
+
     if data == "userbot:settings:payment:add":
-        context.user_data[FLOW_KEY]={"kind":"payment_add_kind"}
+        context.user_data[FLOW_KEY] = {"kind": "payment_add_kind"}
         await _edit_or_send(
             update,
             "💳 نوع روش پرداخت را انتخاب کنید:",
             InlineKeyboardMarkup([
-                [InlineKeyboardButton("💳 کارت به کارت",callback_data="userbot:settings:payment:addkind:card")],
-                [InlineKeyboardButton("🪙 رمزارز",callback_data="userbot:settings:payment:addkind:crypto")],
-                [InlineKeyboardButton("🔙بازگشت",callback_data="userbot:settings:payment")],
+                [InlineKeyboardButton("💳 کارت به کارت", callback_data="userbot:settings:payment:addkind:card")],
+                [InlineKeyboardButton("🪙 رمزارز", callback_data="userbot:settings:payment:addkind:crypto")],
+                [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:payment")],
             ]),
-        ); return True
+        )
+        return True
     if data.startswith("userbot:settings:payment:addkind:"):
-        kind=data.rsplit(":",1)[1]
-        if kind not in {"card","crypto"}: raise ValueError("invalid payment kind")
-        context.user_data[FLOW_KEY]={"kind":"payment_add_title","payment_kind":kind}
-        await query.message.reply_text("📝 عنوان روش پرداخت را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
+        kind = data.rsplit(":", 1)[1]
+        if kind not in {"card", "crypto"}:
+            raise ValueError("invalid payment kind")
+        context.user_data[FLOW_KEY] = {
+            "kind": "payment_add_title",
+            "payment_kind": kind,
+        }
+        await query.message.reply_text(
+            "📝 عنوان روش پرداخت را وارد کنید:",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
     if data.startswith("userbot:settings:payment:method:"):
-        mid=int(data.rsplit(":",1)[1]); item=next((x for x in business.list_payment_methods_admin(actor) if int(x["id"])==mid),None)
-        if item is None: raise TenantBusinessError("payment method not found")
-        await _edit_or_send(update,
-            f"💳 {item['title']}\nنوع: {item['kind']}\nارز: {item['currency']}\nمقصد: {item['destination']}\nوضعیت: {item['status']}",
+        mid = int(data.rsplit(":", 1)[1])
+        item = next(
+            (
+                x
+                for x in business.list_payment_methods_admin(actor)
+                if int(x["id"]) == mid
+            ),
+            None,
+        )
+        if item is None:
+            raise TenantBusinessError("payment method not found")
+        await _edit_or_send(
+            update,
+            f"💳 {item['title']}\n"
+            f"نوع: {item['kind']}\n"
+            f"ارز: {item['currency']}\n"
+            f"مقصد: {item['destination']}\n"
+            f"شبکه: {item.get('network') or '-'}\n"
+            f"توضیحات: {item.get('instructions') or '-'}\n"
+            f"وضعیت: {item['status']}",
             InlineKeyboardMarkup([
-                [InlineKeyboardButton("⏸/▶️ تغییر وضعیت",callback_data=f"userbot:settings:payment:toggle:{mid}")],
-                [InlineKeyboardButton("🔙بازگشت",callback_data="userbot:settings:payment")],
-            ])
-        ); return True
+                [InlineKeyboardButton("⏸/▶️ تغییر وضعیت", callback_data=f"userbot:settings:payment:toggle:{mid}")],
+                [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:payment")],
+            ]),
+        )
+        return True
     if data.startswith("userbot:settings:payment:toggle:"):
-        mid=int(data.rsplit(":",1)[1]); item=next(x for x in business.list_payment_methods_admin(actor) if int(x["id"])==mid); business.set_payment_method_status_admin(actor,method_id=mid,enabled=item["status"]!="active"); await _settings_section(update,business,actor,"payment"); return True
+        mid = int(data.rsplit(":", 1)[1])
+        item = next(
+            x
+            for x in business.list_payment_methods_admin(actor)
+            if int(x["id"]) == mid
+        )
+        business.set_payment_method_status_admin(
+            actor, method_id=mid, enabled=item["status"] != "active"
+        )
+        await _settings_section(update, business, actor, "payment")
+        return True
+
     if data == "userbot:settings:backup:download":
-        await _send_backup(update,business); return True
+        await _send_backup(update, business)
+        return True
     if data == "userbot:settings:backup:restore":
-        context.user_data[FLOW_KEY]={"kind":"backup_restore"}
-        await query.message.reply_text("📤 فایل JSON بکاپ همین Tenant را ارسال کنید.",reply_markup=userbot_cancel_keyboard()); return True
+        context.user_data[FLOW_KEY] = {"kind": "backup_restore"}
+        await query.message.reply_text(
+            "📤 فایل JSON بکاپ همین Tenant را ارسال کنید.",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+
+    # Backward-compatible callbacks from v0.10.4. They remain supported so an
+    # old Telegram message can still be clicked safely after an update.
+    if data.startswith("userbot:settings:toggle:"):
+        parts = data.split(":")
+        key = parts[3]
+        back = ":".join(parts[4:])
+        business.toggle_userbot_setting_admin(actor, key=key)
+        if back.startswith("userbot:settings:"):
+            section = back.rsplit(":", 1)[1]
+            if section == "reminders":
+                section = "subscription"
+            await _settings_section(update, business, actor, section)
+        else:
+            await _settings_root(update, business, actor)
+        return True
+    if data.startswith("userbot:settings:value:"):
+        parts = data.split(":")
+        key = parts[3]
+        value = parts[4]
+        business.set_userbot_setting_admin(actor, key=key, value=value)
+        await _settings_section(update, business, actor, "ui")
+        return True
+    if data.startswith("userbot:settings:text:"):
+        key = data.rsplit(":", 1)[1]
+        current = business.userbot_settings_admin(actor).get(key) or "—"
+        context.user_data[FLOW_KEY] = {
+            "kind": "setting_text",
+            "key": key,
+            "return_section": "texts",
+        }
+        await query.message.reply_text(
+            f"📝 مقدار فعلی:\n{current}\n\nمتن جدید را ارسال کنید:",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+    if data == "userbot:settings:plansort":
+        await _settings_section(update, business, actor, "tx_plans")
+        return True
+    if data == "userbot:settings:plancol":
+        s = business.userbot_settings_admin(actor)
+        value = (int(s.get("plan_columns") or 1) % 3) + 1
+        business.set_userbot_setting_admin(actor, key="plan_columns", value=value)
+        await _settings_section(update, business, actor, "tx_plans")
+        return True
+    if data == "userbot:settings:servercol":
+        s = business.userbot_settings_admin(actor)
+        value = (int(s.get("server_columns") or 1) % 3) + 1
+        business.set_userbot_setting_admin(actor, key="server_columns", value=value)
+        await _settings_section(update, business, actor, "tx_plans")
+        return True
+    if data in {"userbot:settings:trial", "userbot:settings:reminders"}:
+        target = (
+            "userbot:settings:subscription:trial_spec"
+            if data.endswith(":trial")
+            else "userbot:settings:subscription:sub_status_reminder"
+        )
+        # Old message callback: render the same screen directly.
+        if target.endswith("trial_spec"):
+            g = business.growth_settings(actor)
+            await _edit_or_send(
+                update,
+                "🎊 مشخصات اشتراک تستی\n"
+                f"وضعیت: {_bool_icon(g.get('trial_enabled'))}\n"
+                f"حجم: {g.get('trial_traffic_gb')}GB\n"
+                f"مدت: {g.get('trial_duration_days')} روز",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔥 وضعیت اشتراک تستی", callback_data="userbot:settings:trial_spec:enabled")],
+                    [InlineKeyboardButton("📊 حجم اشتراک تستی", callback_data="userbot:settings:trial_spec:usage")],
+                    [InlineKeyboardButton("📆 مدت اشتراک تستی", callback_data="userbot:settings:trial_spec:days")],
+                    [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:subscription")],
+                ]),
+            )
+        else:
+            s = business.userbot_settings_admin(actor)
+            await _edit_or_send(
+                update,
+                "🔔 یادآور وضعیت اشتراک\n"
+                f"وضعیت: {_bool_icon(s.get('reminder_enabled'))}\n"
+                f"یادآوری زمانی: {int(s.get('reminder_days') or 3)} روز مانده\n"
+                f"یادآوری حجمی: {int(s.get('reminder_remaining_gb') or 3)} گیگ مانده",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔔 روشن/خاموش", callback_data="userbot:settings:sub_status_reminder:enabled")],
+                    [InlineKeyboardButton("📊 یادآور وضعیت مصرف", callback_data="userbot:settings:sub_status_reminder:usage")],
+                    [InlineKeyboardButton("📆 یادآور وضعیت زمان", callback_data="userbot:settings:sub_status_reminder:days")],
+                    [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:subscription")],
+                ]),
+            )
+        return True
+    if data.startswith("userbot:settings:trial:"):
+        action = data.rsplit(":", 1)[1]
+        mapped = {"toggle": "enabled", "traffic": "usage", "days": "days"}.get(action)
+        if mapped is None:
+            raise ValueError("invalid trial setting")
+        if mapped == "enabled":
+            g = business.growth_settings(actor)
+            business.update_growth_settings(
+                actor, trial_enabled=not bool(g.get("trial_enabled"))
+            )
+            await _settings_section(update, business, actor, "subscription")
+            return True
+        context.user_data[FLOW_KEY] = {
+            "kind": "trial_edit",
+            "field": "traffic" if mapped == "usage" else "days",
+        }
+        await query.message.reply_text(
+            "مقدار عددی جدید را وارد کنید:",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+    if data.startswith("userbot:settings:reminder:"):
+        field = data.rsplit(":", 1)[1]
+        if field not in {"days", "gb"}:
+            raise ValueError("invalid reminder setting")
+        context.user_data[FLOW_KEY] = {"kind": "reminder_edit", "field": field}
+        await query.message.reply_text(
+            "📅 تعداد روز مانده را وارد کنید (1 تا 30):"
+            if field == "days"
+            else "📊 حجم باقی‌مانده را به گیگ وارد کنید (1 تا 1000):",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
 
     if data.startswith("userbot:settings:"):
-        section=data.rsplit(":",1)[1]
-        if section in {"subscription","sub_link_status","ui","buy_renew","tx_plans","texts","marketing","force_join","payment","backup_restore"}:
-            await _settings_section(update,business,actor,section); return True
+        section = data.rsplit(":", 1)[1]
+        if section in {
+            "subscription",
+            "sub_link_status",
+            "ui",
+            "buy_renew",
+            "tx_plans",
+            "texts",
+            "marketing",
+            "force_join",
+            "payment",
+            "backup_restore",
+        }:
+            await _settings_section(update, business, actor, section)
+            return True
 
     return True
 
