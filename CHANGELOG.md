@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.10.0-rc.3 — Guided Flow Input Fixes
+
+- License creation now resolves the customer/shop using the owner's numeric Telegram ID instead of incorrectly treating that value as the internal tenant database ID.
+- Guided tenant, provisioning, plan and license creation now show `❌ لغو` in Telegram's bottom reply keyboard during every step.
+- Cancelling a guided flow clears its state, hides the bottom keyboard and returns to the correct management menu.
+- Successful guided creation removes the temporary reply keyboard before rendering the resulting detail view.
+- Added regression coverage for Telegram-owner lookup, ambiguous owner IDs, bottom-keyboard cancellation and license creation by owner Telegram ID.
+
 ## v0.10.0-rc.2 — Update Path Hardening
 
 - Changed tenant, plan and license creation in MasterBot to guided step-by-step flows with cancellation.

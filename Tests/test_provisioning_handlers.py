@@ -6,6 +6,8 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
+
 from MasterBot.handlers import on_callback, on_text
 from MasterBot.service import BotIdentity, MasterService
 from Shared.crypto import FernetTokenCipher, generate_key
@@ -119,6 +121,75 @@ def test_failed_second_token_leaves_no_partial_tenant(conn) -> None:
     failed.effective_message.reply_text.assert_not_awaited()
     assert conn.execute("SELECT COUNT(*) FROM tenants").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM tenant_bots").fetchone()[0] == 0
+
+
+def test_license_flow_accepts_owner_telegram_id_and_uses_bottom_cancel_keyboard(conn) -> None:
+    verifier = MutableVerifier()
+    service = MasterService(
+        conn,
+        master_admin_id=9001,
+        cipher=FernetTokenCipher(generate_key()),
+        bot_verifier=verifier,
+    )
+    tenant = service.create_tenant(
+        9001,
+        name="Speed Test",
+        slug="speed-test",
+        owner_telegram_id=6119169885,
+    )
+    plan = service.create_plan(
+        9001,
+        name="Silver",
+        duration_days=30,
+        price=100,
+        max_servers=3,
+        max_users=2,
+    )
+    context = SimpleNamespace(
+        application=SimpleNamespace(bot_data={"master_service": service}),
+        user_data={"flow": {"kind": "license_new_tenant", "cancel_target": "licenses"}},
+    )
+
+    owner_update = _update("6119169885")
+    asyncio.run(on_text(owner_update, context))
+    assert context.user_data["flow"]["kind"] == "license_new_plan"
+    assert int(context.user_data["flow"]["tenant_id"]) == int(tenant["id"])
+    owner_markup = owner_update.effective_message.reply_text.await_args.kwargs["reply_markup"]
+    assert isinstance(owner_markup, ReplyKeyboardMarkup)
+    assert owner_markup.keyboard[0][0].text == "❌ لغو"
+
+    asyncio.run(on_text(_update(str(plan["id"])), context))
+    final_update = _update("0")
+    asyncio.run(on_text(final_update, context))
+    assert "flow" not in context.user_data
+    assert conn.execute("SELECT COUNT(*) FROM licenses").fetchone()[0] == 1
+    remove_calls = [
+        call for call in final_update.effective_chat.send_message.await_args_list
+        if isinstance(call.kwargs.get("reply_markup"), ReplyKeyboardRemove)
+    ]
+    assert remove_calls
+
+
+def test_bottom_cancel_button_clears_staged_flow(conn) -> None:
+    verifier = MutableVerifier()
+    service = MasterService(
+        conn,
+        master_admin_id=9001,
+        cipher=FernetTokenCipher(generate_key()),
+        bot_verifier=verifier,
+    )
+    context = SimpleNamespace(
+        application=SimpleNamespace(bot_data={"master_service": service}),
+        user_data={"flow": {"kind": "plan_new_name", "cancel_target": "plans"}},
+    )
+    update = _update("❌ لغو")
+    asyncio.run(on_text(update, context))
+    assert "flow" not in context.user_data
+    remove_calls = [
+        call for call in update.effective_chat.send_message.await_args_list
+        if isinstance(call.kwargs.get("reply_markup"), ReplyKeyboardRemove)
+    ]
+    assert remove_calls
 
 
 def test_webhook_rotation_requires_confirmation_and_returns_secret_once(conn) -> None:

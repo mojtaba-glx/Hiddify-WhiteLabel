@@ -69,6 +69,7 @@ def test_non_owner_cannot_read_or_write(master, conn) -> None:
 def test_every_public_sync_use_case_repeats_owner_gate(master) -> None:
     calls = [
         lambda: master.get_tenant(44, 1),
+        lambda: master.get_tenant_by_owner_telegram_id(44, 1),
         lambda: master.update_tenant(44, 1, name="x", slug="xxx", owner_telegram_id=1),
         lambda: master.set_tenant_status(44, 1, "active"),
         lambda: master.list_plans(44),
@@ -103,6 +104,25 @@ def test_tenant_create_update_status_are_audited(master, conn) -> None:
     assert suspended["status"] == "suspended"
     actions = [row["action"] for row in AuditRepository(conn).list_by_tenant(int(tenant["id"]))]
     assert actions == ["tenant.status", "tenant.update", "tenant.create"]
+
+
+def test_tenant_lookup_by_owner_telegram_id(master) -> None:
+    tenant = master.create_tenant(
+        9001,
+        name="Owner Lookup",
+        slug="owner-lookup",
+        owner_telegram_id=6119169885,
+    )
+    found = master.get_tenant_by_owner_telegram_id(9001, 6119169885)
+    assert int(found["id"]) == int(tenant["id"])
+    assert found["name"] == "Owner Lookup"
+
+
+def test_tenant_lookup_by_owner_telegram_id_rejects_ambiguous_owner(master) -> None:
+    master.create_tenant(9001, name="One", slug="owner-one", owner_telegram_id=777)
+    master.create_tenant(9001, name="Two", slug="owner-two", owner_telegram_id=777)
+    with pytest.raises(MasterServiceError):
+        master.get_tenant_by_owner_telegram_id(9001, 777)
 
 
 def test_tenant_pagination_and_search(master) -> None:

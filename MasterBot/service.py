@@ -140,6 +140,21 @@ class MasterService:
             raise NotFoundError("tenant not found")
         return row
 
+    def get_tenant_by_owner_telegram_id(
+        self, actor_id: int, owner_telegram_id: int
+    ) -> dict[str, Any]:
+        self.authorize(actor_id)
+        matches = TenantRepository(self.conn).list_by_owner_telegram_id(
+            int(owner_telegram_id), limit=2
+        )
+        if not matches:
+            raise NotFoundError("tenant owner Telegram ID not found")
+        if len(matches) > 1:
+            raise MasterServiceError(
+                "multiple tenants use this owner Telegram ID; choose a tenant explicitly"
+            )
+        return matches[0]
+
     def create_tenant(
         self, actor_id: int, *, name: str, slug: str, owner_telegram_id: int
     ) -> dict[str, Any]:

@@ -167,6 +167,16 @@ class TenantRepository:
         row = self.conn.execute("SELECT * FROM tenants WHERE id = ?", (int(tenant_id),)).fetchone()
         return _row_to_dict(row)
 
+    def list_by_owner_telegram_id(
+        self, owner_telegram_id: int, *, limit: int = 2
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 20))
+        rows = self.conn.execute(
+            "SELECT * FROM tenants WHERE owner_telegram_id = ? ORDER BY id ASC LIMIT ?",
+            (int(owner_telegram_id), limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_by_public_id(self, public_id: str) -> Optional[dict[str, Any]]:
         row = self.conn.execute(
             "SELECT * FROM tenants WHERE public_id = ?", (str(public_id or "").strip(),)
