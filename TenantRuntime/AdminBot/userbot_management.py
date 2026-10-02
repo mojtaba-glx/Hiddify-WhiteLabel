@@ -15,7 +15,7 @@ from io import BytesIO
 from typing import Any
 from urllib.parse import urlparse
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram import Bot, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ContextTypes
 
@@ -23,6 +23,11 @@ from Database.repositories import BotRepository
 from Shared.crypto import fingerprint_token
 from Shared.timeutils import iso_utc, utcnow
 from TenantRuntime.business import TenantBusinessError
+from TenantRuntime.button_styles import (
+    inline_button as InlineKeyboardButton,
+    keyboard_button as KeyboardButton,
+    set_button_settings,
+)
 
 PAGE_SIZE = 21
 FLOW_KEY = "userbot_admin_flow"
@@ -1511,6 +1516,7 @@ async def handle_callback(
     business: Any,
     actor: int,
 ) -> bool:
+    set_button_settings(business.runtime_userbot_settings())
     query = update.callback_query
     if query is None:
         return False
@@ -2597,6 +2603,7 @@ async def handle_text(
     actor: int,
     admin_main_keyboard: Any,
 ) -> bool:
+    set_button_settings(business.runtime_userbot_settings())
     flow=context.user_data.get(FLOW_KEY)
     if not isinstance(flow,dict):
         return False
@@ -2951,6 +2958,7 @@ async def handle_media(
     actor: int,
     admin_main_keyboard: Any,
 ) -> bool:
+    set_button_settings(business.runtime_userbot_settings())
     flow=context.user_data.get(FLOW_KEY)
     if not isinstance(flow,dict):
         return False
@@ -3012,6 +3020,7 @@ async def handle_document(
     actor: int,
     admin_main_keyboard: Any,
 ) -> bool:
+    set_button_settings(business.runtime_userbot_settings())
     flow=context.user_data.get(FLOW_KEY)
     if isinstance(flow,dict) and flow.get("kind")=="broadcast" and str(flow.get("step") or "")=="wait_photo":
         return await handle_media(
