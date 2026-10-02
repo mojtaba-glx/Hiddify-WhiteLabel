@@ -570,7 +570,6 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     spec, _, state_store, business = _services(context)
     if spec.role != "user":
         raise RuntimeError("UserBot handler registered for non-user role")
-    await _remove_legacy_reply_keyboard(update, context)
     user_id = int(update.effective_user.id) if update.effective_user else 0
     if not await _force_join_allowed(update, context, business):
         return
@@ -615,11 +614,23 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"تعداد ورود: {visits}"
         )
     ) + gift_notice
+    keyboard = _main_keyboard(spec, business)
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(text, reply_markup=_menu(spec, business))
+        try:
+            await update.callback_query.message.delete()
+        except Exception:
+            pass
+        if update.effective_chat:
+            await update.effective_chat.send_message(
+                text,
+                reply_markup=keyboard,
+            )
     elif update.effective_message:
-        await update.effective_message.reply_text(text, reply_markup=_menu(spec, business))
+        await update.effective_message.reply_text(
+            text,
+            reply_markup=keyboard,
+        )
 
 
 async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
