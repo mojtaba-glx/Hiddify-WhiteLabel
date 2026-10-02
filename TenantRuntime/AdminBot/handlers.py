@@ -1975,7 +1975,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             items = business.list_orders_admin(actor); receipts = business.list_receipts_admin(actor)
             pending = business.list_fulfillment_pending_admin(actor)
             text = "🧾 سفارش‌ها\n" + ("\n".join(
-                f"#{x['id']} · {x['display_name']} · {x['plan_name']} · {x['operation']} · {x['status']}"
+                f"#{x['id']} · {x['display_name']} · {x['plan_name']} · "
+                f"{x.get('selected_server_label') or 'سرور پیش‌فرض'} · "
+                f"{x['operation']} · {x['status']}"
                 for x in items
             ) or "موردی نیست.")
             rows = [[InlineKeyboardButton(f"✅/❌ بررسی رسید #{x['id']} · {x['display_name']}", callback_data=f"biz:receipt:{x['id']}")] for x in receipts]
