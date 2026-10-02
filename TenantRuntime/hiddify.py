@@ -454,12 +454,14 @@ class HiddifyPanelAdapter:
         if not bool(request.reset_time):
             target_expiry = _parse_utcish_datetime(request.expires_at)
             current_start = _parse_utcish_datetime(current.get("start_date"))
-            if target_expiry is not None and current_start is not None:
-                seconds = max(
-                    86400.0,
-                    (target_expiry - current_start).total_seconds(),
+            if target_expiry is None or current_start is None:
+                raise PanelError(
+                    "Hiddify renewal cannot preserve time without start date"
                 )
-                package_days = max(1, int(math.ceil(seconds / 86400.0)))
+            seconds = (target_expiry - current_start).total_seconds()
+            if seconds <= 0:
+                raise PanelError("Hiddify renewal target expiry is invalid")
+            package_days = max(1, int(math.ceil(seconds / 86400.0)))
 
         payload: dict[str, Any] = {
             "usage_limit_GB": _bytes_to_gb(request.traffic_bytes),
