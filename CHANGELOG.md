@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.10.0-rc.2 — Update Path Hardening
+
+- Changed tenant, plan and license creation in MasterBot to guided step-by-step flows with cancellation.
+- Fixed fresh-install Git dirtiness by tracking `bootstrap.sh` as executable.
+- Replaced the full pytest run during production updates with a fast syntax/compile/release-plan preflight; the complete suite remains in GitHub Actions.
+- Added requirements hashing so unchanged dependencies skip redundant pip installation.
+- Fixed update snapshot tests to use the active virtual-environment interpreter instead of the system `python3`.
+- No-op updates now run health validation instead of performing a full repair/restart cycle.
+
 ## v0.10.0-rc.1 — Live Staging Release Candidate
 
 - Promoted the completed offline implementation to a traceable release candidate for real-panel staging.
