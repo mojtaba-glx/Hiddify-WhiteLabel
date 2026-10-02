@@ -1666,8 +1666,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                             f"📄 کانفیگ‌های مستقیم #{item['id']}",
                             callback_data=f"shop:configs:{item['id']}",
                         )])
-            rows.extend(_menu(spec, business).inline_keyboard)
-            await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows)); return
+            rows.append([
+                InlineKeyboardButton("🏠 منو", callback_data="runtime:home")
+            ])
+            await update.callback_query.edit_message_text(
+                text,
+                reply_markup=InlineKeyboardMarkup(rows),
+            ); return
         if data.startswith("shop:configs:"):
             subscription_id = int(data.rsplit(":", 1)[1])
             configs = business.subscription_configs(
@@ -2004,6 +2009,31 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     flow = context.user_data.get("biz_flow")
     text = str(update.effective_message.text or "").strip() if update.effective_message else ""
     try:
+        main_labels = {
+            BTN_STATUS,
+            BTN_RENEW,
+            BTN_BUY,
+            BTN_CONNECT,
+            BTN_TRIAL,
+            BTN_WALLET,
+            BTN_SUPPORT,
+            BTN_GUIDE,
+            BTN_FAQ,
+            BTN_REFERRAL,
+            BTN_GIFT,
+        }
+        if text in main_labels:
+            context.user_data.pop("biz_flow", None)
+            handled = await _handle_main_reply_action(
+                update,
+                context,
+                spec=spec,
+                business=business,
+                actor=actor,
+                text=text,
+            )
+            if handled:
+                return
         if isinstance(flow, dict):
             fields = [part.strip() for part in text.split("|")]
             kind = flow.get("kind")
