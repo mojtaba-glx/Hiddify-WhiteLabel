@@ -51,6 +51,7 @@ USERBOT_SETTING_DEFAULTS: dict[str, Any] = {
     # WhiteLabel's multi-node smart link is the functional equivalent used by
     # the tenant runtime. Keep the legacy key for already provisioned tenants.
     "show_smart_link": True,
+    "smart_base_url": "",
 
     # Texts editable from Tenant AdminBot.
     "welcome_message": "",
@@ -1049,8 +1050,11 @@ class TenantBusinessService:
         link = self._ensure_subscription_smart_link(
             subscription_id=int(subscription_id), label=label
         )
+        settings = self.runtime_userbot_settings()
         public_base = str(
-            os.getenv("SMART_SUB_PUBLIC_BASE_URL", "") or ""
+            settings.get("smart_base_url")
+            or os.getenv("SMART_SUB_PUBLIC_BASE_URL", "")
+            or ""
         ).strip()
         if not public_base:
             return ""
