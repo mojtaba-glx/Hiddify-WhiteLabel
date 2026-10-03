@@ -3606,7 +3606,16 @@ class TenantBusinessService:
 
     def list_subscriptions(self, actor_id: int) -> list[dict[str, Any]]:
         customer = self._customer(actor_id)
-        rows = self.conn.execute("SELECT s.*, p.name AS plan_name FROM tenant_subscriptions s JOIN tenant_sale_plans p ON p.id=s.plan_id WHERE s.tenant_id=? AND s.customer_id=? ORDER BY s.id DESC", (self.tenant_id, int(customer["id"]))).fetchall()
+        rows = self.conn.execute(
+            "SELECT s.*, p.name AS plan_name, "
+            "c.username AS customer_username, "
+            "c.display_name AS customer_display_name "
+            "FROM tenant_subscriptions s "
+            "JOIN tenant_sale_plans p ON p.id=s.plan_id "
+            "JOIN tenant_customers c ON c.id=s.customer_id AND c.tenant_id=s.tenant_id "
+            "WHERE s.tenant_id=? AND s.customer_id=? ORDER BY s.id DESC",
+            (self.tenant_id, int(customer["id"])),
+        ).fetchall()
         return [dict(row) for row in rows]
 
     def list_subscriptions_admin(self, actor_id: int, *, status: str | None = None) -> list[dict[str, Any]]:
