@@ -1172,12 +1172,24 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
                 callback_data="userbot:settings:sub_link_status:show_direct_config",
             )],
             [InlineKeyboardButton(
+                f"اشتراک خودکار | {_bool_icon(s.get('show_auto_sub_link'))}",
+                callback_data="userbot:settings:sub_link_status:show_auto_sub_link",
+            )],
+            [InlineKeyboardButton(
                 f"لینک اشتراک | {_bool_icon(s.get('show_sub_link'))}",
                 callback_data="userbot:settings:sub_link_status:show_sub_link",
             )],
             [InlineKeyboardButton(
-                f"لینک اشتراک هوشمند | {_bool_icon(s.get('show_smart_link'))}",
-                callback_data="userbot:settings:sub_link_status:show_smart_link",
+                f"لینک اشتراک b64 | {_bool_icon(s.get('show_sub_link_b64'))}",
+                callback_data="userbot:settings:sub_link_status:show_sub_link_b64",
+            )],
+            [InlineKeyboardButton(
+                f"لینک اشتراک هوشمند | {_bool_icon(s.get('show_multi_server'))}",
+                callback_data="userbot:settings:sub_link_status:show_multi_server",
+            )],
+            [InlineKeyboardButton(
+                f"لینک اشتراک هوشمند b64 | {_bool_icon(s.get('show_multi_server_b64'))}",
+                callback_data="userbot:settings:sub_link_status:show_multi_server_b64",
             )],
             [InlineKeyboardButton(
                 "🌐 تنظیم دامنه لینک اشتراک هوشمند",
@@ -1192,7 +1204,10 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
         base_url = str(s.get("smart_base_url") or "").strip() or "پیش‌فرض سرور"
         await _edit_or_send(
             update,
-            f"📁 وضعیت نمایش لینک اشتراک\n🌐 دامنه فعلی: {base_url}",
+            "📁 وضعیت نمایش لینک اشتراک\n"
+            f"🌐 دامنه Smart Link: {base_url}\n"
+            "ℹ️ دامنه بالا فقط Smart Link را تغییر می‌دهد؛ "
+            "لینک معمولی Subscription مستقیماً از پنل ساخته می‌شود.",
             InlineKeyboardMarkup(rows),
         )
         return
@@ -2030,8 +2045,13 @@ async def handle_callback(
         "userbot:settings:subscription:shuffle_server_layout": ("shuffle_server_layout", "subscription"),
         "userbot:settings:subscription:shuffle_config_layout": ("shuffle_config_layout", "subscription"),
         "userbot:settings:sub_link_status:show_direct_config": ("show_direct_config", "sub_link_status"),
+        "userbot:settings:sub_link_status:show_auto_sub_link": ("show_auto_sub_link", "sub_link_status"),
         "userbot:settings:sub_link_status:show_sub_link": ("show_sub_link", "sub_link_status"),
-        "userbot:settings:sub_link_status:show_smart_link": ("show_smart_link", "sub_link_status"),
+        "userbot:settings:sub_link_status:show_sub_link_b64": ("show_sub_link_b64", "sub_link_status"),
+        "userbot:settings:sub_link_status:show_multi_server": ("show_multi_server", "sub_link_status"),
+        "userbot:settings:sub_link_status:show_multi_server_b64": ("show_multi_server_b64", "sub_link_status"),
+        # Backward compatibility for stale pre-v0.15 inline keyboards.
+        "userbot:settings:sub_link_status:show_smart_link": ("show_multi_server", "sub_link_status"),
         "userbot:settings:buy_renew:enable_buy": ("enable_buy", "buy_renew"),
         "userbot:settings:buy_renew:enable_renew": ("enable_renew", "buy_renew"),
         "userbot:settings:buy_renew:show_renew_in_main_menu": ("show_renew_in_main_menu", "buy_renew"),
@@ -2089,8 +2109,9 @@ async def handle_callback(
             "return_section": "sub_link_status",
         }
         await query.message.reply_text(
-            "🌐 دامنه عمومی سرویس لینک هوشمند را با http/https ارسال کنید.\n"
+            "🌐 دامنه عمومی Smart Link را با http/https ارسال کنید.\n"
             f"مقدار فعلی: {current or 'پیش‌فرض سرور'}\n"
+            "این مقدار فقط روی Smart Link اثر دارد و لینک Subscription پنل را تغییر نمی‌دهد.\n"
             "برای برگشت به مقدار پیش‌فرض، 0 ارسال کنید.",
             reply_markup=userbot_cancel_keyboard(),
         )
@@ -2100,7 +2121,8 @@ async def handle_callback(
             update,
             "🔐 راهنمای SSL دامنه\n\n"
             "دامنه باید به IP سرور Smart Subscription اشاره کند و HTTPS معتبر داشته باشد. "
-            "آدرس ذخیره‌شده باید فقط شامل scheme و host (و در صورت نیاز port/path پایه) باشد.\n"
+            "این دامنه فقط برای Smart Link استفاده می‌شود؛ لینک عادی Subscription از خود پنل می‌آید. "
+            "آدرس ذخیره‌شده باید شامل scheme و host (و در صورت نیاز port/path پایه) باشد.\n"
             "نمونه: https://sub.example.com",
             InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:sub_link_status")
