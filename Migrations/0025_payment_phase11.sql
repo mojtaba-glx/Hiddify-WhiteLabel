@@ -20,6 +20,20 @@ ALTER TABLE tenant_receipts ADD COLUMN provider_event_id TEXT;
 ALTER TABLE tenant_wallet_topup_receipts ADD COLUMN review_note TEXT NOT NULL DEFAULT '';
 ALTER TABLE tenant_wallet_topup_receipts ADD COLUMN provider_event_id TEXT;
 
+CREATE TABLE IF NOT EXISTS tenant_payment_receipt_media (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+    payment_source TEXT NOT NULL CHECK (payment_source IN ('order','wallet_topup')),
+    receipt_id INTEGER NOT NULL CHECK (receipt_id > 0),
+    mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+    media BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (tenant_id, payment_source, receipt_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_payment_receipt_media_lookup
+    ON tenant_payment_receipt_media (tenant_id, payment_source, receipt_id);
+
 CREATE TABLE IF NOT EXISTS tenant_payment_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
