@@ -35,6 +35,16 @@ class TenantBusinessError(RuntimeError):
     pass
 
 
+DEFAULT_REFERRAL_INVITE_TEXT = (
+    "🎁 دعوت دوستان\n"
+    "❖ ◈━━━━━━━━━━━━━━━◈ ❖\n"
+    "دوستت رو دعوت کن و از هر دعوت پاداش بگیر!\n\n"
+    "🤝 پاداش تست دوستت برای تو: {trial_reward}\n"
+    "🛒 پاداش اولین خرید دوستت: {purchase_reward}\n\n"
+    "🔗 لینک دعوت:\n{invite_link}"
+)
+
+
 USERBOT_SETTING_DEFAULTS: dict[str, Any] = {
     # Purchase / renewal switches mirrored from Hiddify-SellBot.
     "enable_buy": True,
@@ -1361,11 +1371,14 @@ class TenantBusinessService:
         actor_id: int,
         *,
         referral_enabled: bool | None = None,
+        referral_trial_reward_enabled: bool | None = None,
         referral_trial_reward: int | None = None,
+        referral_purchase_reward_enabled: bool | None = None,
         referral_purchase_reward: int | None = None,
         referral_min_purchase: int | None = None,
         referral_max_rewards: int | None = None,
         referral_currency: str | None = None,
+        referral_invite_text: str | None = None,
         trial_enabled: bool | None = None,
         trial_announce_enabled: bool | None = None,
         trial_traffic_gb: int | None = None,
@@ -1379,10 +1392,20 @@ class TenantBusinessService:
                 if referral_enabled is None
                 else bool(referral_enabled)
             ),
+            "referral_trial_reward_enabled": int(
+                bool(current["referral_trial_reward_enabled"])
+                if referral_trial_reward_enabled is None
+                else bool(referral_trial_reward_enabled)
+            ),
             "referral_trial_reward": int(
                 current["referral_trial_reward"]
                 if referral_trial_reward is None
                 else referral_trial_reward
+            ),
+            "referral_purchase_reward_enabled": int(
+                bool(current["referral_purchase_reward_enabled"])
+                if referral_purchase_reward_enabled is None
+                else bool(referral_purchase_reward_enabled)
             ),
             "referral_purchase_reward": int(
                 current["referral_purchase_reward"]
@@ -1404,6 +1427,11 @@ class TenantBusinessService:
                 if referral_currency is None
                 else referral_currency
             ).strip().upper(),
+            "referral_invite_text": str(
+                current["referral_invite_text"]
+                if referral_invite_text is None
+                else referral_invite_text
+            ).strip(),
             "trial_enabled": int(
                 bool(current["trial_enabled"])
                 if trial_enabled is None
@@ -1436,25 +1464,31 @@ class TenantBusinessService:
             or values["trial_traffic_gb"] <= 0
             or values["trial_duration_days"] <= 0
             or not 3 <= len(values["referral_currency"]) <= 8
+            or len(values["referral_invite_text"]) > 3000
         ):
             raise ValueError("invalid sales growth settings")
         now = iso_utc(utcnow())
         with transaction(self.conn):
             self.conn.execute(
                 "UPDATE tenant_sales_growth_settings SET "
-                "referral_enabled=?, referral_trial_reward=?, "
+                "referral_enabled=?, referral_trial_reward_enabled=?, "
+                "referral_trial_reward=?, referral_purchase_reward_enabled=?, "
                 "referral_purchase_reward=?, referral_min_purchase=?, "
-                "referral_max_rewards=?, referral_currency=?, trial_enabled=?, "
+                "referral_max_rewards=?, referral_currency=?, "
+                "referral_invite_text=?, trial_enabled=?, "
                 "trial_announce_enabled=?, trial_traffic_gb=?, "
                 "trial_duration_days=?, updated_at=? "
                 "WHERE tenant_id=?",
                 (
                     values["referral_enabled"],
+                    values["referral_trial_reward_enabled"],
                     values["referral_trial_reward"],
+                    values["referral_purchase_reward_enabled"],
                     values["referral_purchase_reward"],
                     values["referral_min_purchase"],
                     values["referral_max_rewards"],
                     values["referral_currency"],
+                    values["referral_invite_text"],
                     values["trial_enabled"],
                     values["trial_announce_enabled"],
                     values["trial_traffic_gb"],
@@ -1510,18 +1544,42 @@ class TenantBusinessService:
             "WHERE tenant_id=? AND inviter_customer_id=? AND status='active'",
             (self.tenant_id, int(customer["id"])),
         ).fetchone()
-        rewards = self.conn.execute(
+        totals: dict[tuple[str, str], dict[str, Any]] = {}
+        auto_rewards = self.conn.execute(
             "SELECT reward_type, currency, COUNT(*) AS count, "
             "COALESCE(SUM(amount),0) AS amount "
             "FROM tenant_referral_rewards "
             "WHERE tenant_id=? AND inviter_customer_id=? AND status='paid' "
-            "GROUP BY reward_type, currency ORDER BY reward_type, currency",
+            "GROUP BY reward_type, currency",
             (self.tenant_id, int(customer["id"])),
         ).fetchall()
+        manual_rewards = self.conn.execute(
+            "SELECT 'manual' AS reward_type, currency, COUNT(*) AS count, "
+            "COALESCE(SUM(amount),0) AS amount "
+            "FROM tenant_referral_manual_rewards "
+            "WHERE tenant_id=? AND customer_id=? GROUP BY currency",
+            (self.tenant_id, int(customer["id"])),
+        ).fetchall()
+        for row in [*auto_rewards, *manual_rewards]:
+            key = (str(row["reward_type"]), str(row["currency"]))
+            bucket = totals.setdefault(
+                key,
+                {
+                    "reward_type": key[0],
+                    "currency": key[1],
+                    "count": 0,
+                    "amount": 0,
+                },
+            )
+            bucket["count"] += int(row["count"] or 0)
+            bucket["amount"] += int(row["amount"] or 0)
         return {
             "referral_code": str(customer["referral_code"]),
             "referred_count": int(referred[0] or 0),
-            "rewards": [dict(row) for row in rewards],
+            "rewards": sorted(
+                totals.values(),
+                key=lambda item: (str(item["reward_type"]), str(item["currency"])),
+            ),
             "settings": settings,
         }
 
@@ -2575,6 +2633,16 @@ class TenantBusinessService:
             return None
         if reward_type not in ("trial", "purchase"):
             raise ValueError("invalid referral reward")
+        if (
+            reward_type == "trial"
+            and not bool(settings["referral_trial_reward_enabled"])
+        ):
+            return None
+        if (
+            reward_type == "purchase"
+            and not bool(settings["referral_purchase_reward_enabled"])
+        ):
+            return None
         amount = int(
             settings["referral_trial_reward"]
             if reward_type == "trial"
@@ -2631,8 +2699,13 @@ class TenantBusinessService:
         if max_rewards > 0:
             count = self.conn.execute(
                 "SELECT COUNT(*) FROM tenant_referral_rewards "
-                "WHERE tenant_id=? AND inviter_customer_id=? AND status='paid'",
-                (self.tenant_id, int(ref["inviter_customer_id"])),
+                "WHERE tenant_id=? AND inviter_customer_id=? "
+                "AND reward_type=? AND status='paid'",
+                (
+                    self.tenant_id,
+                    int(ref["inviter_customer_id"]),
+                    reward_type,
+                ),
             ).fetchone()
             if int(count[0] or 0) >= max_rewards:
                 return None
@@ -6462,15 +6535,151 @@ class TenantBusinessService:
     def referral_rewards_admin(self, actor_id: int) -> list[dict[str, Any]]:
         self._admin(actor_id)
         rows = self.conn.execute(
-            "SELECT rw.*, "
-            "i.display_name AS inviter_name, e.display_name AS invitee_name "
+            "SELECT * FROM ("
+            "SELECT rw.id AS id, rw.referral_id AS referral_id, "
+            "rw.inviter_customer_id AS inviter_customer_id, "
+            "rw.invitee_customer_id AS invitee_customer_id, "
+            "rw.reward_type AS reward_type, rw.amount AS amount, "
+            "rw.currency AS currency, rw.order_id AS order_id, "
+            "rw.status AS status, rw.created_at AS created_at, "
+            "'automatic' AS source, i.display_name AS inviter_name, "
+            "e.display_name AS invitee_name "
             "FROM tenant_referral_rewards rw "
-            "JOIN tenant_customers i ON i.id=rw.inviter_customer_id AND i.tenant_id=rw.tenant_id "
-            "JOIN tenant_customers e ON e.id=rw.invitee_customer_id AND e.tenant_id=rw.tenant_id "
-            "WHERE rw.tenant_id=? ORDER BY rw.id DESC LIMIT 500",
-            (self.tenant_id,),
+            "JOIN tenant_customers i ON i.id=rw.inviter_customer_id "
+            "AND i.tenant_id=rw.tenant_id "
+            "JOIN tenant_customers e ON e.id=rw.invitee_customer_id "
+            "AND e.tenant_id=rw.tenant_id "
+            "WHERE rw.tenant_id=? "
+            "UNION ALL "
+            "SELECT mr.id AS id, NULL AS referral_id, "
+            "mr.customer_id AS inviter_customer_id, "
+            "0 AS invitee_customer_id, 'manual' AS reward_type, "
+            "mr.amount AS amount, mr.currency AS currency, "
+            "NULL AS order_id, 'paid' AS status, mr.created_at AS created_at, "
+            "'manual' AS source, c.display_name AS inviter_name, "
+            "NULL AS invitee_name "
+            "FROM tenant_referral_manual_rewards mr "
+            "JOIN tenant_customers c ON c.id=mr.customer_id "
+            "AND c.tenant_id=mr.tenant_id "
+            "WHERE mr.tenant_id=?"
+            ") ORDER BY created_at DESC, id DESC LIMIT 500",
+            (self.tenant_id, self.tenant_id),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def referral_admin_stats(self, actor_id: int) -> dict[str, Any]:
+        self._admin(actor_id)
+        referrals = self.referrals_admin(actor_id)
+        rewards = self.referral_rewards_admin(actor_id)
+        paid = [x for x in rewards if str(x.get("status") or "") == "paid"]
+        automatic = [x for x in paid if str(x.get("source") or "") == "automatic"]
+        purchase_referrals = {
+            int(x["referral_id"])
+            for x in automatic
+            if x.get("referral_id") is not None
+            and str(x.get("reward_type") or "") == "purchase"
+        }
+        return {
+            "total_referrals": len(referrals),
+            "active_referrals": sum(
+                1 for x in referrals if str(x.get("status") or "") == "active"
+            ),
+            "qualified_referrals": sum(
+                1 for x in referrals if int(x.get("qualified") or 0) == 1
+            ),
+            "fraud_flagged": sum(
+                1 for x in referrals if int(x.get("fraud_flag") or 0) == 1
+            ),
+            "successful_referrals": len(purchase_referrals),
+            "trial_rewards_count": sum(
+                1 for x in automatic if str(x.get("reward_type") or "") == "trial"
+            ),
+            "trial_rewards_amount": sum(
+                int(x.get("amount") or 0)
+                for x in automatic
+                if str(x.get("reward_type") or "") == "trial"
+            ),
+            "purchase_rewards_count": sum(
+                1 for x in automatic
+                if str(x.get("reward_type") or "") == "purchase"
+            ),
+            "purchase_rewards_amount": sum(
+                int(x.get("amount") or 0)
+                for x in automatic
+                if str(x.get("reward_type") or "") == "purchase"
+            ),
+            "manual_rewards_count": sum(
+                1 for x in paid if str(x.get("source") or "") == "manual"
+            ),
+            "manual_rewards_amount": sum(
+                int(x.get("amount") or 0)
+                for x in paid if str(x.get("source") or "") == "manual"
+            ),
+            "total_reward_cost": sum(int(x.get("amount") or 0) for x in paid),
+        }
+
+    def grant_manual_referral_reward_admin(
+        self,
+        actor_id: int,
+        *,
+        customer_id: int,
+        amount: int,
+        currency: str = "IRR",
+        note: str = "",
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        value = int(amount)
+        if value <= 0:
+            raise ValueError("manual referral reward must be positive")
+        clean_currency = _text(currency, 8).upper()
+        customer = self.conn.execute(
+            "SELECT * FROM tenant_customers WHERE tenant_id=? AND id=?",
+            (self.tenant_id, int(customer_id)),
+        ).fetchone()
+        if customer is None:
+            raise TenantBusinessError("customer not found")
+        clean_note = _text(note, 240, required=False) or "manual referral reward"
+        nonce = secrets.token_hex(8)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            wallet_tx = self._wallet_change_tx(
+                customer_id=int(customer_id),
+                currency=clean_currency,
+                amount=value,
+                kind="admin_credit",
+                idempotency_key=(
+                    f"tenant:{self.tenant_id}:manual-referral:"
+                    f"{int(customer_id)}:{nonce}"
+                ),
+                note=f"manual referral reward: {clean_note}",
+            )
+            cursor = self.conn.execute(
+                "INSERT INTO tenant_referral_manual_rewards "
+                "(tenant_id, customer_id, amount, currency, "
+                "wallet_transaction_id, note, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    self.tenant_id,
+                    int(customer_id),
+                    value,
+                    clean_currency,
+                    int(wallet_tx["id"]),
+                    clean_note,
+                    now,
+                ),
+            )
+        return {
+            "id": int(cursor.lastrowid or 0),
+            "customer_id": int(customer_id),
+            "customer_name": str(customer["display_name"] or ""),
+            "amount": value,
+            "currency": clean_currency,
+            "wallet_transaction_id": int(wallet_tx["id"]),
+            "reward_type": "manual",
+            "source": "manual",
+            "status": "paid",
+            "created_at": now,
+        }
 
     def list_payment_methods_admin(self, actor_id: int) -> list[dict[str, Any]]:
         self._admin(actor_id)

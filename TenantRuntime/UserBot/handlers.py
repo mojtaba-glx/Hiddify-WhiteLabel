@@ -29,7 +29,7 @@ from telegram.ext import (
 )
 
 from Gateway.catalog import RuntimeBotSpec
-from TenantRuntime.business import TenantBusinessError
+from TenantRuntime.business import DEFAULT_REFERRAL_INVITE_TEXT, TenantBusinessError
 from TenantRuntime.button_styles import keyboard_button as KeyboardButton
 from Shared.timeutils import format_tehran, parse_utc, utcnow
 from TenantRuntime.common import _deny_update, _services, runtime_access_gate, runtime_error
@@ -98,12 +98,22 @@ def _referral_content(
         else (f"/start ref_{code}" if code else "—")
     )
     currency = str(referral_settings.get("referral_currency") or "IRR")
+    trial_enabled = bool(
+        referral_settings.get("referral_trial_reward_enabled", True)
+    )
+    purchase_enabled = bool(
+        referral_settings.get("referral_purchase_reward_enabled", True)
+    )
     trial_amount = int(referral_settings.get("referral_trial_reward") or 0)
     purchase_amount = int(
         referral_settings.get("referral_purchase_reward") or 0
     )
-    trial_reward = f"{trial_amount:,} {currency}"
-    purchase_reward = f"{purchase_amount:,} {currency}"
+    trial_reward = (
+        f"{trial_amount:,} {currency}" if trial_enabled else "غیرفعال"
+    )
+    purchase_reward = (
+        f"{purchase_amount:,} {currency}" if purchase_enabled else "غیرفعال"
+    )
 
     variables = {
         "invite_link": invite_link,
@@ -111,38 +121,62 @@ def _referral_content(
         "purchase_reward": purchase_reward,
         "referred_count": int(summary.get("referred_count") or 0),
     }
-    intro = _setting_text(
-        settings,
-        "invite_info_text",
-        "🎁 دوستان خود را دعوت کنید و از پاداش‌های فعال بهره‌مند شوید.",
-        **variables,
-    )
-    invite_text = _setting_text(
-        settings,
-        "invite_text",
-        "💌 لینک دعوت شما:\n{invite_link}",
-        **variables,
-    )
+
+    # Phase 10 adds an optional referral-specific page text.  When it is not
+    # configured, preserve the Phase 7 invite_info_text + invite_text behavior
+    # exactly so existing tenant customizations remain live.
+    custom_referral_text = str(
+        referral_settings.get("referral_invite_text") or ""
+    ).strip()
+    if custom_referral_text:
+        intro = _format_text_template(
+            custom_referral_text,
+            **variables,
+        ).strip()
+    else:
+        invite_info_text = _setting_text(
+            settings,
+            "invite_info_text",
+            "🎁 دوستان خود را دعوت کنید و از پاداش‌های فعال بهره‌مند شوید.",
+            **variables,
+        )
+        invite_text = _setting_text(
+            settings,
+            "invite_text",
+            "💌 لینک دعوت شما:\n{invite_link}",
+            **variables,
+        )
+        intro = "\n\n".join(
+            item for item in (invite_info_text, invite_text) if item
+        ).strip()
+        if not intro:
+            intro = _format_text_template(
+                DEFAULT_REFERRAL_INVITE_TEXT,
+                **variables,
+            ).strip()
+
     banner_text = _setting_text(
         settings,
         "invite_banner_text",
         "🎁 بنر دعوت اختصاصی شما\n\n🔗 لینک دعوت شما:\n{invite_link}",
         **variables,
     )
+    labels = {
+        "trial": "پاداش تست",
+        "purchase": "پاداش خرید",
+        "manual": "پاداش دستی",
+    }
     rewards = list(summary.get("rewards") or [])
     reward_lines = [
-        f"• {x.get('reward_type')}: {int(x.get('amount') or 0):,} "
-        f"{x.get('currency') or ''} ({int(x.get('count') or 0)} مورد)"
+        f"• {labels.get(str(x.get('reward_type') or ''), str(x.get('reward_type') or ''))}: "
+        f"{int(x.get('amount') or 0):,} {x.get('currency') or ''} "
+        f"({int(x.get('count') or 0)} مورد)"
         for x in rewards
     ] or ["• هنوز پاداشی ثبت نشده است."]
     body = "\n".join([
         intro,
         "",
-        invite_text,
-        "",
         f"👥 دعوت موفق ثبت‌شده: {variables['referred_count']}",
-        f"🔥 پاداش تست: {trial_reward}",
-        f"🛒 پاداش اولین خرید: {purchase_reward}",
         "",
         "🎁 پاداش‌های دریافت‌شده",
         *reward_lines,
@@ -406,8 +440,15 @@ def _wallet_text(summary: dict) -> str:
         }
         for tx in history[:10]:
             amount = int(tx.get("amount") or 0)
+            kind = str(tx.get("kind") or "")
+            label = labels.get(kind, kind or "-")
+            if (
+                kind == "admin_credit"
+                and str(tx.get("note") or "").startswith("manual referral reward")
+            ):
+                label = "پاداش دستی رفرال"
             lines.append(
-                f"• {labels.get(str(tx.get('kind')), str(tx.get('kind') or '-'))}: "
+                f"• {label}: "
                 f"{amount:+,} {tx.get('currency') or ''} → "
                 f"{int(tx.get('resulting_balance') or 0):,}"
             )

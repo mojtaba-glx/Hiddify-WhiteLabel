@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.20.0 — Referral parity
+
+- Completed referral management across Tenant AdminBot and UserBot using the proven Hiddify-SellBot behavior.
+- Added independent enable/disable switches for trial and first-purchase rewards.
+- Added editable referral invite text with live placeholders for invite link, reward values and referral count.
+- Corrected the successful-referral cap so trial and purchase reward quotas are enforced independently.
+- Added tenant-scoped manual referral rewards that credit the wallet and remain visible in referral reports and UserBot wallet history.
+- Expanded referral dashboard, invitation list and reward list reporting without exposing dead controls.
+- Added migration `0024_referral_phase10` and regression coverage for reward switches, caps, invite text and manual rewards.
+
+
 ## v0.10.4 — Search flow UI parity fix
 
 - Fixed Smart User Search to match Hiddify-SellBot exactly: the old inline menu is removed, the prompt is sent as a new message, and the bottom reply keyboard becomes a single `❌ لغو` button.

@@ -26,6 +26,7 @@ EXPECTED_TABLES = {
     "tenant_payment_methods", "tenant_orders", "tenant_receipts", "tenant_subscriptions",
     "tenant_tickets", "tenant_smart_links",
     "tenant_panel_credentials", "tenant_plan_categories",
+    "tenant_referral_manual_rewards",
 }
 
 
@@ -59,6 +60,7 @@ def test_migration_is_idempotent(db_path) -> None:
     assert "0021_purchase_catalog" in versions
     assert "0022_renewal_policy" in versions
     assert "0023_trial_reminder_lifecycle" in versions
+    assert "0024_referral_phase10" in versions
 
 
 def test_foreign_keys_enforced(conn, factories) -> None:
@@ -94,6 +96,7 @@ def test_checksums_recorded(db_path) -> None:
     assert len(recorded["0021_purchase_catalog"]) == 64
     assert len(recorded["0022_renewal_policy"]) == 64
     assert len(recorded["0023_trial_reminder_lifecycle"]) == 64
+    assert len(recorded["0024_referral_phase10"]) == 64
 
 
 def test_checksum_mismatch_detected(db_path, tmp_path) -> None:
