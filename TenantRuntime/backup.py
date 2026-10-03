@@ -476,17 +476,21 @@ def restore_tenant_backup(
 
     try:
         with transaction(conn):
-            # Child rows first during deletion; parent rows first on insert.
-            for table in reversed(ordered):
-                conn.execute(
-                    f"DELETE FROM {_qid(table)} WHERE tenant_id=?",
-                    (int(tenant_id),),
-                )
+            if fmt == BACKUP_FORMAT:
+                # Full v2 restore: child rows first during deletion; parent rows
+                # first on insert.  The entire mutation is one transaction.
+                for table in reversed(ordered):
+                    conn.execute(
+                        f"DELETE FROM {_qid(table)} WHERE tenant_id=?",
+                        (int(tenant_id),),
+                    )
+
             for table in ordered:
                 columns_live = {
                     str(col["name"]): col
                     for col in _table_columns(conn, table)
                 }
+                pk = _pk_columns(conn, table)
                 for row in tables[table]:
                     if not row:
                         raise TenantBackupError(f"empty row in table: {table}")
@@ -497,10 +501,35 @@ def restore_tenant_backup(
                     names = ",".join(_qid(name) for name in columns)
                     marks = ",".join("?" for _ in columns)
                     values = tuple(row[name] for name in columns)
-                    conn.execute(
-                        f"INSERT INTO {_qid(table)} ({names}) VALUES ({marks})",
-                        values,
-                    )
+                    if fmt == LEGACY_FORMAT and pk:
+                        # Phase-14 backups were config-only and intentionally
+                        # non-destructive. Preserve that contract: update same
+                        # primary keys but never delete operational history.
+                        update_cols = [
+                            name for name in columns if name not in set(pk)
+                        ]
+                        if update_cols:
+                            conflict = ",".join(_qid(name) for name in pk)
+                            updates = ",".join(
+                                f"{_qid(name)}=excluded.{_qid(name)}"
+                                for name in update_cols
+                            )
+                            conn.execute(
+                                f"INSERT INTO {_qid(table)} ({names}) VALUES ({marks}) "
+                                f"ON CONFLICT ({conflict}) DO UPDATE SET {updates}",
+                                values,
+                            )
+                        else:
+                            conn.execute(
+                                f"INSERT OR IGNORE INTO {_qid(table)} ({names}) "
+                                f"VALUES ({marks})",
+                                values,
+                            )
+                    else:
+                        conn.execute(
+                            f"INSERT INTO {_qid(table)} ({names}) VALUES ({marks})",
+                            values,
+                        )
                     restored += 1
             violations = conn.execute("PRAGMA foreign_key_check").fetchall()
             if violations:
