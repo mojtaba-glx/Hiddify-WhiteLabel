@@ -6,7 +6,8 @@ import asyncio
 import io
 import json
 import zipfile
-from datetime import timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -25,6 +26,7 @@ from TenantRuntime.backup import (
     create_tenant_backup,
     decode_tenant_backup,
     finish_auto_backup_slot,
+    format_auto_backup_caption,
     prepare_auto_backup_delivery,
     restore_tenant_backup,
     tenant_backup_tables,
@@ -527,6 +529,66 @@ def test_auto_backup_delivery_uses_tenant_admin_bot_and_excludes_run_history(
         (tenant_id, delivery.slot_key),
     ).fetchone()
     assert row["status"] == "success"
+
+
+def test_auto_backup_full_archive_includes_panel_folder_and_sellbot_caption(
+    conn, factories, cipher
+) -> None:
+    state = _seed_operational_tenant(conn, factories, cipher)
+
+    class BackupOnlyPanel:
+        def server_backup(self, *, target, secret):
+            assert secret
+            return {
+                "filename": "panel.json",
+                "content": b'{"panel":true}',
+                "source_url": target.endpoint + "/backup",
+            }
+
+    state["service"].panel_adapter = BackupOnlyPanel()
+    delivery = prepare_auto_backup_delivery(
+        conn,
+        tenant_id=int(state["tenant"]["id"]),
+        owner_telegram_id=int(state["tenant"]["owner_telegram_id"]),
+        cipher=cipher,
+        settings=state["service"].runtime_userbot_settings(),
+        business=state["service"],
+        now=datetime(
+            2026, 10, 3, 18, 0, 6,
+            tzinfo=ZoneInfo("Asia/Tehran"),
+        ),
+    )
+    assert delivery is not None
+    assert delivery.artifact.panel_backups_count == 1
+    assert delivery.artifact.panel_errors == ()
+    with zipfile.ZipFile(io.BytesIO(delivery.artifact.data), "r") as archive:
+        names = set(archive.namelist())
+        assert "PanelBackups/Turkey/panel.json" in names
+        assert "tenant_bot.db" in names
+        assert "Shared/tenant.json" in names
+        assert "Shared/servers.json" in names
+        assert any(
+            name.startswith("Backup_Bot_") and name.endswith(".json")
+            for name in names
+        )
+        assert any(
+            name.startswith("Backup_All_") and name.endswith(".json")
+            for name in names
+        )
+    caption = format_auto_backup_caption(
+        delivery,
+        now=datetime(
+            2026, 10, 3, 18, 0, 6,
+            tzinfo=ZoneInfo("Asia/Tehran"),
+        ),
+    )
+    assert caption == (
+        "⏰ بکاپ خودکار کامل\n"
+        "🕐 زمان: 18:00:06 03-10-2026\n"
+        "🤖 بکاپ ربات: ✅\n"
+        "🖥️ بکاپ سرورها/نودها: 1 مورد\n"
+        "⚠️ خطاها: 0 مورد"
+    )
 
 
 class FakeBackupSender:
