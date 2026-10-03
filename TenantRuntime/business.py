@@ -173,6 +173,7 @@ USERBOT_SETTING_DEFAULTS: dict[str, Any] = {
     "payment_event_channel_id": "",
     "system_event_channel_enabled": False,
     "system_event_channel_id": "",
+    "auto_backup_enabled": True,
     "channel_id": "",
 
     # Telegram button styling.

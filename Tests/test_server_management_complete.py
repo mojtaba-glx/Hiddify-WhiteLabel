@@ -612,6 +612,7 @@ def test_fresh_and_upgrade_migrations_preserve_subscription_data(tmp_path):
     assert applied == [
         "0029_server_management",
         "0030_broadcast_channel_phase13",
+        "0031_backup_agency_infra",
     ]
     conn = connect(db)
     assert (

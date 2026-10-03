@@ -188,16 +188,21 @@ class RuntimeSupervisor:
                             or getattr(lifecycle_report, "expired", 0)
                             or getattr(lifecycle_report, "enforcement_pending", 0)
                             or getattr(lifecycle_report, "reminders_sent", 0)
+                            or getattr(lifecycle_report, "backups_sent", 0)
+                            or getattr(lifecycle_report, "backups_failed", 0)
                         ):
                             logger.info(
                                 "Runtime enforcer tenants=%s scanned=%s synced=%s "
-                                "expired=%s pending=%s reminders=%s errors=%s",
+                                "expired=%s pending=%s reminders=%s backups=%s "
+                                "backup_failures=%s errors=%s",
                                 getattr(lifecycle_report, "tenants", 0),
                                 getattr(lifecycle_report, "scanned", 0),
                                 getattr(lifecycle_report, "synced", 0),
                                 getattr(lifecycle_report, "expired", 0),
                                 getattr(lifecycle_report, "enforcement_pending", 0),
                                 getattr(lifecycle_report, "reminders_sent", 0),
+                                getattr(lifecycle_report, "backups_sent", 0),
+                                getattr(lifecycle_report, "backups_failed", 0),
                                 getattr(lifecycle_report, "errors", 0),
                             )
                     except Exception as exc:
