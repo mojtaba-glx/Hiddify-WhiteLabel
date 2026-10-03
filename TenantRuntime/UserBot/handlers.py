@@ -1716,7 +1716,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 usage_text, expiry_text = _subscription_limit_lines(x, settings)
                 detail_lines.append(
                     f"• #{x['id']} · {x['plan_name']} · "
-                    f"{'در حال قطع خودکار' if int(x.get('enforcement_pending') or 0) else x['status']}\n"
+                    f"{'در حال قطع خودکار' if int(x.get('enforcement_pending') or 0) else x['status']}"
+                    f"{_subscription_identity_line(x, settings)}\n"
                     f"  مصرف: {usage_text} · انقضا: {expiry_text}\n"
                     f"  آخرین اتصال: {x.get('last_online') or '-'}"
                 )
@@ -1725,41 +1726,148 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             rows = []
             for item in items:
+                subscription_id = int(item["id"])
                 if (
                     item.get("external_ref")
                     and item.get("server_id")
                     and item["status"] in ("active", "disabled", "expired")
                 ):
                     rows.append([InlineKeyboardButton(
-                        f"♻️ تمدید اشتراک #{item['id']}",
-                        callback_data=f"shop:renew:{item['id']}"
+                        f"♻️ تمدید اشتراک #{subscription_id}",
+                        callback_data=f"shop:renew:{subscription_id}"
                     )])
-                if item["status"] == "active" and item.get("external_ref") and item.get("server_id"):
-                    if (
-                        bool(settings.get("show_user_page_link", True))
-                        and (
-                            bool(settings.get("show_sub_link", True))
-                            or bool(settings.get("show_smart_link", True))
-                        )
-                    ):
-                        try:
-                            link = business.subscription_link(actor, subscription_id=int(item["id"]))
-                            rows.append([InlineKeyboardButton(f"🔗 لینک اشتراک #{item['id']}", url=link)])
-                        except TenantBusinessError:
-                            pass
-                    if bool(settings.get("show_direct_config", True)):
-                        rows.append([InlineKeyboardButton(
-                            f"📄 کانفیگ‌های مستقیم #{item['id']}",
-                            callback_data=f"shop:configs:{item['id']}",
-                        )])
+                if (
+                    item["status"] == "active"
+                    and item.get("external_ref")
+                    and item.get("server_id")
+                    and _subscription_config_menu_rows(
+                        business, actor, subscription_id, settings
+                    )
+                ):
+                    rows.append([InlineKeyboardButton(
+                        f"📝 کانفیگ‌ها و لینک‌ها #{subscription_id}",
+                        callback_data=f"shop:configmenu:{subscription_id}",
+                    )])
             rows.append([
                 InlineKeyboardButton("🏠 منو", callback_data="runtime:home")
             ])
             await update.callback_query.edit_message_text(
                 text,
                 reply_markup=InlineKeyboardMarkup(rows),
-            ); return
+            )
+            return
+        if data.startswith("shop:configmenu:"):
+            subscription_id = int(data.rsplit(":", 1)[1])
+            rows = _subscription_config_menu_rows(
+                business, actor, subscription_id, settings
+            )
+            rows.append([InlineKeyboardButton(
+                "↩️ اشتراک‌های من",
+                callback_data="shop:subs",
+            )])
+            await update.callback_query.edit_message_text(
+                f"📝 کانفیگ‌ها و لینک‌ها — اشتراک #{subscription_id}\n"
+                "روش موردنظر را انتخاب کنید:",
+                reply_markup=InlineKeyboardMarkup(rows),
+                disable_web_page_preview=True,
+            )
+            return
+
+        if data.startswith((
+            "shop:sublink:",
+            "shop:autosub:",
+            "shop:subb64:",
+            "shop:smart:",
+            "shop:smartb64:",
+        )):
+            action, raw_subscription_id = data.split(":", 2)[1:]
+            subscription_id = int(raw_subscription_id)
+            specs = {
+                "sublink": (
+                    "show_sub_link",
+                    "🔗 لینک اشتراک",
+                    business.subscription_link,
+                    {},
+                ),
+                "autosub": (
+                    "show_auto_sub_link",
+                    "🤖 لینک اشتراک خودکار",
+                    business.automatic_subscription_link,
+                    {},
+                ),
+                "subb64": (
+                    "show_sub_link_b64",
+                    "🔐 لینک اشتراک b64",
+                    business.subscription_link_b64,
+                    {},
+                ),
+                "smart": (
+                    "show_multi_server",
+                    "🌐 لینک اشتراک هوشمند",
+                    business.smart_subscription_link,
+                    {"base64_output": False},
+                ),
+                "smartb64": (
+                    "show_multi_server_b64",
+                    "🌐 لینک اشتراک هوشمند b64",
+                    business.smart_subscription_link,
+                    {"base64_output": True},
+                ),
+            }
+            setting_key, title, builder, kwargs = specs[action]
+            if not bool(settings.get(setting_key, False)):
+                await update.callback_query.edit_message_text(
+                    f"❌ نمایش «{title}» خاموش است.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "🔙 بازگشت",
+                            callback_data=f"shop:configmenu:{subscription_id}",
+                        )
+                    ]]),
+                )
+                return
+            try:
+                link = builder(
+                    actor,
+                    subscription_id=subscription_id,
+                    **kwargs,
+                )
+            except TenantBusinessError:
+                await update.callback_query.edit_message_text(
+                    f"❌ {title} برای این اشتراک در دسترس نیست.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "🔙 بازگشت",
+                            callback_data=f"shop:configmenu:{subscription_id}",
+                        )
+                    ]]),
+                )
+                return
+            await update.callback_query.edit_message_text(
+                f"{title}:\n{link}",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "🔙 بازگشت",
+                        callback_data=f"shop:configmenu:{subscription_id}",
+                    )
+                ]]),
+                disable_web_page_preview=True,
+            )
+            return
+
         if data.startswith("shop:configs:"):
+            if not bool(settings.get("show_direct_config", True)):
+                subscription_id = int(data.rsplit(":", 1)[1])
+                await update.callback_query.edit_message_text(
+                    "❌ نمایش کانفیگ مستقیم خاموش است.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "🔙 بازگشت",
+                            callback_data=f"shop:configmenu:{subscription_id}",
+                        )
+                    ]]),
+                )
+                return
             subscription_id = int(data.rsplit(":", 1)[1])
             configs = business.subscription_configs(
                 actor, subscription_id=subscription_id
@@ -1807,6 +1915,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data.startswith("shop:configserver:"):
             _, _, raw_subscription_id, raw_server_index = data.split(":", 3)
             subscription_id = int(raw_subscription_id)
+            if not bool(settings.get("show_direct_config", True)):
+                await update.callback_query.edit_message_text(
+                    "❌ نمایش کانفیگ مستقیم خاموش است.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "🔙 بازگشت",
+                            callback_data=f"shop:configmenu:{subscription_id}",
+                        )
+                    ]]),
+                )
+                return
             server_index = int(raw_server_index)
             configs = business.subscription_configs(
                 actor, subscription_id=subscription_id
@@ -1888,6 +2007,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if len(parts) != 5:
                 raise TenantBusinessError("invalid config item")
             subscription_id = int(parts[2])
+            if not bool(settings.get("show_direct_config", True)):
+                await update.callback_query.edit_message_text(
+                    "❌ نمایش کانفیگ مستقیم خاموش است.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "🔙 بازگشت",
+                            callback_data=f"shop:configmenu:{subscription_id}",
+                        )
+                    ]]),
+                )
+                return
             server_index = int(parts[3])
             config_index = int(parts[4])
             configs = business.subscription_configs(
