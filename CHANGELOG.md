@@ -3,11 +3,22 @@
 ## v0.30.0 — Tenant payment architecture
 
 - Unified Tenant card-to-card, Crypto, wallet checkout and wallet-topup payment status under one payment history/review model.
-- Added a provider registry boundary so UserBot renders payment methods generically instead of branching on individual providers.
+- Added a provider registry and generic payment-start contract so future gateways can return receipt, external-URL or completed actions without provider-specific UserBot branches.
 - Added provider metadata, priority and safe method editing/removal while preserving old payment receipts and installed databases.
 - Added unified AdminBot approve/reject handling for both order receipts and wallet-topup receipts, with review notes and payment audit events.
+- Added Tenant-scoped receipt-media archival so photos submitted through UserBot remain reviewable from the separate AdminBot token.
 - Added UserBot payment-status history for manual receipts and direct wallet payments without changing the persistent main-menu layout.
-- Added migration `0025_payment_phase11` and regression coverage for provider extension, wallet review, payment status and safe method lifecycle.
+- Added migration `0026_payment_phase11` and regression coverage for provider extension, wallet review, payment status, receipt media and safe method lifecycle.
+
+## v0.20.1 — Server connection parity
+
+- Completed tenant server connection controls using Hiddify-SellBot `AdminBot/servers.py` and its provider-specific authentication flows as the reference.
+- Added read-only protected API probes for Hiddify v11/v12/v13, X-UI Sanaei/Alireza and X-NET; new setup and connection edits save only after successful verification.
+- Added Sanaei cookie login and token rejection fallback, with per-inbound creation, renewal, state and deletion paths; state edits preserve usage and quotas.
+- Added X-NET token/fallback login edits, optional internal management API, subscription port/path controls, inbound discovery and a working default-server action.
+- Added full connection reconfiguration for incomplete existing server records, preserving server IDs and mapped subscriptions.
+- Kept secret edits encrypted and atomic, preserved working settings after failures, scoped JWT caches to credential material, and restored cancellation/back navigation.
+- Added migration `0025_server_connection_parity` and regression tests for all four setup flows, read-only probes, failures/retries, credential rotation, tenant isolation and cookie-auth lifecycle.
 
 ## v0.20.0 — Referral parity
 
