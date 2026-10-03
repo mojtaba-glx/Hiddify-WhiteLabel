@@ -329,9 +329,13 @@ def test_button_wizards_create_edit_search_and_cancel(
 
     async def run():
         await click(update, context, f'srv:useradd:{source["id"]}:single')
-        for text in ("New customer", "15", "20", "hello note"):
+        for text in ("New customer", "15", "20"):
             await send(update, context, text)
         assert server_actions.FLOW not in context.user_data
+        assert not any(
+            "یادداشت را وارد کنید" in str(sent[0])
+            for sent in message.sent
+        )
         users = s.users(7001, source["id"])
         row = next(x for x in users if x["name"] == "New customer")
         await click(update, context, f'srv:pfield:{source["id"]}:{row["id"]}:name')
@@ -345,6 +349,133 @@ def test_button_wizards_create_edit_search_and_cancel(
         await click(update, context, f'srv:planadd:{source["id"]}')
         await send(update, context, "❌ لغو")
         assert server_actions.FLOW not in context.user_data
+
+    asyncio.run(run())
+
+
+def test_plan_user_creation_finishes_after_name_without_note(
+    monkeypatch, conn, factories, cipher
+):
+    b, p, s, source, _, _, _ = setup(conn, factories, cipher)
+    plan = b.add_plan(
+        7001,
+        name="Quick plan",
+        traffic_gb=25,
+        duration_days=45,
+        price=100000,
+        server_id=source["id"],
+    )
+    update, context, message = ui(monkeypatch, b)
+
+    async def run():
+        await click(
+            update,
+            context,
+            f'srv:useraddplan:{source["id"]}:{plan["id"]}',
+        )
+        assert context.user_data[server_actions.FLOW]["kind"] == "create_name"
+        await send(update, context, "Plan user")
+        assert server_actions.FLOW not in context.user_data
+        assert not any(
+            "یادداشت را وارد کنید" in str(sent[0])
+            for sent in message.sent
+        )
+        row = next(
+            x for x in s.users(7001, source["id"])
+            if x["name"] == "Plan user"
+        )
+        panel_row = p.users[source["endpoint"], row["external_ref"]]
+        assert panel_row["traffic_bytes"] == 25 * 1024**3
+        assert s.reset_duration(7001, source["id"], row["id"]) == 45
+
+    asyncio.run(run())
+
+
+def test_create_user_on_primary_auto_syncs_all_attached_panel_node_types(
+    conn, factories, cipher
+):
+    b, p, s, source, hiddify_node, _, _ = setup(conn, factories, cipher)
+    xui_node = b.add_server(
+        7001,
+        label="XUI node",
+        panel_kind="xui",
+        endpoint="https://xui-node.example",
+        xui_flavor="sanaei",
+    )
+    b.set_panel_credential(
+        7001, server_id=xui_node["id"], secret="xui-secret"
+    )
+    xnet_node = b.add_server(
+        7001,
+        label="XNET node",
+        panel_kind="xnet",
+        endpoint="https://xnet-node.example",
+    )
+    b.set_panel_credential(
+        7001, server_id=xnet_node["id"], secret="xnet-secret"
+    )
+    for child in (hiddify_node, xui_node, xnet_node):
+        s.attach_node(7001, source["id"], child["id"])
+
+    async def run():
+        report = await s.create_users(
+            7001,
+            source["id"],
+            name="All nodes",
+            gb=12,
+            days=30,
+            operation_key="all-node-types",
+        )
+        assert report["errors"] == 0
+        assert report["node_errors"] == 0
+        assert len(report["users"]) == 1
+        ref = report["users"][0]["external_ref"]
+        for server in (source, hiddify_node, xui_node, xnet_node):
+            assert (server["endpoint"], ref) in p.users
+            assert p.users[server["endpoint"], ref]["name"] == "All nodes"
+
+    asyncio.run(run())
+
+
+def test_create_user_directly_on_any_node_server_does_not_require_parent_flow(
+    conn, factories, cipher
+):
+    b, p, s, source, hiddify_node, _, _ = setup(conn, factories, cipher)
+    xui_node = b.add_server(
+        7001,
+        label="Direct XUI",
+        panel_kind="xui",
+        endpoint="https://direct-xui.example",
+        xui_flavor="alireza",
+    )
+    b.set_panel_credential(
+        7001, server_id=xui_node["id"], secret="xui-direct-secret"
+    )
+    xnet_node = b.add_server(
+        7001,
+        label="Direct XNET",
+        panel_kind="xnet",
+        endpoint="https://direct-xnet.example",
+    )
+    b.set_panel_credential(
+        7001, server_id=xnet_node["id"], secret="xnet-direct-secret"
+    )
+
+    async def run():
+        for index, server in enumerate((hiddify_node, xui_node, xnet_node), 1):
+            report = await s.create_users(
+                7001,
+                server["id"],
+                name=f"Direct {index}",
+                gb=5,
+                days=10,
+                operation_key=f"direct-node-{index}",
+            )
+            assert report["errors"] == 0
+            assert report["node_errors"] == 0
+            ref = report["users"][0]["external_ref"]
+            assert (server["endpoint"], ref) in p.users
+            assert (source["endpoint"], ref) not in p.users
 
     asyncio.run(run())
 
