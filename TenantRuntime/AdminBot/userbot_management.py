@@ -1955,8 +1955,11 @@ async def handle_callback(
             rows.append([InlineKeyboardButton("👤بازگشت به پروفایل", callback_data=f"userbot:user:{customer_id}")])
             await _edit_or_send(update, f"📗 لیست سفارشات\nتعداد: {len(items)}", InlineKeyboardMarkup(rows)); return True
         if action == "payments":
-            items = business.customer_receipts_admin(actor, customer_id=customer_id)
-            rows = [[InlineKeyboardButton(f"#{x['id']} · {x['status']}", callback_data=f"userbot:pay:detail:{int(x['id'])}")] for x in items[:50]]
+            items = business.list_payments_admin(actor, customer_id=customer_id)
+            rows = [[InlineKeyboardButton(
+                f"{x.get('provider_icon') or '💳'} {x['payment_key']} · {x['status']}",
+                callback_data=f"userbot:pay:detail:{x['payment_key']}",
+            )] for x in items[:50]]
             rows.append([InlineKeyboardButton("👤بازگشت به پروفایل", callback_data=f"userbot:user:{customer_id}")])
             await _edit_or_send(update, f"💵 لیست تراکنشات\nتعداد: {len(items)}", InlineKeyboardMarkup(rows)); return True
         if action == "wallet":
@@ -2016,14 +2019,23 @@ async def handle_callback(
         context.user_data[FLOW_KEY]={"kind":"payment_search"}
         await query.message.reply_text("🔎 شناسه تراکنش را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
     if data.startswith("userbot:pay:detail:"):
-        await _send_payment_detail(update,business,actor,int(data.rsplit(":",1)[1])); return True
+        payment_key = data[len("userbot:pay:detail:"):]
+        await _send_payment_detail(update, business, actor, payment_key)
+        return True
     if data.startswith("userbot:pay:review:"):
-        parts=data.split(":"); rid=int(parts[3]); approve=parts[4]=="yes"
-        result=business.review_receipt(actor,rid,approve=approve)
-        if approve and result.get("status")=="paid":
-            try: business.fulfill_paid_order(actor,order_id=int(result["order_id"]))
-            except TenantBusinessError: pass
-        await _send_payment_detail(update,business,actor,rid); return True
+        raw = data[len("userbot:pay:review:"):]
+        payment_key, decision = raw.rsplit(":", 1)
+        approve = decision == "yes"
+        result = business.review_payment_admin(
+            actor, payment_key=payment_key, approve=approve
+        )
+        if approve and result.get("source") == "order" and result.get("status") == "paid":
+            try:
+                business.fulfill_paid_order(actor, order_id=int(result["order_id"]))
+            except TenantBusinessError:
+                pass
+        await _send_payment_detail(update, business, actor, payment_key)
+        return True
 
     if data == "userbot:gifts_menu":
         await _send_gifts_menu(update,business,actor); return True
@@ -3281,13 +3293,18 @@ async def handle_text(
             rows=[[InlineKeyboardButton(f"#{x['id']} · {x['display_name']}",callback_data=f"userbot:order:{int(x['id'])}")] for x in items[:50]] or [[InlineKeyboardButton("نتیجه‌ای نیست",callback_data="userbot:noop")]]
             await update.effective_message.reply_text("نتایج سفارش:",reply_markup=InlineKeyboardMarkup(rows)); return True
         if kind=="payment_search":
-            rid=int(text.lstrip("#")); context.user_data.pop(FLOW_KEY,None)
-            await update.effective_message.reply_text("✅ تراکنش یافت شد.",reply_markup=admin_main_keyboard())
-            # send a synthetic callback-like detail as a new message
-            pay=business.receipt_admin(actor,receipt_id=rid)
+            items=business.search_payments_admin(actor,text)
+            context.user_data.pop(FLOW_KEY,None)
             await update.effective_message.reply_text(
-                f"◈ شناسه تراکنش: {rid}\n👤 {pay['display_name']}\n💰 {int(pay['amount']):,} {pay['currency']}\nوضعیت: {pay['status']}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("جزئیات",callback_data=f"userbot:pay:detail:{rid}")]])
+                f"✅ {len(items)} تراکنش پیدا شد.",
+                reply_markup=admin_main_keyboard(),
+            )
+            rows=[[InlineKeyboardButton(
+                f"{x.get('provider_icon') or '💳'} {x['payment_key']} · {x.get('display_name') or '-'}",
+                callback_data=f"userbot:pay:detail:{x['payment_key']}",
+            )] for x in items[:50]] or [[InlineKeyboardButton("نتیجه‌ای نیست",callback_data="userbot:noop")]]
+            await update.effective_message.reply_text(
+                "نتایج تراکنش:",reply_markup=InlineKeyboardMarkup(rows)
             ); return True
         if kind=="gift_add_code":
             code=text.strip().upper()
