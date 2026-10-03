@@ -195,7 +195,10 @@ def test_adminbot_userbot_runtime_contract_is_still_two_role_and_tenant_scoped(
         secret_cipher=cipher,
     )
     with pytest.raises(TenantBusinessError):
-        foreign.customer(int(customer["id"]))
+        foreign.customer_profile_admin(
+            92001,
+            customer_id=int(customer["id"]),
+        )
 
 
 def test_stable_cross_phase_purchase_renew_expire_ticket_broadcast_backup_restore(
@@ -243,7 +246,7 @@ def test_stable_cross_phase_purchase_renew_expire_ticket_broadcast_backup_restor
         subscription_id=subscription_id,
         plan_id=int(state["plan"]["id"]),
     )
-    method = service.list_payment_methods(customer_tid)[0]
+    method = service.list_payment_methods_admin(owner)[0]
     renewal_receipt = service.submit_receipt(
         customer_tid,
         order_id=int(renewal_order["id"]),
@@ -355,7 +358,10 @@ def test_stable_cross_phase_purchase_renew_expire_ticket_broadcast_backup_restor
     assert artifact.table_count > 0
     assert artifact.row_count > 0
 
-    local_customer = service.customer(customer_tid)
+    local_customer = service.list_customers_admin(
+        owner,
+        query=str(customer_tid),
+    )[0]
     conn.execute(
         "UPDATE tenant_customers SET display_name='BROKEN LOCAL STATE' "
         "WHERE tenant_id=? AND id=?",
@@ -375,7 +381,10 @@ def test_stable_cross_phase_purchase_renew_expire_ticket_broadcast_backup_restor
     )
     assert restored.format == BACKUP_FORMAT
     assert restored.rows_restored == artifact.row_count
-    assert service.customer(customer_tid)["display_name"] == "Buyer"
+    assert service.customer_profile_admin(
+        owner,
+        customer_id=int(local_customer["id"]),
+    )["display_name"] == "Buyer"
     restored_thread = service.ticket_messages(
         customer_tid,
         ticket_id=int(ticket["id"]),
