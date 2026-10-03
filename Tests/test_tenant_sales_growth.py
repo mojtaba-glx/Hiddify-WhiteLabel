@@ -268,6 +268,90 @@ def test_fixed_coupon_checks_currency_and_limits(
     assert int(applied["amount"]) == 75000
 
 
+def test_trial_announcement_setting_roundtrips(
+    conn, factories, cipher
+) -> None:
+    _tenant, service, _panel, _plan, _method, _user = _setup(
+        conn, factories, cipher
+    )
+    initial = service.growth_settings(7001)
+    assert bool(initial["trial_announce_enabled"]) is True
+
+    disabled = service.update_growth_settings(
+        7001,
+        trial_enabled=True,
+        trial_announce_enabled=False,
+        trial_traffic_gb=2,
+        trial_duration_days=3,
+    )
+    assert bool(disabled["trial_enabled"]) is True
+    assert bool(disabled["trial_announce_enabled"]) is False
+    assert int(disabled["trial_traffic_gb"]) == 2
+    assert int(disabled["trial_duration_days"]) == 3
+
+    enabled = service.update_growth_settings(
+        7001,
+        trial_announce_enabled=True,
+    )
+    assert bool(enabled["trial_announce_enabled"]) is True
+
+
+def test_single_and_all_trial_reset_restore_eligibility(
+    conn, factories, cipher
+) -> None:
+    _tenant, service, panel, _plan, _method, first = _setup(
+        conn, factories, cipher
+    )
+    service.update_growth_settings(
+        7001,
+        trial_enabled=True,
+        trial_traffic_gb=1,
+        trial_duration_days=1,
+    )
+
+    first_claim = service.claim_free_trial(7101)
+    assert first_claim["order_kind"] == "trial"
+    assert service.customer_profile_admin(
+        7001, customer_id=int(first["id"])
+    )["trial_used_at"]
+
+    reset = service.reset_customer_trial_admin(
+        7001,
+        customer_id=int(first["id"]),
+    )
+    assert reset["trial_used_at"] is None
+    assert conn.execute(
+        "SELECT COUNT(*) FROM tenant_trial_claims "
+        "WHERE tenant_id=? AND customer_id=?",
+        (service.tenant_id, int(first["id"])),
+    ).fetchone()[0] == 0
+
+    second_claim_for_first = service.claim_free_trial(7101)
+    assert second_claim_for_first["order_kind"] == "trial"
+
+    second = service.register_customer(
+        7202,
+        display_name="Second Trial User",
+        username="second_trial",
+    )
+    second_claim = service.claim_free_trial(7202)
+    assert second_claim["order_kind"] == "trial"
+    assert panel.provision_count == 3
+
+    changed = service.reset_all_customer_trials_admin(7001)
+    assert changed == 2
+    assert conn.execute(
+        "SELECT COUNT(*) FROM tenant_trial_claims WHERE tenant_id=?",
+        (service.tenant_id,),
+    ).fetchone()[0] == 0
+    rows = conn.execute(
+        "SELECT trial_used_at FROM tenant_customers "
+        "WHERE tenant_id=? AND id IN (?,?) ORDER BY id",
+        (service.tenant_id, int(first["id"]), int(second["id"])),
+    ).fetchall()
+    assert all(row["trial_used_at"] is None for row in rows)
+
+
 def test_referral_trial_and_first_purchase_rewards_credit_wallet_once(
     conn, factories, cipher
 ) -> None:
