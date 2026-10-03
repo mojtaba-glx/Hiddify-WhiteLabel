@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from types import SimpleNamespace
 
-import pytest
 
 from Gateway.catalog import RuntimeBotSpec
 from TenantRuntime.AdminBot import handlers
@@ -79,8 +79,7 @@ def test_debug_stats_are_strictly_tenant_scoped(conn, factories, cipher) -> None
     assert int(tenant_a["id"]) != int(tenant_b["id"])
 
 
-@pytest.mark.asyncio
-async def test_debug_report_matches_sellbot_sections_without_secret_leak(
+def test_debug_report_matches_sellbot_sections_without_secret_leak(
     conn, factories, cipher, monkeypatch
 ) -> None:
     tenant, service = _service(
@@ -103,11 +102,13 @@ async def test_debug_report_matches_sellbot_sections_without_secret_leak(
         )
     )
 
-    report = await handlers._build_admin_debug_report(
-        context,
-        business=service,
-        spec=spec,
-        actor=7001,
+    report = asyncio.run(
+        handlers._build_admin_debug_report(
+            context,
+            business=service,
+            spec=spec,
+            actor=7001,
+        )
     )
 
     for section in (
