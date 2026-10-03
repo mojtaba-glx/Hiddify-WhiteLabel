@@ -3371,7 +3371,16 @@ async def handle_document(
 ) -> bool:
     set_button_settings(business.runtime_userbot_settings())
     flow=context.user_data.get(FLOW_KEY)
-    if isinstance(flow,dict) and flow.get("kind")=="broadcast" and str(flow.get("step") or "")=="wait_photo":
+    if (
+        isinstance(flow, dict)
+        and (
+            (
+                flow.get("kind") == "broadcast"
+                and str(flow.get("step") or "") == "wait_photo"
+            )
+            or flow.get("kind") == "invite_banner_photo"
+        )
+    ):
         return await handle_media(
             update,context,business=business,actor=actor,
             admin_main_keyboard=admin_main_keyboard,
