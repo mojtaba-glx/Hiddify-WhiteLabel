@@ -6232,8 +6232,11 @@ class TenantBusinessService:
 
     def list_smart_links(self, actor_id: int) -> list[dict[str, Any]]:
         self._admin(actor_id)
+        settings = self.runtime_userbot_settings()
         public_base = str(
-            os.getenv("SMART_SUB_PUBLIC_BASE_URL", "") or ""
+            settings.get("smart_base_url")
+            or os.getenv("SMART_SUB_PUBLIC_BASE_URL", "")
+            or ""
         ).strip()
         from TenantRuntime.smart_subscription import smart_subscription_url
 
@@ -6244,10 +6247,19 @@ class TenantBusinessService:
             (self.tenant_id,),
         ).fetchall():
             item = dict(row)
-            item["public_url"] = (
-                smart_subscription_url(public_base, str(item["code"]))
-                if str(item["target"]).startswith("subscription:")
-                else ""
-            )
+            if str(item["target"]).startswith("subscription:"):
+                item["public_url"] = smart_subscription_url(
+                    public_base,
+                    str(item["code"]),
+                    base64_output=False,
+                )
+                item["public_url_b64"] = smart_subscription_url(
+                    public_base,
+                    str(item["code"]),
+                    base64_output=True,
+                )
+            else:
+                item["public_url"] = ""
+                item["public_url_b64"] = ""
             items.append(item)
         return items
