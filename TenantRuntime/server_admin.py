@@ -287,11 +287,15 @@ class ServerAdminService:
                     raise TenantBusinessError(
                         "panel returned a different user identity"
                     )
+                changes = {"name": label}
+                note = str(comment or "").strip()
+                if note:
+                    changes["comment"] = note[:1000]
                 data = await self.call(
                     sid,
                     "update_user",
                     external_ref=ref,
-                    changes={"name": label, "comment": str(comment)[:1000]},
+                    changes=changes,
                 )
                 with transaction(self.conn):
                     self.save_user(
@@ -300,7 +304,26 @@ class ServerAdminService:
                 results.append(self.user(actor, sid, uid))
             except TenantBusinessError:
                 errors += 1
-        return {"users": results, "errors": errors}
+
+        # User creation is a server operation, not a UI-only operation.
+        # When the selected server is a primary server with active attached
+        # nodes, replicate each successfully-created user to every node using
+        # the same provider-neutral PanelAdapter path (Hiddify/X-UI/X-NET).
+        node_errors = 0
+        if results and self.b.list_nodes(parent_server_id=int(sid)):
+            for user in results:
+                sync = await self.sync_nodes(
+                    actor,
+                    int(sid),
+                    "missing",
+                    only_user=int(user["id"]),
+                )
+                node_errors += int(sync.get("errors") or 0)
+        return {
+            "users": results,
+            "errors": errors,
+            "node_errors": node_errors,
+        }
 
     def related_targets(self, actor, sid, uid):
         row = self.user(actor, sid, uid)
