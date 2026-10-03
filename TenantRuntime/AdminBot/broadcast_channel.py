@@ -1214,14 +1214,35 @@ async def handle_text(
         return False
     text = str(message.text or "").strip()
 
+    kind = str(flow.get("kind") or "")
+
     if _is_cancel(text):
         _clear_flow(context)
+        if kind.startswith("channel_"):
+            await message.reply_text(
+                "❌ لغو شد.", reply_markup=admin_main_keyboard()
+            )
+            await _show_channel_menu(
+                update, context, business, actor
+            )
+            return True
+        if kind == "broadcast" or kind.startswith("broadcast_"):
+            await message.reply_text(
+                "❌ لغو شد.", reply_markup=admin_main_keyboard()
+            )
+            draft = _broadcast_draft(context)
+            if draft.get("kind"):
+                await _show_broadcast_draft(
+                    update, context, business, actor
+                )
+            else:
+                await show_broadcast_menu(update, business, actor)
+            return True
         await message.reply_text(
             "❌ لغو شد.", reply_markup=admin_main_keyboard()
         )
         return True
 
-    kind = str(flow.get("kind") or "")
     if kind == "broadcast":
         draft = _broadcast_draft(context)
         step = str(flow.get("step") or "wait_text")
@@ -1255,7 +1276,12 @@ async def handle_text(
     if kind == "broadcast_edit_text":
         body = _message_html(message).strip()
         draft = _broadcast_draft(context)
-        _validate_body(str(draft.get("kind") or "text"), body)
+        if text in {"0", "-", "—"}:
+            body = ""
+        draft_kind = str(draft.get("kind") or "text")
+        if draft_kind == "text" and not body.strip():
+            raise ValueError("text broadcast cannot be empty")
+        _validate_body(draft_kind, body)
         draft["text"] = body
         _clear_flow(context)
         await message.reply_text(
