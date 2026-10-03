@@ -551,8 +551,9 @@ async def _send_broadcast(
     sent = failed = recovered = 0
     unreachable = temporary = telegram_error = other = 0
     reusable_file_id = ""
-    token = _sibling_user_bot_token(business)
+    token = ""
     try:
+        token = _sibling_user_bot_token(business)
         async with Bot(token=token) as bot:
             for target in targets:
                 chat_id = int(target["telegram_user_id"])
@@ -831,6 +832,7 @@ async def _publish_channel(
     context: ContextTypes.DEFAULT_TYPE,
     business: Any,
     actor: int,
+    admin_main_keyboard: Any,
 ) -> bool:
     draft = _channel_draft(context)
     settings = business.userbot_settings_admin(actor)
@@ -910,6 +912,7 @@ async def _publish_channel(
         "✅ پست با موفقیت توسط ربات کاربران در کانال منتشر شد.\n"
         f"🆔 Message ID: <code>{int(sent.message_id)}</code>",
         parse_mode="HTML",
+        reply_markup=admin_main_keyboard(),
     )
     return True
 
@@ -944,7 +947,7 @@ async def handle_callback(
     if data.startswith("userbot:broadcast:segment:"):
         segment = data.rsplit(":", 1)[1]
         if segment not in SEGMENT_LABELS:
-            await query.answer("گروه ارسال نامعتبر است.", show_alert=True)
+            await query.message.reply_text("❌ گروه ارسال نامعتبر است.")
             return True
         context.user_data[BROADCAST_DRAFT_KEY] = _empty_broadcast(segment)
         context.user_data[FLOW_KEY] = {
@@ -1040,7 +1043,17 @@ async def handle_callback(
 
     if data == "userbot:broadcast:publish":
         draft = _broadcast_draft(context)
-        result = await _send_broadcast(context, business, actor, draft)
+        try:
+            result = await _send_broadcast(
+                context, business, actor, draft
+            )
+        except Exception as exc:
+            await query.message.reply_text(
+                "❌ آماده‌سازی یا ارسال پیام همگانی با خطا مواجه شد.\n"
+                f"خطا: <code>{type(exc).__name__}</code>",
+                parse_mode="HTML",
+            )
+            return True
         context.user_data.pop(BROADCAST_DRAFT_KEY, None)
         _clear_flow(context)
         await query.message.reply_text(
@@ -1143,14 +1156,13 @@ async def handle_callback(
         return True
 
     if data == "channelpost:publish":
-        published = await _publish_channel(
-            update, context, business, actor
+        await _publish_channel(
+            update,
+            context,
+            business,
+            actor,
+            admin_main_keyboard,
         )
-        if published:
-            await query.message.reply_text(
-                "🏠 منوی ادمین",
-                reply_markup=admin_main_keyboard(),
-            )
         return True
 
     return False
@@ -1382,7 +1394,6 @@ async def handle_media(
     if not media_kind:
         return False
     caption = _message_html(message, caption=True)
-    _validate_body(media_kind, caption)
 
     if kind == "broadcast" and str(flow.get("step") or "") == "wait_media":
         draft = _broadcast_draft(context)
@@ -1410,6 +1421,7 @@ async def handle_media(
         return True
 
     if kind == "broadcast_replace":
+        _validate_body(media_kind, caption)
         draft = _broadcast_draft(context)
         buttons = list(draft.get("buttons") or [])
         segment = str(draft.get("segment") or "all")
@@ -1430,6 +1442,7 @@ async def handle_media(
         return True
 
     if kind in {"channel_content", "channel_replace"}:
+        _validate_body(media_kind, caption)
         draft = _channel_draft(context)
         buttons = list(draft.get("buttons") or [])
         draft.clear()
