@@ -22,6 +22,7 @@ from Database.connection import transaction
 from Shared.crypto import TokenCipher, TokenCipherError, fingerprint_token
 from Shared.timeutils import iso_utc, parse_utc, utcnow
 from TenantRuntime.payments import (
+    begin_provider_payment,
     method_view as payment_method_view,
     payment_prompt,
     provider_for_key,
@@ -3486,6 +3487,68 @@ class TenantBusinessService:
         self, method: dict[str, Any], *, amount: int | None = None
     ) -> str:
         return payment_prompt(method, amount=amount)
+
+    def begin_order_payment(
+        self,
+        actor_id: int,
+        *,
+        order_id: int,
+        method_id: int,
+    ) -> dict[str, Any]:
+        order = self.order(actor_id, int(order_id))
+        if order["status"] != "pending_payment":
+            raise TenantBusinessError("order is not awaiting payment")
+        method = self.method(int(method_id), currency=str(order["currency"]))
+        result = begin_provider_payment(
+            method,
+            context={
+                "tenant_id": self.tenant_id,
+                "actor_id": int(actor_id),
+                "source": "order",
+                "subject_id": int(order_id),
+                "amount": int(order["amount"]),
+                "currency": str(order["currency"]),
+            },
+        )
+        return {
+            "action": result.action,
+            "message": result.message,
+            "checkout_url": result.checkout_url,
+            "external_reference": result.external_reference,
+            "method": method,
+            "order": order,
+        }
+
+    def begin_wallet_topup_payment(
+        self,
+        actor_id: int,
+        *,
+        topup_id: int,
+        method_id: int,
+    ) -> dict[str, Any]:
+        topup = self.wallet_topup(actor_id, int(topup_id))
+        if topup["status"] != "pending_payment":
+            raise TenantBusinessError("wallet topup is not awaiting payment")
+        method = self.method(int(method_id), currency=str(topup["currency"]))
+        result = begin_provider_payment(
+            method,
+            context={
+                "tenant_id": self.tenant_id,
+                "actor_id": int(actor_id),
+                "source": "wallet_topup",
+                "subject_id": int(topup_id),
+                "amount": int(topup["amount"]),
+                "currency": str(topup["currency"]),
+            },
+        )
+        return {
+            "action": result.action,
+            "message": result.message,
+            "checkout_url": result.checkout_url,
+            "external_reference": result.external_reference,
+            "method": method,
+            "topup": topup,
+        }
 
     def update_payment_method_admin(
         self,
