@@ -3416,8 +3416,6 @@ class TenantBusinessService:
         if int(priority) < 0:
             raise ValueError("invalid payment priority")
         clean_network = _text(network, 40, required=False)
-        if spec.requires_network and not clean_network:
-            raise ValueError("payment network is required")
         options = provider_options or {}
         if not isinstance(options, dict):
             raise ValueError("invalid provider options")
@@ -3516,8 +3514,6 @@ class TenantBusinessService:
             args.append(_text(destination, 180))
         if network is not None:
             clean_network = _text(network, 40, required=False)
-            if bool(current.get("requires_network")) and not clean_network:
-                raise ValueError("payment network is required")
             updates.append("network=?")
             args.append(clean_network or None)
         if instructions is not None:
