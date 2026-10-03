@@ -380,6 +380,17 @@ class HiddifyPanelAdapter:
             subscription_url=self.subscription_link(target=target, external_ref=ref),
         )
 
+    def inspect_connection(self, *, target: PanelTarget, secret: str) -> dict:
+        if target.kind != "hiddify":
+            raise PanelError("Hiddify adapter received the wrong panel kind")
+        _clean_path(target.user_path, name="user")
+        # SellBot tests the protected users API, not the public panel homepage.
+        users = self._request("GET", f"{_admin_base(target)}/api/v2/admin/user/", secret)
+        if not isinstance(users, list) or any(not isinstance(x, dict) for x in users):
+            raise PanelError("Hiddify returned an invalid user list")
+        return {"connected": True, "users_count": len(users),
+                "panel_major": self._major(target, secret), "inbounds": []}
+
     def provision(
         self, *, target: PanelTarget, secret: str, request: ProvisionRequest
     ) -> ProvisionResult:
