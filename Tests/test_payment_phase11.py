@@ -85,6 +85,18 @@ def test_unified_admin_payments_reviews_order_and_wallet_topup(conn, factories) 
         41, topup_id=int(topup["id"]), method_id=int(method["id"]), reference="wallet-ref"
     )
 
+    service.attach_payment_receipt_media(
+        41,
+        payment_key=f"order:{int(order_receipt['id'])}",
+        media=b"fake-jpeg-bytes",
+        mime_type="image/jpeg",
+    )
+    archived = service.payment_receipt_media_admin(
+        7301, payment_key=f"order:{int(order_receipt['id'])}"
+    )
+    assert archived is not None
+    assert archived["media"] == b"fake-jpeg-bytes"
+
     pending = service.list_payments_admin(7301, status="pending")
     keys = {item["payment_key"] for item in pending}
     assert f"order:{int(order_receipt['id'])}" in keys
