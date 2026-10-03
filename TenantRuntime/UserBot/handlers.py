@@ -3039,23 +3039,43 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ]),
             )
             return
-        if data == "shop:tickets":
+        if data == "shop:tickets" or data.startswith("shop:tickets:"):
             items = business.list_tickets(actor)
-            rows = [
-                [InlineKeyboardButton(
-                    f"🎫 #{int(x['id'])} · {_ticket_status_label(x.get('status'))} · {x['subject']}"[:64],
-                    callback_data=f"shop:ticket:{int(x['id'])}",
-                )]
-                for x in items[:30]
-            ]
-            if not rows:
+            try:
+                page = max(1, int(data.split(":")[2])) if data.startswith("shop:tickets:") else 1
+            except (ValueError, IndexError):
+                page = 1
+            page_size = 15
+            pages = max(1, (len(items) + page_size - 1) // page_size)
+            page = min(page, pages)
+            selected = items[(page - 1) * page_size:page * page_size]
+            rows: list[list[TelegramInlineKeyboardButton]] = []
+            current: list[TelegramInlineKeyboardButton] = []
+            for item in selected:
+                current.append(InlineKeyboardButton(
+                    f"#{int(item['id'])}",
+                    callback_data=f"shop:ticket:{int(item['id'])}",
+                ))
+                if len(current) == 3:
+                    rows.append(current)
+                    current = []
+            if current:
+                rows.append(current)
+            if not selected:
                 rows.append([InlineKeyboardButton("تیکتی ثبت نشده است", callback_data="noop")])
+            nav: list[TelegramInlineKeyboardButton] = []
+            if page > 1:
+                nav.append(InlineKeyboardButton("◀️", callback_data=f"shop:tickets:{page-1}"))
+            nav.append(InlineKeyboardButton(f"{page}/{pages}", callback_data="noop"))
+            if page < pages:
+                nav.append(InlineKeyboardButton("▶️", callback_data=f"shop:tickets:{page+1}"))
+            rows.append(nav)
             rows.extend([
                 [InlineKeyboardButton("📩ایجاد تیکت", callback_data="shop:newticket")],
                 [InlineKeyboardButton("🔙 پنل پشتیبانی", callback_data="shop:support")],
             ])
             await update.callback_query.edit_message_text(
-                "📬 تیکت‌های من",
+                f"📬 تیکت‌های من\n◈ تعداد: {len(items)}",
                 reply_markup=InlineKeyboardMarkup(rows),
             )
             return
