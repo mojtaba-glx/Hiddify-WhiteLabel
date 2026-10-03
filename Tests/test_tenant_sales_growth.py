@@ -301,6 +301,33 @@ def test_trial_volume_and_duration_settings_drive_real_subscription(
     assert result["order_kind"] == "trial"
 
 
+def test_reset_all_trials_is_strictly_tenant_scoped(
+    conn, factories, cipher
+) -> None:
+    _ta, first, _pa, _pla, _ma, user_a = _setup(
+        conn, factories, cipher, owner=7001, customer=7101
+    )
+    _tb, second, _pb, _plb, _mb, user_b = _setup(
+        conn, factories, cipher, owner=8001, customer=8101
+    )
+    first.update_growth_settings(7001, trial_enabled=True)
+    second.update_growth_settings(8001, trial_enabled=True)
+    first.claim_free_trial(7101)
+    second.claim_free_trial(8101)
+
+    assert first.reset_all_customer_trials_admin(7001) == 1
+    assert first.customer_profile_admin(
+        7001, customer_id=int(user_a["id"])
+    )["trial_used_at"] is None
+    assert second.customer_profile_admin(
+        8001, customer_id=int(user_b["id"])
+    )["trial_used_at"] is not None
+    assert conn.execute(
+        "SELECT COUNT(*) FROM tenant_trial_claims WHERE tenant_id=?",
+        (second.tenant_id,),
+    ).fetchone()[0] == 1
+
+
 def test_trial_announcement_setting_roundtrips(
     conn, factories, cipher
 ) -> None:
