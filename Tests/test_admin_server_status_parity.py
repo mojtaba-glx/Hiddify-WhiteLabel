@@ -110,7 +110,7 @@ def _add_server(business, owner: int, *, label: str, kind: str = "hiddify"):
         business.set_xui_credential(
             owner,
             server_id=int(server["id"]),
-            api_token="status-token",
+            api_token=f"status-token-{int(server['id'])}",
         )
     elif kind == "xnet":
         business.set_xnet_credential(
@@ -122,7 +122,7 @@ def _add_server(business, owner: int, *, label: str, kind: str = "hiddify"):
         business.set_panel_credential(
             owner,
             server_id=int(server["id"]),
-            secret="status-key",
+            secret=f"status-key-{int(server['id'])}",
         )
     return server
 
