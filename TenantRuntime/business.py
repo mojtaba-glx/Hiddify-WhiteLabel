@@ -534,6 +534,136 @@ class TenantBusinessService:
         )
         return result
 
+    def _update_server_daily_traffic(
+        self,
+        *,
+        server_id: int,
+        total_gb: float,
+        day: str | None = None,
+    ) -> float:
+        """SellBot-compatible X-UI daily traffic baseline, Tenant-scoped."""
+        sid = int(server_id)
+        self.server(sid)
+        try:
+            total = max(0.0, float(total_gb or 0.0))
+        except (TypeError, ValueError):
+            total = 0.0
+        day_key = str(day or utcnow().date().isoformat())
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            row = self.conn.execute(
+                "SELECT baseline_gb,last_total_gb "
+                "FROM tenant_server_traffic_daily "
+                "WHERE tenant_id=? AND server_id=? AND day=?",
+                (self.tenant_id, sid, day_key),
+            ).fetchone()
+            if row is None:
+                self.conn.execute(
+                    "INSERT INTO tenant_server_traffic_daily "
+                    "(tenant_id,server_id,day,baseline_gb,last_total_gb,updated_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (self.tenant_id, sid, day_key, total, total, now),
+                )
+                return 0.0
+            baseline = max(0.0, float(row["baseline_gb"] or 0.0))
+            last_total = max(0.0, float(row["last_total_gb"] or 0.0))
+            if total < last_total:
+                baseline = total
+            used = max(0.0, total - baseline)
+            self.conn.execute(
+                "UPDATE tenant_server_traffic_daily "
+                "SET baseline_gb=?,last_total_gb=?,updated_at=? "
+                "WHERE tenant_id=? AND server_id=? AND day=?",
+                (baseline, total, now, self.tenant_id, sid, day_key),
+            )
+            return used
+
+    def server_status_admin(
+        self,
+        actor_id: int,
+        *,
+        server_id: int,
+    ) -> dict[str, Any]:
+        """Return the live server-status contract used by SellBot AdminBot."""
+        self._admin(actor_id)
+        server, target, secret = self._panel_material(int(server_id))
+        defaults: dict[str, Any] = {
+            "cpu_percent": 0.0,
+            "cpu_cores": 1,
+            "ram_used": 0.0,
+            "ram_total": 1.0,
+            "disk_used": 0.0,
+            "disk_total": 20.0,
+            "users_total": 0,
+            "users_online": 0,
+            "users_today": 0,
+            "users_month": 0,
+            "usage_today_gb": 0.0,
+            "usage_30days_gb": 0.0,
+            "traffic_dl": 0.0,
+            "traffic_ul": 0.0,
+            "now_net_recv_mb": 0.0,
+            "now_net_sent_mb": 0.0,
+        }
+        try:
+            method = getattr(self.panel_adapter, "server_stats", None)
+            if callable(method):
+                try:
+                    stats = method(target=target, secret=secret)
+                    if isinstance(stats, dict):
+                        defaults.update(stats)
+                except PanelError:
+                    pass
+            else:
+                try:
+                    users = self.panel_adapter.list_users(
+                        target=target, secret=secret
+                    )
+                except PanelError:
+                    users = []
+                now = utcnow()
+                total_usage = 0
+                online = today = month = 0
+                for user in users:
+                    if not isinstance(user, dict):
+                        continue
+                    total_usage += max(0, int(user.get("usage_bytes") or 0))
+                    if bool(user.get("online")):
+                        online += 1
+                    raw_last = user.get("last_online")
+                    if not raw_last:
+                        continue
+                    try:
+                        seen = parse_utc(str(raw_last))
+                    except (TypeError, ValueError):
+                        continue
+                    age = max(0.0, (now - seen).total_seconds())
+                    if age <= 86400:
+                        today += 1
+                    if age <= 30 * 86400:
+                        month += 1
+                defaults.update(
+                    users_total=len(users),
+                    users_online=online,
+                    users_today=max(today, online),
+                    users_month=max(month, online),
+                    usage_30days_gb=total_usage / float(1024 ** 3),
+                )
+        finally:
+            secret = ""
+
+        if str(server.get("panel_kind") or "").strip().lower() == "xui":
+            defaults["usage_today_gb"] = self._update_server_daily_traffic(
+                server_id=int(server_id),
+                total_gb=float(defaults.get("usage_30days_gb") or 0.0),
+            )
+        defaults["server_id"] = int(server_id)
+        defaults["server_label"] = str(
+            server.get("label") or f"سرور #{int(server_id)}"
+        ).strip()
+        defaults["panel_kind"] = str(server.get("panel_kind") or "").strip().lower()
+        return defaults
+
     def server_subscriptions(
         self, actor_id: int, *, server_id: int, query: str = ""
     ) -> list[dict[str, Any]]:
