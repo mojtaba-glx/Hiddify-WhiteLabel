@@ -1838,7 +1838,7 @@ class TenantBusinessService:
         method = self.method(int(method_id), currency=str(topup["currency"]))
         ref = _text(reference, 160, required=False) or None
         file_id = _text(telegram_file_id, 256, required=False) or None
-        if not ref and not file_id:
+        if bool(method.get("requires_receipt", True)) and not ref and not file_id:
             raise ValueError("receipt is required")
         now = iso_utc(utcnow())
         with transaction(self.conn):
@@ -1862,7 +1862,24 @@ class TenantBusinessService:
                     now,
                 ),
             )
-        return {"id": int(cursor.lastrowid or 0), "topup_id": int(topup_id)}
+            receipt_id = int(cursor.lastrowid or 0)
+            self._record_payment_event_tx(
+                source="wallet_topup",
+                payment_ref_id=receipt_id,
+                provider_key=str(method.get("provider_key") or method.get("kind") or ""),
+                event_type="submitted",
+                actor_id=actor_id,
+                idempotency_key=(
+                    f"tenant:{self.tenant_id}:payment:wallet_topup:"
+                    f"{receipt_id}:submitted"
+                ),
+            )
+        return {
+            "id": receipt_id,
+            "topup_id": int(topup_id),
+            "payment_key": f"wallet_topup:{receipt_id}",
+            "status": "pending",
+        }
 
     def list_wallet_topups_admin(self, actor_id: int) -> list[dict[str, Any]]:
         self._admin(actor_id)
@@ -1900,6 +1917,8 @@ class TenantBusinessService:
         *,
         receipt_id: int,
         approve: bool,
+        note: str = "",
+        external_event_id: str | None = None,
     ) -> dict[str, Any]:
         self._admin(actor_id)
         now = iso_utc(utcnow())
@@ -1920,12 +1939,15 @@ class TenantBusinessService:
                 raise TenantBusinessError("wallet topup receipt was already reviewed")
             changed = self.conn.execute(
                 "UPDATE tenant_wallet_topup_receipts "
-                "SET status=?, reviewed_by=?, reviewed_at=? "
+                "SET status=?, reviewed_by=?, reviewed_at=?, review_note=?, "
+                "provider_event_id=COALESCE(?, provider_event_id) "
                 "WHERE id=? AND tenant_id=? AND status='pending'",
                 (
                     "approved" if approve else "rejected",
                     int(actor_id),
                     now,
+                    _text(note, 500, required=False),
+                    _text(external_event_id, 180, required=False) or None,
                     int(receipt_id),
                     self.tenant_id,
                 ),
@@ -1961,6 +1983,27 @@ class TenantBusinessService:
                     ),
                     note=f"wallet topup #{int(receipt['topup_id'])}",
                 )
+            method_row = self.conn.execute(
+                "SELECT kind, provider_key FROM tenant_payment_methods "
+                "WHERE tenant_id=? AND id=?",
+                (self.tenant_id, int(receipt["payment_method_id"])),
+            ).fetchone()
+            provider_key = (
+                str(method_row["provider_key"] or method_row["kind"])
+                if method_row is not None else "unknown"
+            )
+            self._record_payment_event_tx(
+                source="wallet_topup",
+                payment_ref_id=int(receipt_id),
+                provider_key=provider_key,
+                event_type="approved" if approve else "rejected",
+                actor_id=actor_id,
+                external_event_id=external_event_id,
+                idempotency_key=(
+                    f"tenant:{self.tenant_id}:payment:wallet_topup:"
+                    f"{int(receipt_id)}:{'approved' if approve else 'rejected'}"
+                ),
+            )
         return {
             "topup_id": int(receipt["topup_id"]),
             "status": target,
@@ -1968,6 +2011,7 @@ class TenantBusinessService:
             "amount": int(receipt["amount"]),
             "currency": str(receipt["currency"]),
             "wallet_transaction": wallet_tx,
+            "payment_key": f"wallet_topup:{int(receipt_id)}",
         }
 
     def adjust_wallet_admin(
@@ -2856,6 +2900,17 @@ class TenantBusinessService:
                     reward_type="purchase",
                     order_id=int(order_id),
                 )
+            self._record_payment_event_tx(
+                source="wallet_order",
+                payment_ref_id=int(order_id),
+                provider_key="wallet",
+                event_type="approved",
+                actor_id=actor_id,
+                idempotency_key=(
+                    f"tenant:{self.tenant_id}:payment:wallet_order:"
+                    f"{int(order_id)}:approved"
+                ),
+            )
         result: dict[str, Any] = {
             "order_id": int(order_id),
             "status": "paid",
