@@ -832,17 +832,15 @@ async def _send_coupon_detail(update: Update, business: Any, actor: int, coupon_
 
 async def _send_referral_menu(update: Update, business: Any, actor: int) -> None:
     settings = business.growth_settings(actor)
-    referrals = business.referrals_admin(actor)
-    rewards = business.referral_rewards_admin(actor)
-    reward_total: dict[str, int] = {}
-    for item in rewards:
-        cur = str(item.get("currency") or "")
-        reward_total[cur] = reward_total.get(cur, 0) + int(item.get("amount") or 0)
+    stats = business.referral_admin_stats(actor)
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 داشبورد رفرال", callback_data="userbot:referral:dashboard")],
         [
             InlineKeyboardButton("⚙️ تنظیمات", callback_data="userbot:referral:settings"),
-            InlineKeyboardButton(f"🎁 فعال/غیرفعال | {_bool_icon(settings.get('referral_enabled'))}", callback_data="userbot:referral:toggle"),
+            InlineKeyboardButton(
+                f"🎁 فعال/غیرفعال | {_bool_icon(settings.get('referral_enabled'))}",
+                callback_data="userbot:referral:toggle",
+            ),
         ],
         [
             InlineKeyboardButton("👥 لیست دعوت‌ها", callback_data="userbot:referral:list:1"),
@@ -855,8 +853,15 @@ async def _send_referral_menu(update: Update, business: Any, actor: int) -> None
         update,
         "🤝 مدیریت رفرال (دعوت دوستان)\n"
         f"وضعیت: {'فعال' if settings.get('referral_enabled') else 'خاموش'}\n"
-        f"👥 دعوت‌ها: {len(referrals)}\n"
-        f"💰 پاداش‌ها: {' | '.join(f'{v:,} {k}' for k,v in reward_total.items()) or '0'}",
+        f"🧪 پاداش تست: {_bool_icon(settings.get('referral_trial_reward_enabled'))} "
+        f"{int(settings.get('referral_trial_reward') or 0):,} "
+        f"{settings.get('referral_currency') or ''}\n"
+        f"🛒 پاداش خرید: {_bool_icon(settings.get('referral_purchase_reward_enabled'))} "
+        f"{int(settings.get('referral_purchase_reward') or 0):,} "
+        f"{settings.get('referral_currency') or ''}\n"
+        f"👥 دعوت‌ها: {int(stats.get('total_referrals') or 0)}\n"
+        f"💰 مجموع پاداش: {int(stats.get('total_reward_cost') or 0):,} "
+        f"{settings.get('referral_currency') or ''}",
         kb,
     )
 
@@ -2121,32 +2126,113 @@ async def handle_callback(
 
     if data == "userbot:referral_menu":
         await _send_referral_menu(update,business,actor); return True
-    if data in ("userbot:referral:dashboard","userbot:referral:toggle"):
-        if data.endswith(":toggle"):
-            cur=business.growth_settings(actor); business.update_growth_settings(actor,referral_enabled=not bool(cur["referral_enabled"]))
+    if data == "userbot:referral:dashboard":
+        stats=business.referral_admin_stats(actor)
+        settings=business.growth_settings(actor)
+        currency=str(settings.get("referral_currency") or "")
+        text=(
+            "📊 داشبورد رفرال\n"
+            "❖ ◈━━━━━━━━━━━━━━━━━━━━◈ ❖\n"
+            f"👥 کل دعوت‌ها: {int(stats.get('total_referrals') or 0)}\n"
+            f"🟢 فعال: {int(stats.get('active_referrals') or 0)}\n"
+            f"✅ واجد شرایط: {int(stats.get('qualified_referrals') or 0)}\n"
+            f"🛒 دعوت موفق خرید: {int(stats.get('successful_referrals') or 0)}\n"
+            f"🧪 پاداش تست: {int(stats.get('trial_rewards_count') or 0)} "
+            f"({int(stats.get('trial_rewards_amount') or 0):,} {currency})\n"
+            f"🛒 پاداش خرید: {int(stats.get('purchase_rewards_count') or 0)} "
+            f"({int(stats.get('purchase_rewards_amount') or 0):,} {currency})\n"
+            f"🧾 پاداش دستی: {int(stats.get('manual_rewards_count') or 0)} "
+            f"({int(stats.get('manual_rewards_amount') or 0):,} {currency})\n"
+            f"💸 مجموع هزینه پاداش: {int(stats.get('total_reward_cost') or 0):,} {currency}\n"
+            f"🚩 پرچم تقلب: {int(stats.get('fraud_flagged') or 0)}"
+        )
+        await _edit_or_send(
+            update,text,
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙بازگشت",callback_data="userbot:referral_menu")]])
+        ); return True
+    if data == "userbot:referral:toggle":
+        cur=business.growth_settings(actor)
+        business.update_growth_settings(
+            actor,referral_enabled=not bool(cur["referral_enabled"])
+        )
         await _send_referral_menu(update,business,actor); return True
+    if data.startswith("userbot:referral:toggle:"):
+        name=data.rsplit(":",1)[1]
+        cur=business.growth_settings(actor)
+        if name=="trial_reward_enabled":
+            business.update_growth_settings(
+                actor,
+                referral_trial_reward_enabled=not bool(cur["referral_trial_reward_enabled"]),
+            )
+        elif name=="purchase_reward_enabled":
+            business.update_growth_settings(
+                actor,
+                referral_purchase_reward_enabled=not bool(cur["referral_purchase_reward_enabled"]),
+            )
+        else:
+            raise ValueError("invalid referral toggle")
+        await _edit_or_send(
+            update,"✅ وضعیت پاداش تغییر کرد.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("↩️ تنظیمات رفرال",callback_data="userbot:referral:settings")]])
+        ); return True
     if data == "userbot:referral:settings":
-        s=business.growth_settings(actor)
+        settings=business.growth_settings(actor)
+        invite_text=str(settings.get("referral_invite_text") or "").strip()
+        preview=(invite_text[:350] + ("…" if len(invite_text)>350 else "")) if invite_text else "پیش‌فرض SellBot"
         await _edit_or_send(update,
             "⚙️ تنظیمات رفرال\n"
-            f"پاداش تست: {int(s['referral_trial_reward']):,} {s['referral_currency']}\n"
-            f"پاداش خرید: {int(s['referral_purchase_reward']):,} {s['referral_currency']}\n"
-            f"حداقل خرید: {int(s['referral_min_purchase']):,}\n"
-            f"سقف پاداش: {int(s['referral_max_rewards']) or 'نامحدود'}",
+            f"🧪 پاداش تست: {_bool_icon(settings.get('referral_trial_reward_enabled'))} "
+            f"{int(settings['referral_trial_reward']):,} {settings['referral_currency']}\n"
+            f"🛒 پاداش خرید: {_bool_icon(settings.get('referral_purchase_reward_enabled'))} "
+            f"{int(settings['referral_purchase_reward']):,} {settings['referral_currency']}\n"
+            f"💳 حداقل خرید: {int(settings['referral_min_purchase']):,}\n"
+            f"👥 سقف دعوت موفق: {int(settings['referral_max_rewards']) or 'نامحدود'}\n\n"
+            f"📝 متن دعوت:\n{preview}",
             InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    f"🧪 پاداش تست | {_bool_icon(settings.get('referral_trial_reward_enabled'))}",
+                    callback_data="userbot:referral:toggle:trial_reward_enabled",
+                )],
+                [InlineKeyboardButton(
+                    f"🛒 پاداش خرید | {_bool_icon(settings.get('referral_purchase_reward_enabled'))}",
+                    callback_data="userbot:referral:toggle:purchase_reward_enabled",
+                )],
                 [InlineKeyboardButton("✏️ مبلغ پاداش تست",callback_data="userbot:referral:edit:trial")],
                 [InlineKeyboardButton("✏️ مبلغ پاداش خرید",callback_data="userbot:referral:edit:purchase")],
                 [InlineKeyboardButton("✏️ سقف دعوت موفق",callback_data="userbot:referral:edit:max")],
                 [InlineKeyboardButton("✏️ حداقل مبلغ خرید",callback_data="userbot:referral:edit:min")],
+                [InlineKeyboardButton("✏️ متن صفحه دعوت",callback_data="userbot:referral:edit:invite_text")],
                 [InlineKeyboardButton("🔙بازگشت",callback_data="userbot:referral_menu")],
             ])
         ); return True
     if data.startswith("userbot:referral:edit:"):
-        field=data.rsplit(":",1)[1]; context.user_data[FLOW_KEY]={"kind":"referral_edit","field":field}
-        await query.message.reply_text("مقدار عددی جدید را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
+        field=data.rsplit(":",1)[1]
+        prompts={
+            "trial":"💰 مبلغ پاداش تست را وارد کنید:",
+            "purchase":"💰 مبلغ پاداش اولین خرید را وارد کنید:",
+            "max":"🔢 سقف دعوت موفق را وارد کنید؛ 0 یعنی نامحدود:",
+            "min":"💳 حداقل مبلغ خرید برای دریافت پاداش را وارد کنید:",
+            "invite_text":(
+                "📝 متن صفحه دعوت را ارسال کنید.\n"
+                "متغیرهای مجاز: {invite_link}، {trial_reward}، "
+                "{purchase_reward} و {referred_count}"
+            ),
+        }
+        if field not in prompts:
+            raise ValueError("invalid referral edit field")
+        context.user_data[FLOW_KEY]={"kind":"referral_edit","field":field}
+        await query.message.reply_text(prompts[field],reply_markup=userbot_cancel_keyboard()); return True
     if data.startswith("userbot:referral:list:"):
         items=business.referrals_admin(actor); selected,page,pages=_page(items,int(data.rsplit(":",1)[1]))
-        text="👥 لیست دعوت‌ها\n"+("\n".join(f"#{x['id']} · {x['inviter_name']} ← {x['invitee_name']} · {x['status']}" for x in selected) or "موردی نیست.")
+        lines=[]
+        for item in selected:
+            qualified="✅" if int(item.get("qualified") or 0)==1 else "⚪"
+            fraud=" 🚩" if int(item.get("fraud_flag") or 0)==1 else ""
+            lines.append(
+                f"#{item['id']} · {item['inviter_name']} ← {item['invitee_name']} · "
+                f"{item['status']} · {qualified}{fraud}"
+            )
+        text="👥 لیست دعوت‌ها\n"+("\n".join(lines) or "موردی نیست.")
         rows=[]; nav=[]
         if page>1: nav.append(InlineKeyboardButton("◀️",callback_data=f"userbot:referral:list:{page-1}"))
         nav.append(InlineKeyboardButton(f"{page}/{pages}",callback_data="userbot:noop"))
@@ -2155,7 +2241,15 @@ async def handle_callback(
         await _edit_or_send(update,text,InlineKeyboardMarkup(rows)); return True
     if data.startswith("userbot:referral:rewards:"):
         items=business.referral_rewards_admin(actor); selected,page,pages=_page(items,int(data.rsplit(":",1)[1]))
-        text="💰 لیست پاداش‌ها\n"+("\n".join(f"#{x['id']} · {x['inviter_name']} · {int(x['amount']):,} {x['currency']} · {x['reward_type']}" for x in selected) or "موردی نیست.")
+        labels={"trial":"پاداش تست","purchase":"پاداش خرید","manual":"پاداش دستی"}
+        text="💰 لیست پاداش‌ها\n"+(
+            "\n".join(
+                f"#{item['id']} · {item['inviter_name']} · "
+                f"{int(item['amount']):,} {item['currency']} · "
+                f"{labels.get(str(item.get('reward_type') or ''), item.get('reward_type') or '-')}"
+                for item in selected
+            ) or "موردی نیست."
+        )
         rows=[]; nav=[]
         if page>1: nav.append(InlineKeyboardButton("◀️",callback_data=f"userbot:referral:rewards:{page-1}"))
         nav.append(InlineKeyboardButton(f"{page}/{pages}",callback_data="userbot:noop"))
@@ -2164,7 +2258,10 @@ async def handle_callback(
         await _edit_or_send(update,text,InlineKeyboardMarkup(rows)); return True
     if data == "userbot:referral:manual":
         context.user_data[FLOW_KEY]={"kind":"referral_manual_customer"}
-        await query.message.reply_text("👤 Customer ID کاربر را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
+        await query.message.reply_text(
+            "👤 Customer ID کاربر را وارد کنید:",
+            reply_markup=userbot_cancel_keyboard(),
+        ); return True
 
     if data == "userbot:tickets_menu":
         await _send_tickets(update,business,actor); return True
@@ -3259,33 +3356,69 @@ async def handle_text(
                 )
             return True
         if kind=="referral_edit":
-            value=int(text.replace(",","")); field=str(flow["field"]); kwargs={}
-            if field=="trial": kwargs["referral_trial_reward"]=value
-            elif field=="purchase": kwargs["referral_purchase_reward"]=value
-            elif field=="max": kwargs["referral_max_rewards"]=value
-            elif field=="min": kwargs["referral_min_purchase"]=value
-            else: raise ValueError("referral field")
-            business.update_growth_settings(actor,**kwargs); context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ تنظیمات رفرال ذخیره شد.",reply_markup=admin_main_keyboard()); return True
+            field=str(flow["field"])
+            if field=="invite_text":
+                if not text.strip():
+                    raise ValueError("referral invite text")
+                business.update_growth_settings(
+                    actor,referral_invite_text=text.strip()
+                )
+            else:
+                value=int(text.replace(",","").replace("٬",""))
+                if value<0:
+                    raise ValueError("referral value")
+                kwargs={}
+                if field=="trial": kwargs["referral_trial_reward"]=value
+                elif field=="purchase": kwargs["referral_purchase_reward"]=value
+                elif field=="max": kwargs["referral_max_rewards"]=value
+                elif field=="min": kwargs["referral_min_purchase"]=value
+                else: raise ValueError("referral field")
+                business.update_growth_settings(actor,**kwargs)
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text(
+                "✅ تنظیمات رفرال ذخیره شد.",
+                reply_markup=admin_main_keyboard(),
+            )
+            return True
         if kind=="referral_manual_customer":
             cid=int(text)
             business.customer_profile_admin(actor,customer_id=cid)
             flow["customer_id"]=cid; flow["kind"]="referral_manual_amount"
-            await update.effective_message.reply_text("💰 مبلغ پاداش را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
+            await update.effective_message.reply_text(
+                "💰 مبلغ پاداش را وارد کنید:",
+                reply_markup=userbot_cancel_keyboard(),
+            ); return True
         if kind=="referral_manual_amount":
-            amount=int(text.replace(",",""))
+            amount=int(text.replace(",","").replace("٬",""))
             if amount<=0: raise ValueError("referral amount")
-            flow["amount"]=amount; flow["kind"]="referral_manual_currency"
-            await update.effective_message.reply_text("💱 ارز را وارد کنید؛ مثال IRR:",reply_markup=userbot_cancel_keyboard()); return True
-        if kind=="referral_manual_currency":
-            currency=text.strip().upper()
-            if not 3<=len(currency)<=8: raise ValueError("referral currency")
-            business.adjust_wallet_admin(
-                actor,customer_id=int(flow["customer_id"]),currency=currency,
-                amount=int(flow["amount"]),note="manual referral reward"
+            settings=business.growth_settings(actor)
+            reward=business.grant_manual_referral_reward_admin(
+                actor,
+                customer_id=int(flow["customer_id"]),
+                amount=amount,
+                currency=str(settings.get("referral_currency") or "IRR"),
+                note="Admin manual referral reward",
             )
             context.user_data.pop(FLOW_KEY,None)
             await update.effective_message.reply_text(
-                "✅ پاداش دستی به کیف پول اضافه شد.",
+                "✅ پاداش دستی ثبت شد.\n"
+                f"🎁 شناسه پاداش: #{int(reward['id'])}\n"
+                f"💰 مبلغ: {int(reward['amount']):,} {reward['currency']}",
+                reply_markup=admin_main_keyboard(),
+            ); return True
+        if kind=="referral_manual_currency":
+            currency=text.strip().upper()
+            if not 3<=len(currency)<=8: raise ValueError("referral currency")
+            reward=business.grant_manual_referral_reward_admin(
+                actor,
+                customer_id=int(flow["customer_id"]),
+                amount=int(flow["amount"]),
+                currency=currency,
+                note="Admin manual referral reward",
+            )
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text(
+                f"✅ پاداش دستی #{int(reward['id'])} ثبت شد.",
                 reply_markup=admin_main_keyboard(),
             ); return True
         if kind=="ticket_reply":
