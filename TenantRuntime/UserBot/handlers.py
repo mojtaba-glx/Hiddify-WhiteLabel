@@ -539,10 +539,7 @@ def _main_keyboard(spec: RuntimeBotSpec, business) -> ReplyKeyboardMarkup:
         ])
 
     commerce_row = []
-    if (
-        bool(settings.get("enable_renew", True))
-        and bool(settings.get("show_renew_in_main_menu", True))
-    ):
+    if bool(settings.get("show_renew_in_main_menu", True)):
         commerce_row.append(KeyboardButton(BTN_RENEW, settings=settings))
     if bool(settings.get("enable_buy", True)):
         commerce_row.append(KeyboardButton(BTN_BUY, settings=settings))
@@ -748,11 +745,12 @@ async def _handle_main_reply_action(
         return True
 
     if text == BTN_RENEW:
-        if not (
-            bool(settings.get("enable_renew", True))
-            and bool(settings.get("show_renew_in_main_menu", True))
-        ):
-            raise TenantBusinessError("renewal is disabled")
+        if not bool(settings.get("enable_renew", True)):
+            await update.effective_message.reply_text(
+                "🚫 تمدید اشتراک در حال حاضر غیرفعال است.",
+                reply_markup=_main_keyboard(spec, business),
+            )
+            return True
         items, blocked = _renewable_subscriptions(business, actor)
         rows = [
             [InlineKeyboardButton(
@@ -1594,7 +1592,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ); return
         if data == "shop:renewmenu":
             if not bool(settings.get("enable_renew", True)):
-                raise TenantBusinessError("renewal is disabled")
+                await update.callback_query.edit_message_text(
+                    "🚫 تمدید اشتراک در حال حاضر غیرفعال است.",
+                    reply_markup=_home_inline_markup(settings),
+                )
+                return
             items, blocked = _renewable_subscriptions(business, actor)
             rows = [
                 [InlineKeyboardButton(
@@ -1703,25 +1705,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             rows = []
             for item in items:
                 if (
-                    bool(settings.get("enable_renew", True))
-                    and item.get("external_ref")
+                    item.get("external_ref")
                     and item.get("server_id")
                     and item["status"] in ("active", "disabled", "expired")
                 ):
-                    try:
-                        renew_ok = bool(
-                            business.renewal_eligibility(
-                                actor,
-                                subscription_id=int(item["id"]),
-                            ).get("allowed")
-                        )
-                    except TenantBusinessError:
-                        renew_ok = False
-                    if renew_ok:
-                        rows.append([InlineKeyboardButton(
-                            f"♻️ تمدید اشتراک #{item['id']}",
-                            callback_data=f"shop:renew:{item['id']}"
-                        )])
+                    rows.append([InlineKeyboardButton(
+                        f"♻️ تمدید اشتراک #{item['id']}",
+                        callback_data=f"shop:renew:{item['id']}"
+                    )])
                 if item["status"] == "active" and item.get("external_ref") and item.get("server_id"):
                     if (
                         bool(settings.get("show_user_page_link", True))
@@ -1916,7 +1907,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         if data.startswith("shop:renew:"):
             if not bool(settings.get("enable_renew", True)):
-                raise TenantBusinessError("renewal is disabled")
+                await update.callback_query.edit_message_text(
+                    "🚫 تمدید اشتراک در حال حاضر غیرفعال است.",
+                    reply_markup=_home_inline_markup(settings),
+                )
+                return
             subscription_id = int(data.rsplit(":", 1)[1])
             owned = next((x for x in business.list_subscriptions(actor) if int(x["id"]) == subscription_id), None)
             if owned is None or owned["status"] not in ("active", "disabled", "expired"):
