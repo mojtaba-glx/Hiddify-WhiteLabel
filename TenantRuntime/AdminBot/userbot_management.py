@@ -24,6 +24,7 @@ from Database.repositories import BotRepository
 from Shared.crypto import fingerprint_token
 from Shared.timeutils import iso_utc, utcnow
 from TenantRuntime.business import TenantBusinessError
+from TenantRuntime.backup import create_tenant_backup, restore_tenant_backup
 from TenantRuntime.button_styles import (
     inline_button as InlineKeyboardButton,
     keyboard_button as KeyboardButton,
@@ -2102,9 +2103,15 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
     if section == "backup_restore":
         await _edit_or_send(
             update,
-            "🗂️ تنظیمات بکاپ و بازیابی\n"
-            "بکاپ Tenant شامل تنظیمات ربات کاربران، پلن‌ها، روش‌های پرداخت و کوپن‌هاست.",
+            "🗃تنظیمات بکاپ و بازیابی\n"
+            "بکاپ v2 تمام داده‌های Tenant را شامل می‌شود: تنظیمات، کاربران، "
+            "سفارش‌ها، تراکنش‌ها، اشتراک‌ها، نودها، کیف پول، تیکت‌ها و "
+            "زیرساخت مشترک آینده. توکن زنده AdminBot/UserBot عمداً بازیابی نمی‌شود.",
             InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    f"ارسال خودکار بکاپ | {_bool_icon(s.get('auto_backup_enabled', True))}",
+                    callback_data="userbot:settings:backup_restore:auto_toggle",
+                )],
                 [InlineKeyboardButton("📩دریافت فایل بکاپ", callback_data="userbot:settings:backup:download")],
                 [InlineKeyboardButton("📤بازیابی فایل بکاپ", callback_data="userbot:settings:backup:restore")],
                 [
@@ -2124,21 +2131,13 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
 
 
 def _tenant_backup_payload(business: Any) -> dict[str, Any]:
-    tables = [
-        "tenant_userbot_settings",
-        "tenant_sale_plans",
-        "tenant_payment_methods",
-        "tenant_coupons",
-        "tenant_sales_growth_settings",
-        "tenant_gift_vouchers",
-    ]
-    payload: dict[str, Any] = {"format": "hiddify-whitelabel-tenant-userbot-v1", "tenant_id": business.tenant_id, "tables": {}}
-    for table in tables:
-        rows = business.conn.execute(
-            f"SELECT * FROM {table} WHERE tenant_id=?", (business.tenant_id,)
-        ).fetchall()
-        payload["tables"][table] = [dict(row) for row in rows]
-    return payload
+    """Compatibility helper retained for tests/callers; v2 is the real format."""
+    from TenantRuntime.backup import build_tenant_snapshot
+
+    return build_tenant_snapshot(
+        business.conn,
+        tenant_id=int(business.tenant_id),
+    )
 
 
 async def _send_backup(
@@ -2147,104 +2146,39 @@ async def _send_backup(
     business: Any,
     actor: int,
 ) -> None:
-    raw = json.dumps(
-        _tenant_backup_payload(business),
-        ensure_ascii=False,
-        indent=2,
-    ).encode("utf-8")
-    filename = f"tenant-{business.tenant_id}-userbot-backup.json"
-    bio = BytesIO(raw)
-    bio.name = filename
+    artifact = create_tenant_backup(
+        business.conn,
+        tenant_id=int(business.tenant_id),
+    )
+    bio = BytesIO(artifact.data)
+    bio.name = artifact.filename
+    caption = (
+        "📦 بکاپ کامل Tenant\n"
+        f"🗂 جداول: {artifact.table_count}\n"
+        f"📊 رکوردها: {artifact.row_count}"
+    )
     await update.effective_chat.send_document(
         document=bio,
-        filename=filename,
-        caption="📦 بکاپ Tenant UserBot",
+        filename=artifact.filename,
+        caption=caption,
     )
     await _send_system_event(
         context,
         business,
         actor,
-        text="📦 بکاپ Tenant UserBot",
-        document=raw,
-        filename=filename,
-        caption="📦 بکاپ Tenant UserBot",
+        text="📦 بکاپ کامل Tenant",
+        document=artifact.data,
+        filename=artifact.filename,
+        caption=caption,
     )
 
 
-async def _restore_backup(business: Any, data: bytes) -> None:
-    payload = json.loads(data.decode("utf-8"))
-    if payload.get("format") != "hiddify-whitelabel-tenant-userbot-v1":
-        raise ValueError("invalid tenant backup format")
-    if int(payload.get("tenant_id") or 0) != int(business.tenant_id):
-        raise ValueError("backup belongs to another tenant")
-    allowed = {
-        "tenant_userbot_settings",
-        "tenant_sale_plans",
-        "tenant_payment_methods",
-        "tenant_coupons",
-        "tenant_sales_growth_settings",
-        "tenant_gift_vouchers",
-    }
-    tables = payload.get("tables")
-    if not isinstance(tables, dict) or set(tables) - allowed:
-        raise ValueError("invalid tenant backup tables")
-    # Restore is intentionally conservative: replace only configuration tables
-    # that do not own order/subscription history. IDs are preserved so existing
-    # references remain valid.
-    business.conn.execute("BEGIN IMMEDIATE")
-    try:
-        for table in allowed:
-            rows = tables.get(table)
-            if rows is None:
-                continue
-            if not isinstance(rows, list):
-                raise ValueError("invalid backup rows")
-            if table in ("tenant_sale_plans", "tenant_payment_methods", "tenant_coupons", "tenant_gift_vouchers"):
-                # IDs are global primary keys. Reject a crafted/foreign backup
-                # before an UPSERT could ever overwrite another tenant's row.
-                for row in rows:
-                    if not isinstance(row, dict):
-                        raise ValueError("invalid backup row")
-                    row_id = int(row.get("id") or 0)
-                    if row_id <= 0:
-                        raise ValueError("invalid backup row id")
-                    existing = business.conn.execute(
-                        f"SELECT tenant_id FROM {table} WHERE id=?",
-                        (row_id,),
-                    ).fetchone()
-                    if (
-                        existing is not None
-                        and int(existing["tenant_id"]) != int(business.tenant_id)
-                    ):
-                        raise ValueError("backup row id belongs to another tenant")
-                # Do not delete rows referenced by financial/service history.
-                # Existing same-tenant IDs are upserted; missing rows stay untouched.
-                pass
-            else:
-                business.conn.execute(f"DELETE FROM {table} WHERE tenant_id=?", (business.tenant_id,))
-            for row in rows:
-                if not isinstance(row, dict) or int(row.get("tenant_id") or 0) != business.tenant_id:
-                    raise ValueError("cross-tenant backup row")
-                cols = list(row.keys())
-                vals = [row[k] for k in cols]
-                marks = ",".join("?" for _ in cols)
-                names = ",".join(cols)
-                if table in ("tenant_sale_plans", "tenant_payment_methods", "tenant_coupons", "tenant_gift_vouchers"):
-                    updates = ",".join(f"{k}=excluded.{k}" for k in cols if k not in ("id", "tenant_id"))
-                    business.conn.execute(
-                        f"INSERT INTO {table} ({names}) VALUES ({marks}) "
-                        f"ON CONFLICT(id) DO UPDATE SET {updates}",
-                        tuple(vals),
-                    )
-                else:
-                    business.conn.execute(
-                        f"INSERT INTO {table} ({names}) VALUES ({marks})",
-                        tuple(vals),
-                    )
-        business.conn.commit()
-    except Exception:
-        business.conn.rollback()
-        raise
+async def _restore_backup(business: Any, data: bytes):
+    return restore_tenant_backup(
+        business.conn,
+        tenant_id=int(business.tenant_id),
+        data=bytes(data),
+    )
 
 
 async def handle_callback(
@@ -3597,6 +3531,14 @@ async def handle_callback(
         )
         return True
 
+    if data == "userbot:settings:backup_restore:auto_toggle":
+        business.toggle_userbot_setting_admin(
+            actor,
+            key="auto_backup_enabled",
+        )
+        await _settings_section(update, business, actor, "backup_restore")
+        return True
+
     if data == "userbot:settings:backup_restore:event_toggle":
         business.toggle_userbot_setting_admin(
             actor,
@@ -3780,7 +3722,8 @@ async def handle_callback(
     if data == "userbot:settings:backup:restore":
         context.user_data[FLOW_KEY] = {"kind": "backup_restore"}
         await query.message.reply_text(
-            "📤 فایل JSON بکاپ همین Tenant را ارسال کنید.",
+            "📦 فایل بکاپ همین Tenant را ارسال کنید.\n"
+            "فرمت جدید ZIP v2 و JSON قدیمی v1 پشتیبانی می‌شوند.",
             reply_markup=userbot_cancel_keyboard(),
         )
         return True
@@ -4767,17 +4710,29 @@ async def handle_document(
     if not isinstance(flow,dict) or flow.get("kind")!="backup_restore":
         return False
     document=update.effective_message.document
-    if document is None or not str(document.file_name or "").lower().endswith(".json"):
-        await update.effective_message.reply_text("❌ فقط فایل JSON بکاپ معتبر است.",reply_markup=userbot_cancel_keyboard()); return True
+    filename=str(document.file_name or "").lower() if document is not None else ""
+    if document is None or not filename.endswith((".zip", ".json")):
+        await update.effective_message.reply_text(
+            "❌ فقط فایل ZIP v2 یا JSON v1 بکاپ معتبر است.",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
     file=await context.bot.get_file(document.file_id)
     data=bytes(await file.download_as_bytearray())
     try:
-        await _restore_backup(business,data)
+        report = await _restore_backup(business,data)
     except Exception:
-        await update.effective_message.reply_text("❌ بازیابی انجام نشد؛ فایل نامعتبر یا ناسازگار است.",reply_markup=userbot_cancel_keyboard()); return True
+        await update.effective_message.reply_text(
+            "❌ بازیابی انجام نشد؛ فایل نامعتبر، ناسازگار یا متعلق به Tenant دیگری است.",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
     context.user_data.pop(FLOW_KEY,None)
     await update.effective_message.reply_text(
-        "✅ بکاپ Tenant بازیابی شد.",
+        "✅ بکاپ Tenant بازیابی شد.\n"
+        f"🗂 جداول: {int(report.tables_restored)}\n"
+        f"📊 رکوردها: {int(report.rows_restored)}\n"
+        f"🧩 فرمت: {report.format}",
         reply_markup=admin_main_keyboard(),
     )
     await _send_system_event(
