@@ -368,14 +368,8 @@ active_runtime_units() {
     if [[ "$DRY_RUN" -eq 1 ]]; then
         return 0
     fi
-    systemctl list-units \
-        --type=service \
-        --state=active \
-        --full \
-        --no-legend \
-        'hiddify-whitelabel-runtime@*.service' 2>/dev/null \
-        | awk '{print $1}' \
-        | grep -E '^hiddify-whitelabel-runtime@[0-9]+\.service
+    systemctl list-units --type=service --state=active --full --no-legend 'hiddify-whitelabel-runtime@*.service' 2>/dev/null | awk '{print $1}' | grep -E '^hiddify-whitelabel-runtime@[0-9]+\.service
+
 enable_services() {
     local unit
     run_systemctl enable "$MASTER_UNIT"
@@ -1001,8 +995,7 @@ dispatch() {
 }
 
 dispatch
- \
-        || true
+ || true
 }
 
 restart_services() {
