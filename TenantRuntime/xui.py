@@ -873,6 +873,138 @@ class XuiPanelAdapter:
                 raise PanelError("X-UI edit could not be verified")
             return result
 
+    def server_stats(self, *, target: PanelTarget, secret: str) -> dict:
+        """SellBot-compatible X-UI server/system statistics."""
+        with self._session(target, secret) as session:
+            inbounds = self._list_inbounds(session)
+            clients = (
+                self._list_sanaei_clients(session)
+                if session.modern_clients
+                else [client for inbound in inbounds for client in _clients(inbound)]
+            )
+            online = self._online_set(session)
+            last_map = self._last_online_map(session)
+
+            refs: set[str] = set()
+            users: list[dict[str, Any]] = []
+            for client in clients:
+                ref = str(
+                    client.get("subId")
+                    or client.get("uuid")
+                    or client.get("id")
+                    or client.get("password")
+                    or client.get("auth")
+                    or ""
+                ).strip()
+                if not ref or ref in refs:
+                    continue
+                refs.add(ref)
+                try:
+                    users.append(
+                        asdict(
+                            self._snapshot(
+                                session,
+                                ref,
+                                client=client,
+                                inbounds=inbounds,
+                                online=online,
+                                last_map=last_map,
+                            )
+                        )
+                    )
+                except PanelError:
+                    continue
+
+            total_up = 0
+            total_down = 0
+            for inbound in inbounds:
+                seen_emails: set[str] = set()
+                for client in _clients(inbound):
+                    email = str(client.get("email") or "").strip()
+                    low = email.lower()
+                    if not email or low in seen_emails:
+                        continue
+                    seen_emails.add(low)
+                    up, down = _stats(inbound, email)
+                    total_up += max(0, int(up))
+                    total_down += max(0, int(down))
+
+            total_usage = sum(
+                max(0, int(user.get("usage_bytes") or 0))
+                for user in users
+            )
+            users_online = sum(1 for user in users if bool(user.get("online")))
+            now = datetime.now(timezone.utc)
+            users_today = users_online
+            users_month = users_online
+            for user in users:
+                raw = str(user.get("last_online") or "").strip()
+                if not raw or bool(user.get("online")):
+                    continue
+                parsed: datetime | None = None
+                try:
+                    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                except ValueError:
+                    try:
+                        parsed = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        parsed = None
+                if parsed is None:
+                    continue
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                else:
+                    parsed = parsed.astimezone(timezone.utc)
+                age = max(0.0, (now - parsed).total_seconds())
+                if age <= 86400:
+                    users_today += 1
+                if age <= 30 * 86400:
+                    users_month += 1
+
+            out: dict[str, Any] = {
+                "cpu_percent": 0.0,
+                "cpu_cores": 1,
+                "ram_used": 0.0,
+                "ram_total": 1.0,
+                "disk_used": 0.0,
+                "disk_total": 0.0,
+                "users_total": len(users),
+                "users_online": users_online,
+                "users_today": users_today,
+                "users_month": users_month,
+                "usage_today_gb": 0.0,
+                "usage_30days_gb": total_usage / float(_GIB),
+                "traffic_dl": total_down / float(_GIB),
+                "traffic_ul": total_up / float(_GIB),
+                "now_net_recv_mb": 0.0,
+                "now_net_sent_mb": 0.0,
+            }
+
+            try:
+                data = session.request("GET", "server/status")
+            except PanelError:
+                return out
+            if not isinstance(data, dict):
+                return out
+
+            try:
+                out["cpu_percent"] = float(data.get("cpu") or 0.0)
+            except (TypeError, ValueError):
+                pass
+            out["cpu_cores"] = max(1, _safe_int(data.get("cpuCount"), 1))
+            mem = data.get("mem") if isinstance(data.get("mem"), dict) else {}
+            disk = data.get("disk") if isinstance(data.get("disk"), dict) else {}
+            out["ram_used"] = max(0, _safe_int(mem.get("current"), 0))
+            out["ram_total"] = max(1, _safe_int(mem.get("total"), 1))
+            out["disk_used"] = max(0, _safe_int(disk.get("current"), 0))
+            out["disk_total"] = max(0, _safe_int(disk.get("total"), 0))
+            net = data.get("netIO") if isinstance(data.get("netIO"), dict) else {}
+            down = net.get("down", net.get("recv", net.get("receive", 0)))
+            up = net.get("up", net.get("sent", net.get("send", 0)))
+            out["now_net_recv_mb"] = max(0, _safe_int(down, 0)) / float(1024 ** 2)
+            out["now_net_sent_mb"] = max(0, _safe_int(up, 0)) / float(1024 ** 2)
+            return out
+
     def inspect_connection(self, *, target: PanelTarget, secret: str) -> dict:
         with self._session(target, secret) as session:
             inbounds = self._list_inbounds(session)
