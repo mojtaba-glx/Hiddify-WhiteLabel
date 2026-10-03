@@ -6961,6 +6961,76 @@ class TenantBusinessService:
         customer = self._customer(actor_id, active=False)
         return self._payment_rows(customer_id=int(customer["id"]))[:50]
 
+    def attach_payment_receipt_media(
+        self,
+        actor_id: int,
+        *,
+        payment_key: str,
+        media: bytes,
+        mime_type: str = "image/jpeg",
+    ) -> dict[str, Any]:
+        customer = self._customer(actor_id, active=False)
+        source, receipt_id = self._parse_payment_key(payment_key)
+        if source not in ("order", "wallet_topup"):
+            raise TenantBusinessError("payment does not accept receipt media")
+        owned = next(
+            (
+                item for item in self._payment_rows(customer_id=int(customer["id"]))
+                if item["payment_key"] == f"{source}:{receipt_id}"
+            ),
+            None,
+        )
+        if owned is None:
+            raise TenantBusinessError("payment not found")
+        payload = bytes(media or b"")
+        if not payload or len(payload) > 8 * 1024 * 1024:
+            raise ValueError("invalid receipt media")
+        clean_mime = _text(mime_type, 80, required=False) or "image/jpeg"
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            self.conn.execute(
+                "INSERT INTO tenant_payment_receipt_media "
+                "(tenant_id,payment_source,receipt_id,mime_type,media,created_at) "
+                "VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(tenant_id,payment_source,receipt_id) DO UPDATE SET "
+                "mime_type=excluded.mime_type, media=excluded.media, "
+                "created_at=excluded.created_at",
+                (
+                    self.tenant_id,
+                    source,
+                    int(receipt_id),
+                    clean_mime,
+                    sqlite3.Binary(payload),
+                    now,
+                ),
+            )
+        return {
+            "payment_key": f"{source}:{receipt_id}",
+            "size": len(payload),
+            "mime_type": clean_mime,
+        }
+
+    def payment_receipt_media_admin(
+        self, actor_id: int, *, payment_key: str | int
+    ) -> dict[str, Any] | None:
+        self._admin(actor_id)
+        source, receipt_id = self._parse_payment_key(payment_key)
+        if source not in ("order", "wallet_topup"):
+            return None
+        row = self.conn.execute(
+            "SELECT mime_type, media, created_at "
+            "FROM tenant_payment_receipt_media "
+            "WHERE tenant_id=? AND payment_source=? AND receipt_id=?",
+            (self.tenant_id, source, int(receipt_id)),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "mime_type": str(row["mime_type"] or "image/jpeg"),
+            "media": bytes(row["media"]),
+            "created_at": row["created_at"],
+        }
+
     @staticmethod
     def _parse_payment_key(payment_key: str | int) -> tuple[str, int]:
         raw = str(payment_key or "").strip()
