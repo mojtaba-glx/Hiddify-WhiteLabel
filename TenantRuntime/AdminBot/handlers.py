@@ -29,6 +29,15 @@ from telegram.ext import (
 from Gateway.catalog import RuntimeBotSpec
 from Shared.timeutils import parse_utc, utcnow
 from TenantRuntime.business import TenantBusinessError
+from TenantRuntime.panels import PanelError
+from TenantRuntime.server_connections import (
+    optional as server_optional, url as server_url, path as server_path,
+    inbound_ids as server_inbound_ids, connection_error,
+)
+from TenantRuntime.AdminBot.server_management import (
+    ACCESS_FIELDS, SETTING_FIELDS, COMMON_FIELDS, access_values,
+    check_connection, inspection_text,
+)
 from TenantRuntime.button_styles import (
     inline_button as InlineKeyboardButton,
     keyboard_button as KeyboardButton,
@@ -512,6 +521,8 @@ def _server_detail_view(
         f"🔐 دسترسی پنل: {credential}"
     )
     rows = [
+        [InlineKeyboardButton("🧪تست اتصال", callback_data=f"srv:test:{server_id}")],
+        [InlineKeyboardButton("⭐ سرور پیش‌فرض فروش", callback_data=f"biz:defaultserver:{server_id}")],
         [InlineKeyboardButton("👤لیست کاربران", callback_data=f"srv:users:{server_id}")],
         [InlineKeyboardButton("🛡️عملیات کاربری", callback_data=f"srv:userops:{server_id}")],
         [InlineKeyboardButton("📋پلن ها", callback_data=f"srv:plans:{server_id}")],
@@ -544,16 +555,33 @@ def _server_edit_view(server: dict) -> InlineKeyboardMarkup:
     elif kind == "xui":
         rows.extend([
             [InlineKeyboardButton("🔑ویرایش دسترسی پنل", callback_data=f"srv:editf:{sid}:credential")],
+            [InlineKeyboardButton("👤ویرایش نام کاربری پنل", callback_data=f"srv:editf:{sid}:username")],
+            [InlineKeyboardButton("🔑ویرایش رمز پنل", callback_data=f"srv:editf:{sid}:password")],
+
+            [InlineKeyboardButton("🔐ویرایش Secret Header", callback_data=f"srv:editf:{sid}:secret_header")],
+            [InlineKeyboardButton("🔗ویرایش مسیر ساب", callback_data=f"srv:editf:{sid}:xui_sub_path")],
+            [InlineKeyboardButton("🧩لیست اینباندها", callback_data=f"srv:inbounds:{sid}")],
             [InlineKeyboardButton("🔗ویرایش دامنه ساب", callback_data=f"srv:editf:{sid}:xui_public_origin")],
             [InlineKeyboardButton("🧩ویرایش اینباند", callback_data=f"srv:editf:{sid}:xui_inbound_ids")],
         ])
+        if server.get("xui_flavor") == "sanaei":
+            rows.insert(7, [InlineKeyboardButton("🔑ویرایش توکن", callback_data=f"srv:editf:{sid}:api_token")])
     elif kind == "xnet":
         rows.extend([
-            [InlineKeyboardButton("🔑ویرایش توکن API X-NET", callback_data=f"srv:editf:{sid}:credential")],
+            [InlineKeyboardButton("🔑ویرایش دسترسی X-NET", callback_data=f"srv:editf:{sid}:credential")],
+            [InlineKeyboardButton("🔑ویرایش توکن API X-NET", callback_data=f"srv:editf:{sid}:api_token")],
+            [InlineKeyboardButton("👤نام کاربری fallback X-NET", callback_data=f"srv:editf:{sid}:username")],
+            [InlineKeyboardButton("🔐رمز fallback X-NET", callback_data=f"srv:editf:{sid}:password")],
+            [InlineKeyboardButton("🔌ویرایش API داخلی X-NET", callback_data=f"srv:editf:{sid}:xnet_api_url")],
+            [InlineKeyboardButton("🔌ویرایش پورت ساب", callback_data=f"srv:editf:{sid}:xnet_sub_port")],
+            [InlineKeyboardButton("🔗ویرایش مسیر ساب", callback_data=f"srv:editf:{sid}:xnet_sub_path")],
+            [InlineKeyboardButton("🧩لیست اینباندها", callback_data=f"srv:inbounds:{sid}")],
             [InlineKeyboardButton("🔗ویرایش دامنه ساب", callback_data=f"srv:editf:{sid}:xnet_public_origin")],
             [InlineKeyboardButton("🧩ویرایش اینباند", callback_data=f"srv:editf:{sid}:xnet_inbound_ids")],
         ])
     rows.extend([
+        [InlineKeyboardButton("🔌 تنظیم مجدد اتصال", callback_data=f"srv:reconnect:{sid}")],
+        [InlineKeyboardButton("🧪تست اتصال", callback_data=f"srv:test:{sid}")],
         [InlineKeyboardButton("🗑️حذف سرور", callback_data=f"srv:delete:{sid}")],
         [InlineKeyboardButton("🔙بازگشت", callback_data=f"srv:view:{sid}")],
     ])
@@ -672,6 +700,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         raise RuntimeError("AdminBot callback registered for non-admin role")
     actor = int(update.effective_user.id) if update.effective_user else 0
     try:
+        if data.startswith("srv:") or data == "biz:servers":
+            previous = context.user_data.pop("biz_flow", None)
+            if (isinstance(previous, dict) and str(previous.get("kind") or "").startswith("server_")
+                    and not data.startswith(("srv:editf:", "srv:addtype:", "srv:reconnect:"))):
+                await update.callback_query.message.reply_text(
+                    "↩️ مدیریت سرورها", reply_markup=admin_main_keyboard(),
+                )
         if data.startswith(("userbot:", "channelpost:")):
             from TenantRuntime.AdminBot import userbot_management
             if await userbot_management.handle_callback(
@@ -1768,6 +1803,44 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
 
+        if data.startswith("srv:reconnect:"):
+            server_id = int(data.rsplit(":", 1)[1])
+            server = business.server(server_id)
+            business.server_admin_summary(actor, server_id=server_id)
+            context.user_data["biz_flow"] = {
+                "kind": "server_add_title", "provider": server["panel_kind"],
+                "flavor": str(server.get("xui_flavor") or ""),
+                "server_id": server_id,
+            }
+            await _reply_server_prompt(update,
+                "🔌 تنظیم مجدد اتصال سرور\n📌 عنوان سرور را وارد کنید؛ تنظیمات جدید پس از تأیید اتصال جایگزین می‌شوند.")
+            return
+
+        if data.startswith(("srv:test:", "srv:inbounds:")):
+            await update.callback_query.answer("در حال بررسی اتصال…")
+            server_id = int(data.rsplit(":", 1)[1])
+            # Inbound discovery must work even when an old selected ID is gone.
+            settings = {}
+            if data.startswith("srv:inbounds:"):
+                server = business.server(server_id)
+                kind = str(server["panel_kind"])
+                if kind not in {"xui", "xnet"}:
+                    raise ValueError("panel has no inbounds")
+                settings[kind + "_inbound_ids"] = ""
+            try:
+                _, _, result = await check_connection(
+                    business, actor, server_id=server_id, settings=settings,
+                )
+                text = inspection_text(result)
+            except (PanelError, TenantBusinessError, ValueError) as exc:
+                text = connection_error(exc) + "\nبرای تکمیل همه اطلاعات از «تنظیم مجدد اتصال» استفاده کنید."
+            await update.callback_query.message.reply_text(text,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✏️ویرایش سرور", callback_data=f"srv:edit:{server_id}")],
+                    [InlineKeyboardButton("🔙بازگشت", callback_data=f"srv:view:{server_id}")],
+                ]))
+            return
+
         if data.startswith("srv:editf:"):
             parts = data.split(":", 3)
             if len(parts) != 4:
@@ -1775,13 +1848,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             server_id = int(parts[2])
             field = parts[3]
             server = business.server(server_id)
-            allowed_fields = {
-                "label", "endpoint", "users_limit", "priority",
-                "admin_path", "user_path", "credential",
-                "xui_public_origin", "xui_inbound_ids",
-                "xnet_public_origin", "xnet_inbound_ids",
-            }
-            if field not in allowed_fields:
+            provider = str(server["panel_kind"])
+            allowed_fields = (COMMON_FIELDS | SETTING_FIELDS.get(provider, set())
+                              | ACCESS_FIELDS.get(provider, set()))
+            if (field not in allowed_fields or (field == "api_token"
+                    and provider == "xui" and server.get("xui_flavor") != "sanaei")):
                 raise ValueError("invalid server edit field")
             context.user_data["biz_flow"] = {
                 "kind": "server_edit_field",
@@ -1797,7 +1868,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "priority": "🔢 اولویت ترتیب را وارد کنید. عدد بزرگ‌تر اولویت بیشتر دارد.",
                 "admin_path": "🔐 کد مسیر ادمین پنل را وارد کنید:",
                 "user_path": "🔐 کد مسیر کاربران را وارد کنید:",
-                "credential": "🔑 دسترسی جدید پنل را ارسال کنید.",
+                "credential": "🧩 کلید ادمین پنل (UUID یا API Key) را وارد کنید؛ فقط مقدار خالص، بدون / و بدون آدرس.",
+                "api_token": "🔑 توکن API را وارد کنید. برای حذف توکن و استفاده از ورود با رمز «-» بفرستید.",
+                "username": "👤 نام کاربری پنل را وارد کنید:",
+                "password": "🔐 رمز عبور پنل را وارد کنید:",
+                "secret_header": "🔐 مقدار Secret Header را وارد کنید. برای حذف «-» بفرستید.",
+                "xui_sub_path": "🔗 مسیر سابسکریپشن X-UI را وارد کنید؛ پیش‌فرض sub است.",
+                "xnet_sub_path": "🔗 مسیر سابسکریپشن X-NET را وارد کنید؛ پیش‌فرض sub است.",
+                "xnet_sub_port": "🔌 پورت اشتراک X-NET را وارد کنید؛ 0 = پیش‌فرض 2096",
+                "xnet_api_url": "🔌 آدرس API داخلی X-NET را با http/https وارد کنید. مثال: http://127.0.0.1:8080؛ برای استفاده از آدرس پنل «-» بفرستید.",
                 "xui_public_origin": "🔗 دامنه عمومی اشتراک را وارد کنید. برای استفاده از آدرس پنل «-» بفرستید.",
                 "xui_inbound_ids": "🧩 شناسه اینباندها را وارد کنید؛ 0 = همه.",
                 "xnet_public_origin": "🔗 دامنه عمومی اشتراک را وارد کنید. برای استفاده از آدرس پنل «-» بفرستید.",
@@ -1805,7 +1884,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             }
             if field == "credential" and server.get("panel_kind") == "xui":
                 if str(server.get("xui_flavor") or "") == "sanaei":
-                    prompts[field] = "🔑 API Token پنل Sanaei را ارسال کنید."
+                    prompts[field] = "🔑 API Token سنایی را بفرستید؛ یا نام کاربری | رمز عبور. برای توکن همراه fallback: نام کاربری | رمز عبور | توکن | Secret Header اختیاری"
                 else:
                     prompts[field] = "🔑 نام کاربری | رمز عبور | Secret Header اختیاری"
             elif field == "credential" and server.get("panel_kind") == "xnet":
@@ -2538,10 +2617,11 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     "❌ عملیات سرور لغو شد.",
                     reply_markup=admin_main_keyboard(),
                 )
+                listing, keyboard = _server_list_view(business)
+                await update.effective_message.reply_text(listing, reply_markup=keyboard)
                 return
 
-            def optional(value: str) -> str:
-                return "" if value.strip() in ("-", "—") else value.strip()
+            optional = server_optional
 
             if kind == "server_user_search":
                 server_id = int(flow["server_id"])
@@ -2570,61 +2650,47 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 field = str(flow["field"])
                 provider = str(flow.get("provider") or "")
                 flavor = str(flow.get("flavor") or "")
-                if field == "credential":
+                credentials = None
+                settings = {}
+                if field in ACCESS_FIELDS.get(provider, set()):
                     try:
                         await update.effective_message.delete()
                     except Exception:
                         pass
-                    if provider == "xui":
-                        if flavor == "sanaei":
-                            business.set_xui_credential(
-                                actor, server_id=server_id, api_token=text
-                            )
-                        else:
-                            parts = [part.strip() for part in text.split("|")]
-                            if len(parts) not in (2, 3):
-                                raise ValueError("invalid X-UI credential")
-                            business.set_xui_credential(
-                                actor,
-                                server_id=server_id,
-                                username=parts[0],
-                                password=parts[1],
-                                secret_header=parts[2] if len(parts) == 3 else "",
-                            )
-                    elif provider == "xnet":
-                        parts = [part.strip() for part in text.split("|")]
-                        if len(parts) == 1:
-                            business.set_xnet_credential(
-                                actor, server_id=server_id, api_token=parts[0]
-                            )
-                        elif len(parts) == 3:
-                            business.set_xnet_credential(
-                                actor,
-                                server_id=server_id,
-                                api_token=parts[0],
-                                username=parts[1],
-                                password=parts[2],
-                            )
-                        else:
-                            raise ValueError("invalid X-NET credential")
-                    else:
-                        business.set_panel_credential(
-                            actor, server_id=server_id, secret=text
-                        )
+                    credentials = (access_values(provider, flavor, text)
+                        if field == "credential" else {field: text})
+                    if field == "secret_header":
+                        credentials[field] = optional(text)
                 else:
-                    value: object = optional(text)
-                    if field in ("users_limit", "priority"):
+                    value: object = text
+                    if field in {"users_limit", "priority", "xnet_sub_port"}:
                         value = int(text.replace(",", "").strip())
-                    if field == "endpoint" and value and not str(value).startswith(("http://", "https://")):
-                        raise ValueError("invalid endpoint")
-                    business.update_server(
-                        actor, server_id=server_id, **{field: value}
+                    if field in {"xui_public_origin", "xnet_public_origin"}:
+                        value = server_url(text, domain=True, required=False)
+                    elif field == "xnet_api_url":
+                        value = server_url(optional(text), required=False)
+                    settings[field] = value
+                try:
+                    candidate, secret, result = await check_connection(
+                        business, actor, server_id=server_id,
+                        settings=settings, credentials=credentials,
                     )
+                except PanelError as exc:
+                    await update.effective_chat.send_message(
+                        connection_error(exc) + "\nمقدار را دوباره بفرستید یا لغو کنید.",
+                        reply_markup=_server_cancel_keyboard(),
+                    )
+                    return
+                business.commit_server_connection(actor, server_id=server_id,
+                    candidate=candidate, secret=secret)
                 context.user_data.pop("biz_flow", None)
-                await update.effective_message.reply_text(
-                    "✅ اطلاعات سرور ذخیره شد.",
+                await update.effective_chat.send_message(
+                    "✅ اطلاعات سرور ذخیره شد.\n" + inspection_text(result),
                     reply_markup=admin_main_keyboard(),
                 )
+                detail, keyboard = _server_detail_view(business, actor, server_id)
+                await update.effective_chat.send_message(detail, reply_markup=keyboard,
+                    parse_mode="HTML", disable_web_page_preview=True)
                 return
 
             # New-server wizard. Secrets are requested only at the final step
@@ -2633,19 +2699,23 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 flow["label"] = text[:80]
                 flow["kind"] = "server_add_endpoint"
                 await update.effective_message.reply_text(
-                    "🌐 آدرس کامل پنل را وارد کنید:\nمثال: https://panel.example.com",
+                    (
+                        "🌐 لطفاً آدرس پنل هیدیفای را وارد کنید:\nمثال: https://site.example.com"
+                        if flow["provider"] == "hiddify" else
+                        "🌐 آدرس اصلی پنل X-NET را وارد کنید (بدون مسیر مخفی رابط وب):\nمثال: http://1.2.3.4:8080 یا https://xnet.example.com"
+                        if flow["provider"] == "xnet" else
+                        "🌐 لطفاً آدرس پنل X-UI را با پورت و مسیر پنل وارد کنید:\nمثال: https://site.example.com:2056/E6xNPh2XZF5A6UO"
+                    ),
                     reply_markup=_server_cancel_keyboard(),
                 )
                 return
 
             if kind == "server_add_endpoint":
-                if not text.startswith(("http://", "https://")):
-                    raise ValueError("invalid panel URL")
-                flow["endpoint"] = text
+                flow["endpoint"] = server_url(text)
                 provider = str(flow["provider"])
                 if provider == "hiddify":
                     flow["kind"] = "server_add_admin_path"
-                    prompt = "🔑 کد مسیر ادمین پنل را وارد کنید. اگر نیاز نیست «-» بفرستید."
+                    prompt = "🔑 لطفاً کد مسیر ادمین پنل را وارد کنید (Admin Proxy Path):\nمثال: cNT69A5AAw"
                 elif provider == "xui":
                     flow["kind"] = "server_add_inbounds"
                     prompt = "🧩 شناسه اینباندها را وارد کنید؛ 0 = همه یا مثل 1,2,3"
@@ -2658,16 +2728,16 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 return
 
             if kind == "server_add_admin_path":
-                flow["admin_path"] = optional(text)
+                flow["admin_path"] = server_path(text)
                 flow["kind"] = "server_add_user_path"
                 await update.effective_message.reply_text(
-                    "🔐 کد مسیر کاربران را وارد کنید. اگر نیاز نیست «-» بفرستید.",
+                    "🔑 لطفاً کد مسیر کاربران پنل را وارد کنید (User Proxy Path):",
                     reply_markup=_server_cancel_keyboard(),
                 )
                 return
 
             if kind == "server_add_user_path":
-                flow["user_path"] = optional(text)
+                flow["user_path"] = server_path(text)
                 flow["kind"] = "server_add_limit"
                 await update.effective_message.reply_text(
                     "🗿 محدودیت تعداد کاربر این سرور را وارد کنید. 0 = نامحدود",
@@ -2676,7 +2746,7 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 return
 
             if kind == "server_add_inbounds":
-                flow["inbound_ids"] = optional(text)
+                flow["inbound_ids"] = server_inbound_ids(text, kind=str(flow["provider"]))
                 flow["kind"] = "server_add_public_origin"
                 await update.effective_message.reply_text(
                     "🔗 دامنه عمومی اشتراک را وارد کنید. برای استفاده از آدرس پنل «-» بفرستید.",
@@ -2685,7 +2755,7 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 return
 
             if kind == "server_add_public_origin":
-                flow["public_origin"] = optional(text)
+                flow["public_origin"] = server_url(text, domain=True, required=False)
                 provider = str(flow["provider"])
                 flow["kind"] = (
                     "server_add_xnet_port"
@@ -2715,7 +2785,7 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 return
 
             if kind == "server_add_sub_path":
-                flow["sub_path"] = optional(text)
+                flow["sub_path"] = server_path(optional(text) or "sub")
                 flow["kind"] = "server_add_limit"
                 await update.effective_message.reply_text(
                     "🗿 محدودیت تعداد کاربر این سرور را وارد کنید. 0 = نامحدود",
@@ -2747,12 +2817,12 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 else:
                     flow["kind"] = "server_add_secret"
                     prompt = (
-                        "🔑 API Key پنل Hiddify را ارسال کنید."
+                        "🧩 لطفاً کلید ادمین پنل (UUID یا API Key) را وارد کنید. فقط مقدار خالص، بدون / و بدون آدرس."
                         if provider == "hiddify"
                         else (
-                            "🔑 API Token پنل Sanaei را ارسال کنید."
+                            "🔑 توکن API پنل سنایی را بفرستید (Settings → Security → API Token)؛ یا نام کاربری | رمز عبور. برای توکن همراه fallback: نام کاربری | رمز عبور | توکن | Secret Header اختیاری"
                             if provider == "xui"
-                            else "🔑 Bearer Token مدیریت X-NET را ارسال کنید."
+                            else "🔑 توکن API مدیریت X-NET را وارد کنید:\nپنل ← تنظیمات پیشرفته ← مدیریت سرویس API ← Bearer Token\nبرای fallback: توکن | نام کاربری | رمز عبور؛ بدون توکن: - | نام کاربری | رمز عبور"
                         )
                     )
                 await update.effective_message.reply_text(
@@ -2802,35 +2872,35 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         "xnet_sub_port": int(flow.get("xnet_sub_port") or 0),
                         "xnet_sub_path": str(flow.get("sub_path") or ""),
                     })
-                server = business.add_server(actor, **kwargs)
+                credentials = (
+                    {"username": str(flow["xui_username"]), "password": text}
+                    if provider == "xui" and flavor == "alireza"
+                    else access_values(provider, flavor, text)
+                )
                 try:
-                    if provider == "hiddify":
-                        business.set_panel_credential(
-                            actor, server_id=int(server["id"]), secret=text
-                        )
-                    elif provider == "xui" and flavor == "sanaei":
-                        business.set_xui_credential(
-                            actor, server_id=int(server["id"]), api_token=text
-                        )
-                    elif provider == "xui":
-                        business.set_xui_credential(
-                            actor,
-                            server_id=int(server["id"]),
-                            username=str(flow["xui_username"]),
-                            password=text,
-                        )
-                    else:
-                        business.set_xnet_credential(
-                            actor, server_id=int(server["id"]), api_token=text
-                        )
-                except Exception:
-                    business.delete_server(actor, server_id=int(server["id"]))
-                    raise
+                    candidate, secret, result = await check_connection(
+                        business, actor, settings=kwargs, credentials=credentials,
+                        server_id=flow.get("server_id"),
+                    )
+                except PanelError as exc:
+                    await update.effective_chat.send_message(
+                        connection_error(exc) + "\nاطلاعات دسترسی را دوباره بفرستید یا لغو کنید.",
+                        reply_markup=_server_cancel_keyboard(),
+                    )
+                    return
+                server = business.commit_server_connection(
+                    actor, candidate=candidate, secret=secret,
+                    server_id=flow.get("server_id"),
+                )
                 context.user_data.pop("biz_flow", None)
                 await update.effective_chat.send_message(
-                    "✅ سرور با موفقیت اضافه شد.",
+                    ("✅ اتصال سرور بروزرسانی شد.\n" if flow.get("server_id")
+                     else "✅ سرور با موفقیت اضافه شد.\n") + inspection_text(result),
                     reply_markup=admin_main_keyboard(),
                 )
+                detail, keyboard = _server_detail_view(business, actor, int(server["id"]))
+                await update.effective_chat.send_message(detail, reply_markup=keyboard,
+                    parse_mode="HTML", disable_web_page_preview=True)
                 return
 
         if isinstance(flow, dict):
@@ -3122,6 +3192,12 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.effective_message.reply_text("✅ ذخیره شد.", reply_markup=_menu(spec))
             return
     except (ValueError, TenantBusinessError, PermissionError, sqlite3.IntegrityError):
+        if isinstance(flow, dict) and str(flow.get("kind") or "").startswith("server_"):
+            await update.effective_chat.send_message(
+                "❌ مقدار معتبر نیست. طبق راهنمای همین مرحله دوباره بفرستید یا لغو کنید.",
+                reply_markup=_server_cancel_keyboard(),
+            )
+            return
         await update.effective_message.reply_text("❌ قالب یا وضعیت معتبر نیست.", reply_markup=_menu(spec))
         return
     if update.effective_message:

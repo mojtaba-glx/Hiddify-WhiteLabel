@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.20.1 — Server connection parity
+
+- Completed tenant server connection controls using Hiddify-SellBot `AdminBot/servers.py` and its provider-specific authentication flows as the reference.
+- Added read-only protected API probes for Hiddify v11/v12/v13, X-UI Sanaei/Alireza and X-NET; new setup and connection edits save only after successful verification.
+- Added Sanaei cookie login and token rejection fallback, with per-inbound creation, renewal, state and deletion paths; state edits preserve usage and quotas.
+- Added X-NET token/fallback login edits, optional internal management API, subscription port/path controls, inbound discovery and a working default-server action.
+- Added full connection reconfiguration for incomplete existing server records, preserving server IDs and mapped subscriptions.
+- Kept secret edits encrypted and atomic, preserved working settings after failures, scoped JWT caches to credential material, and restored cancellation/back navigation.
+- Added migration `0025_server_connection_parity` and regression tests for all four setup flows, read-only probes, failures/retries, credential rotation, tenant isolation and cookie-auth lifecycle.
+
 ## v0.20.0 — Referral parity
 
 - Completed referral management across Tenant AdminBot and UserBot using the proven Hiddify-SellBot behavior.
