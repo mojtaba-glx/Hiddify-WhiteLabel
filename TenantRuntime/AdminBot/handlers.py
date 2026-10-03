@@ -7,11 +7,15 @@ User-shop handlers are intentionally kept out of this package.
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
+import sys
+import time
 from io import BytesIO
 from pathlib import Path
 from html import escape
 from typing import Any
+from urllib.parse import urlsplit
 
 from telegram import (
     InlineKeyboardMarkup,
@@ -30,6 +34,7 @@ from telegram.ext import (
 )
 
 from Gateway.catalog import RuntimeBotSpec
+from Shared.redaction import redact_text
 from Shared.timeutils import parse_utc, utcnow
 from TenantRuntime.business import TenantBusinessError
 from TenantRuntime.server_admin import ServerAdminService, user_status
@@ -2445,6 +2450,427 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.callback_query.answer("این دکمه معتبر نیست.", show_alert=True)
 
 
+
+def _debug_fmt_duration(seconds: float) -> str:
+    total = max(0, int(seconds or 0))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _debug_safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _debug_split_text(text: str, chunk_size: int = 3800) -> list[str]:
+    out: list[str] = []
+    current = ""
+    for line in str(text or "").splitlines():
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) <= max(500, int(chunk_size)):
+            current = candidate
+            continue
+        if current:
+            out.append(current)
+        # A single diagnostic line should never break Telegram delivery.
+        while len(line) > max(500, int(chunk_size)):
+            out.append(line[: max(500, int(chunk_size))])
+            line = line[max(500, int(chunk_size)) :]
+        current = line
+    if current:
+        out.append(current)
+    return out or [str(text or "")]
+
+
+def _debug_database_state(conn: sqlite3.Connection) -> str:
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+        main = next(
+            (
+                row
+                for row in rows
+                if str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+                == "main"
+            ),
+            rows[0] if rows else None,
+        )
+        if main is None:
+            return "⚠️ مسیر دیتابیس نامشخص"
+        filename = str(
+            main[2] if not isinstance(main, sqlite3.Row) else main["file"]
+        ).strip()
+        if not filename or filename == ":memory:":
+            return "✅ SQLite memory"
+        path = Path(filename)
+        stat = path.stat()
+        mtime = time.strftime(
+            "%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)
+        )
+        return f"✅ {stat.st_size / (1024 * 1024):.2f}MB | {mtime}"
+    except Exception as exc:
+        return f"⚠️ {type(exc).__name__}"
+
+
+def _debug_sqlite_quick_check(conn: sqlite3.Connection) -> str:
+    """SellBot-style fast integrity check without modifying shared storage."""
+    try:
+        row = conn.execute("PRAGMA quick_check").fetchone()
+        result = str(row[0] if row else "").strip()
+        return (
+            "✅ integrity OK"
+            if result.casefold() == "ok"
+            else f"❌ {redact_text(result or 'نامشخص')[:220]}"
+        )
+    except Exception as exc:
+        return f"⚠️ {type(exc).__name__}"
+
+
+def _debug_count(
+    conn: sqlite3.Connection,
+    table: str,
+    tenant_id: int,
+    where: str = "",
+    params: tuple[object, ...] = (),
+) -> int:
+    # table/where are internal constants only; user input is never interpolated.
+    try:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE tenant_id=?"
+            + (f" AND {where}" if where else ""),
+            (int(tenant_id), *params),
+        ).fetchone()
+        return _debug_safe_int(row[0] if row else 0)
+    except sqlite3.Error:
+        return 0
+
+
+def _tenant_debug_stats(business: Any) -> dict[str, int]:
+    """Return only rows owned by the current tenant."""
+    conn = business.conn
+    tid = int(business.tenant_id)
+    return {
+        "servers": _debug_count(conn, "tenant_servers", tid),
+        "servers_active": _debug_count(
+            conn, "tenant_servers", tid, "status='active'"
+        ),
+        "nodes": _debug_count(conn, "tenant_nodes", tid),
+        "nodes_active": _debug_count(
+            conn, "tenant_nodes", tid, "status='active'"
+        ),
+        "panel_users": _debug_count(
+            conn, "tenant_panel_users", tid, "state!='deleted'"
+        ),
+        "customers": _debug_count(conn, "tenant_customers", tid),
+        "subscriptions": _debug_count(conn, "tenant_subscriptions", tid),
+        "subs_active": _debug_count(
+            conn, "tenant_subscriptions", tid, "status='active'"
+        ),
+        "subs_disabled": _debug_count(
+            conn, "tenant_subscriptions", tid, "status='disabled'"
+        ),
+        "subs_expired": _debug_count(
+            conn, "tenant_subscriptions", tid, "status='expired'"
+        ),
+        "subs_pending": _debug_count(
+            conn,
+            "tenant_subscriptions",
+            tid,
+            "status='pending_provisioning'",
+        ),
+        "orders": _debug_count(conn, "tenant_orders", tid),
+        "receipts": _debug_count(conn, "tenant_receipts", tid),
+        "payment_events": _debug_count(conn, "tenant_payment_events", tid),
+        "tickets": _debug_count(conn, "tenant_tickets", tid),
+        "coupons": _debug_count(conn, "tenant_coupons", tid),
+        "gifts": _debug_count(conn, "tenant_gift_vouchers", tid),
+        "frozen_nodes": _debug_count(
+            conn,
+            "tenant_subscription_nodes",
+            tid,
+            "frozen_at IS NOT NULL",
+        ),
+        "failed_nodes": _debug_count(
+            conn,
+            "tenant_subscription_nodes",
+            tid,
+            "COALESCE(fail_count,0)>0",
+        ),
+        "enforcement_pending": _debug_count(
+            conn,
+            "tenant_subscriptions",
+            tid,
+            "enforcement_pending=1",
+        ),
+        "agents": _debug_count(conn, "tenant_agents", tid),
+        "agents_active": _debug_count(
+            conn, "tenant_agents", tid, "status='active'"
+        ),
+        "agent_customers": _debug_count(
+            conn, "tenant_agent_customers", tid
+        ),
+        "agent_services": _debug_count(
+            conn, "tenant_agent_subscriptions", tid
+        ),
+        "customer_bots": _debug_count(conn, "tenant_customer_bots", tid),
+        "customer_bots_active": _debug_count(
+            conn, "tenant_customer_bots", tid, "status='active'"
+        ),
+        "backup_success": _debug_count(
+            conn, "tenant_backup_runs", tid, "status='success'"
+        ),
+        "backup_failed": _debug_count(
+            conn, "tenant_backup_runs", tid, "status='failed'"
+        ),
+    }
+
+
+def _tenant_debug_recent_issues(
+    business: Any, *, limit: int = 5
+) -> list[str]:
+    """Durable tenant-scoped replacement for SellBot's single-process log tail."""
+    conn = business.conn
+    tid = int(business.tenant_id)
+    cap = max(1, min(int(limit), 10))
+    found: list[str] = []
+    queries = (
+        (
+            "node",
+            "SELECT last_error FROM tenant_subscription_nodes "
+            "WHERE tenant_id=? AND TRIM(COALESCE(last_error,''))<>'' "
+            "ORDER BY updated_at DESC LIMIT ?",
+        ),
+        (
+            "enforcer",
+            "SELECT enforcement_error FROM tenant_subscriptions "
+            "WHERE tenant_id=? AND TRIM(COALESCE(enforcement_error,''))<>'' "
+            "ORDER BY updated_at DESC LIMIT ?",
+        ),
+        (
+            "backup",
+            "SELECT last_error FROM tenant_backup_runs "
+            "WHERE tenant_id=? AND status='failed' "
+            "AND TRIM(COALESCE(last_error,''))<>'' "
+            "ORDER BY slot_key DESC LIMIT ?",
+        ),
+    )
+    for label, query in queries:
+        try:
+            rows = conn.execute(query, (tid, cap)).fetchall()
+        except sqlite3.Error:
+            continue
+        for row in rows:
+            value = str(row[0] or "").strip()
+            if not value:
+                continue
+            safe = redact_text(value).replace("\n", " ").strip()
+            found.append(f"- {label}: {safe[:220]}")
+            if len(found) >= cap:
+                return found
+    return found
+
+
+async def _debug_tcp_probe(
+    host: str, port: int, timeout: float = 1.8
+) -> tuple[bool, str]:
+    writer = None
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(str(host), int(port)),
+            timeout=max(0.2, float(timeout)),
+        )
+        del reader
+        return True, "ok"
+    except Exception as exc:
+        return False, type(exc).__name__
+    finally:
+        if writer is not None:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+
+def _debug_env_int(name: str, default: int) -> int:
+    return _debug_safe_int(os.environ.get(name), default)
+
+
+def _debug_jobs_summary(context: ContextTypes.DEFAULT_TYPE) -> str:
+    app = context.application if context else None
+    if app is None:
+        return "نامشخص"
+    queue = getattr(app, "job_queue", None)
+    if queue is None:
+        return "PTB JobQueue=disabled | Supervisor/Lifecycle=shared"
+    try:
+        jobs = list(queue.jobs())
+    except Exception:
+        return "JobQueue=unavailable"
+    return f"PTB JobQueue={len(jobs)}"
+
+
+async def _build_admin_debug_report(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    business: Any,
+    spec: RuntimeBotSpec,
+    actor: int,
+) -> str:
+    """Tenant-safe adaptation of Hiddify-SellBot's full /debug report."""
+    now_local = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    now_utc = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    started = float(
+        context.application.bot_data.get("runtime_started_at") or time.time()
+    )
+    uptime = _debug_fmt_duration(time.time() - started)
+    stats = _tenant_debug_stats(business)
+    settings = business.runtime_userbot_settings()
+    growth = business.growth_settings(actor)
+
+    telegram_ok, telegram_msg = await _debug_tcp_probe("api.telegram.org", 443)
+
+    panel_checks: list[str] = []
+    for server in business.list_servers()[:5]:
+        endpoint = str(server.get("endpoint") or "").strip()
+        if not endpoint:
+            continue
+        parsed = urlsplit(
+            endpoint if "://" in endpoint else f"https://{endpoint}"
+        )
+        host = str(parsed.hostname or "").strip()
+        if not host:
+            continue
+        port = parsed.port or (443 if parsed.scheme != "http" else 80)
+        ok, message = await _debug_tcp_probe(host, port)
+        panel_checks.append(
+            f"  #{int(server['id'])} {server.get('label') or 'server'} "
+            f"{host}:{port} {'✅' if ok else '❌'} "
+            f"({message if not ok else 'ok'})"
+        )
+
+    issues = _tenant_debug_recent_issues(business, limit=5)
+    token_tail = str(spec.token_tail or "").strip()
+    token_view = f"***{token_tail}" if token_tail else "ثبت نشده"
+
+    lines = [
+        "🧪 Debug Report",
+        f"⏱ زمان محلی: {now_local}",
+        f"🌍 UTC: {now_utc}",
+        f"📦 نسخه: {_application_version()}",
+        f"🐍 Python: {sys.version.split()[0]}",
+        f"🆔 PID: {os.getpid()} | Uptime: {uptime}",
+        "",
+        "🔐 Runtime / Tenant",
+        f"- TENANT_ID: {int(spec.tenant_id)}",
+        f"- TENANT: {spec.tenant_name}",
+        f"- ADMIN_ID: {int(spec.owner_telegram_id)}",
+        f"- BOT_ID: {int(spec.telegram_bot_id)}",
+        f"- BOT_USERNAME: @{spec.telegram_username}" if spec.telegram_username else "- BOT_USERNAME: —",
+        f"- BOT_TOKEN: {token_view}",
+        f"- SHARD: {_debug_env_int('RUNTIME_SHARD_INDEX', 0)}/"
+        f"{_debug_env_int('RUNTIME_SHARD_COUNT', 1)}",
+        f"- RECONCILE: {_debug_env_int('RUNTIME_RECONCILE_SECONDS', 15)}s",
+        f"- LIFECYCLE: {_debug_env_int('RUNTIME_LIFECYCLE_SECONDS', 180)}s",
+        f"- ENFORCER: {_debug_env_int('RUNTIME_ENFORCER_SECONDS', 20)}s",
+        f"- NODE_FREEZE_FAILURES: {_debug_env_int('RUNTIME_NODE_FREEZE_FAILURES', 3)}",
+        "",
+        "📁 Runtime Storage",
+        f"- database: {_debug_database_state(business.conn)}",
+        f"- VERSION: {_application_version()}",
+        "",
+        "📊 Data",
+        f"- servers={stats['servers']} | active={stats['servers_active']} | "
+        f"nodes={stats['nodes']} | active_nodes={stats['nodes_active']}",
+        f"- panel_users={stats['panel_users']} | customers={stats['customers']} | "
+        f"subscriptions={stats['subscriptions']}",
+        f"- subs: active={stats['subs_active']} | disabled={stats['subs_disabled']} | "
+        f"expired={stats['subs_expired']} | pending={stats['subs_pending']}",
+        f"- orders={stats['orders']} | receipts={stats['receipts']} | "
+        f"payment_events={stats['payment_events']}",
+        f"- tickets={stats['tickets']} | coupons={stats['coupons']} | gifts={stats['gifts']}",
+        f"- trial_spec: enabled={bool(growth.get('trial_enabled', 0))}, "
+        f"usage_gb={growth.get('trial_traffic_gb')}, "
+        f"days={growth.get('trial_duration_days')}",
+        f"- reminders: enabled={bool(settings.get('reminder_enabled', True))}, "
+        f"usage_gb={settings.get('reminder_remaining_gb')}, "
+        f"days={settings.get('reminder_days')}",
+        f"- buy/renew: buy={bool(settings.get('enable_buy', True))}, "
+        f"renew={bool(settings.get('enable_renew', True))}",
+        f"- auto_backup={bool(settings.get('auto_backup_enabled', True))} | "
+        f"backup_ok={stats['backup_success']} | backup_failed={stats['backup_failed']}",
+        "",
+        "🏢 Reseller / CustomerBot",
+        f"- agents={stats['agents']} | active={stats['agents_active']} | "
+        f"customers={stats['agent_customers']} | services={stats['agent_services']}",
+        f"- customer_bots={stats['customer_bots']} | active={stats['customer_bots_active']}",
+        f"- frozen_nodes={stats['frozen_nodes']} | fail_count_nodes={stats['failed_nodes']} | "
+        f"enforcement_pending={stats['enforcement_pending']}",
+        "",
+        "🗄 Database Health",
+        f"- whitelabel.db: {_debug_sqlite_quick_check(business.conn)}",
+        "",
+        "⚙️ Jobs",
+        f"- {_debug_jobs_summary(context)}",
+        f"- reminder defaults: {_debug_env_int('RUNTIME_REMINDER_DAYS', 3)} day / "
+        f"{_debug_env_int('RUNTIME_REMINDER_REMAINING_GB', 3)}GB",
+        "",
+        "🌐 Network",
+        f"- Telegram api.telegram.org:443 => "
+        f"{'✅' if telegram_ok else '❌'} "
+        f"({telegram_msg if not telegram_ok else 'ok'})",
+    ]
+    if panel_checks:
+        lines.append("- Panel probes:")
+        lines.extend(panel_checks)
+
+    lines.extend(["", "📜 Tenant Error Snapshot"])
+    if issues:
+        lines.extend(issues)
+    else:
+        lines.append("- خطای پایدار ثبت‌شده‌ای برای این Tenant وجود ندارد.")
+    lines.append(
+        "- Raw shard journal مخفی است؛ چون بین چند Tenant مشترک است و نمایش آن "
+        "می‌تواند اطلاعات Tenant دیگر را افشا کند."
+    )
+    return "\n".join(lines)
+
+
+async def debug(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Full SellBot-compatible, tenant-isolated AdminBot debug report."""
+    spec, policy, _, business = _services(context)
+    if spec.role != "admin":
+        raise RuntimeError("AdminBot debug registered for non-admin role")
+    actor = int(update.effective_user.id) if update.effective_user else 0
+    decision = policy.check(spec, telegram_user_id=actor)
+    if not decision.allowed:
+        await _deny_update(update, decision.reason)
+        raise ApplicationHandlerStop
+    message = update.effective_message
+    if message is None:
+        return
+
+    await message.reply_text("⏳ در حال جمع‌آوری گزارش اشکال‌زدایی...")
+    try:
+        report = await _build_admin_debug_report(
+            context,
+            business=business,
+            spec=spec,
+            actor=actor,
+        )
+    except Exception as exc:
+        await message.reply_text(
+            f"❌ خطا در تهیه گزارش: {redact_text(type(exc).__name__)}"
+        )
+        return
+    for part in _debug_split_text(report):
+        await message.reply_text(part)
+
+
 def _application_version() -> str:
     try:
         return (
@@ -3445,6 +3871,7 @@ def register_admin_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("start", show_home), group=0)
     application.add_handler(CommandHandler("menu", show_home), group=0)
     application.add_handler(CommandHandler("status", show_status), group=0)
+    application.add_handler(CommandHandler("debug", debug), group=0)
     application.add_handler(CallbackQueryHandler(on_callback), group=0)
     application.add_handler(
         MessageHandler(filters.PHOTO | filters.VIDEO, userbot_admin_media), group=0
