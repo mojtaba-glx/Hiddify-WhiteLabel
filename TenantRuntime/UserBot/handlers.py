@@ -12,6 +12,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from telegram import (
+    Bot,
     InlineKeyboardButton as TelegramInlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
@@ -28,9 +29,11 @@ from telegram.ext import (
     filters,
 )
 
+from Database.repositories import BotRepository
 from Gateway.catalog import RuntimeBotSpec
 from TenantRuntime.business import DEFAULT_REFERRAL_INVITE_TEXT, TenantBusinessError
 from TenantRuntime.button_styles import keyboard_button as KeyboardButton
+from Shared.crypto import fingerprint_token
 from Shared.timeutils import format_tehran, parse_utc, utcnow
 from TenantRuntime.common import _deny_update, _services, runtime_access_gate, runtime_error
 
@@ -80,6 +83,184 @@ def _ticket_panel_body(
         or "تیکتی ندارید."
     )
     return f"{intro}\n\n{history}".strip()
+
+
+def _ticket_status_label(status: object) -> str:
+    return {
+        "open": "📨 در انتظار پاسخ",
+        "answered": "📬 باز / پاسخ‌داده",
+        "closed": "📩 بسته",
+    }.get(str(status or ""), str(status or "-"))
+
+
+def _ticket_thread_text(
+    ticket: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> str:
+    lines = [
+        f"🎫 تیکت #{int(ticket['id'])}",
+        f"وضعیت: {_ticket_status_label(ticket.get('status'))}",
+        f"موضوع: {ticket.get('subject') or '-'}",
+        "",
+    ]
+    if not messages:
+        lines.append("هنوز پیامی ثبت نشده است.")
+    for item in messages[-30:]:
+        who = "👤 شما" if item.get("sender_type") == "user" else "🛟 پشتیبانی"
+        lines.append(f"{who}:")
+        body = str(item.get("message_text") or "").strip()
+        if body:
+            lines.append(body)
+        if item.get("has_media"):
+            lines.append("🖼 تصویر پیوست دارد")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _ticket_detail_markup(
+    ticket: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> InlineKeyboardMarkup:
+    ticket_id = int(ticket["id"])
+    rows: list[list[TelegramInlineKeyboardButton]] = []
+    media_buttons = [
+        InlineKeyboardButton(
+            f"🖼 تصویر پیام #{int(item['id'])}",
+            callback_data=f"shop:ticketmedia:{ticket_id}:{int(item['id'])}",
+        )
+        for item in messages
+        if item.get("has_media")
+    ]
+    for i in range(0, len(media_buttons), 2):
+        rows.append(media_buttons[i:i+2])
+    if str(ticket.get("status") or "") != "closed":
+        rows.append([
+            InlineKeyboardButton(
+                "📩 پاسخ",
+                callback_data=f"shop:ticketreply:{ticket_id}",
+            ),
+            InlineKeyboardButton(
+                "🚫 بستن تیکت",
+                callback_data=f"shop:ticketclose:{ticket_id}",
+            ),
+        ])
+    rows.extend([
+        [InlineKeyboardButton("📬 تیکت‌های من", callback_data="shop:tickets")],
+        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _ticket_confirm_markup(mode: str) -> InlineKeyboardMarkup:
+    clean = "reply" if mode == "reply" else "new"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ارسال", callback_data=f"shop:ticketflow:{clean}:send"),
+            InlineKeyboardButton("✏️ویرایش", callback_data=f"shop:ticketflow:{clean}:edit"),
+        ],
+        [InlineKeyboardButton("❌لغو", callback_data=f"shop:ticketflow:{clean}:cancel")],
+    ])
+
+
+def _ticket_skip_markup(mode: str) -> InlineKeyboardMarkup:
+    clean = "reply" if mode == "reply" else "new"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("▶️رد کردن", callback_data=f"shop:ticketflow:{clean}:skip")],
+        [InlineKeyboardButton("❌لغو", callback_data=f"shop:ticketflow:{clean}:cancel")],
+    ])
+
+
+def _ticket_preview_text(flow: dict[str, Any], *, mode: str) -> str:
+    if mode == "reply":
+        return (
+            "👁 پیش‌نمایش پاسخ تیکت\n\n"
+            f"{str(flow.get('reply_text') or '').strip()}\n\n"
+            f"🖼 تصویر: {'دارد' if flow.get('photo_file_id') else 'ندارد'}"
+        )
+    return (
+        "👁 پیش‌نمایش تیکت\n\n"
+        f"موضوع: {str(flow.get('subject') or '').strip()}\n\n"
+        f"{str(flow.get('body') or '').strip()}\n\n"
+        f"🖼 تصویر: {'دارد' if flow.get('photo_file_id') else 'ندارد'}"
+    )
+
+
+async def _show_ticket_preview(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    flow: dict[str, Any],
+    *,
+    mode: str,
+) -> None:
+    text = _ticket_preview_text(flow, mode=mode)
+    markup = _ticket_confirm_markup(mode)
+    photo_id = str(flow.get("photo_file_id") or "").strip()
+    if photo_id and update.effective_chat is not None:
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=photo_id,
+            caption=text,
+            reply_markup=markup,
+        )
+        return
+    if update.callback_query is not None:
+        try:
+            await update.callback_query.edit_message_text(text, reply_markup=markup)
+            return
+        except Exception:
+            pass
+    if update.effective_message is not None:
+        await update.effective_message.reply_text(text, reply_markup=markup)
+
+
+async def _ticket_media_bytes(
+    context: ContextTypes.DEFAULT_TYPE,
+    file_id: str,
+) -> bytes:
+    if not str(file_id or "").strip():
+        return b""
+    tg_file = await context.bot.get_file(str(file_id))
+    return bytes(await tg_file.download_as_bytearray())
+
+
+def _sibling_admin_bot_token(business: Any) -> str:
+    if business.secret_cipher is None:
+        raise TenantBusinessError("AdminBot encryption is unavailable")
+    row = BotRepository(business.conn).get_by_tenant_role(
+        business.tenant_id, "admin"
+    )
+    if row is None or row.get("status") != "active":
+        raise TenantBusinessError("AdminBot is not active")
+    plain = business.secret_cipher.decrypt(str(row["encrypted_token"]))
+    if fingerprint_token(plain) != str(row["token_fingerprint"]):
+        raise TenantBusinessError("AdminBot credential integrity failed")
+    return plain
+
+
+async def _notify_admin_ticket(
+    business: Any,
+    *,
+    ticket: dict[str, Any],
+    event: str,
+) -> None:
+    token = ""
+    try:
+        token = _sibling_admin_bot_token(business)
+        title = "🆕 تیکت جدید" if event == "new" else "💬 پاسخ جدید تیکت"
+        async with Bot(token=token) as bot:
+            await bot.send_message(
+                chat_id=int(business.owner_telegram_id),
+                text=(
+                    f"{title}\n"
+                    f"🎫 #{int(ticket['id'])}\n"
+                    f"👤 {ticket.get('display_name') or ticket.get('username') or ticket.get('telegram_user_id') or '-'}\n"
+                    f"موضوع: {ticket.get('subject') or '-'}"
+                ),
+            )
+    except Exception:
+        return
+    finally:
+        token = ""
 
 
 def _referral_content(
