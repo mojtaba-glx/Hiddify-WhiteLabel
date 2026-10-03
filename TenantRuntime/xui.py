@@ -517,6 +517,10 @@ class _Session:
 class XuiPanelAdapter:
     """Synchronous PanelAdapter implementation for Sanaei and Alireza."""
 
+    def download_backup(self, *, target: PanelTarget, secret: str):
+        from TenantRuntime.panel_backups import download_xui
+        return download_xui(self, target, secret)
+
     def __init__(
         self,
         *,

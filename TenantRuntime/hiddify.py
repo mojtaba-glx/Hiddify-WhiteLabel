@@ -209,6 +209,10 @@ def _normalize_state_payload(payload: dict[str, Any], panel_major: int) -> dict[
 class HiddifyPanelAdapter:
     """Synchronous Hiddify v11/v12/v13 adapter used behind the runtime boundary."""
 
+    def download_backup(self, *, target: PanelTarget, secret: str):
+        from TenantRuntime.panel_backups import download_hiddify
+        return download_hiddify(self, target, secret)
+
     def __init__(
         self,
         *,

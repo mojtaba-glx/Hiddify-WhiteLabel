@@ -2338,10 +2338,8 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 return
 
             if text == BTN_BACKUP:
-                await update.effective_message.reply_text(
-                    "📫 بکاپ Tenant هنوز به‌صورت مستقل و امن منتقل نشده است. "
-                    "بکاپ سراسری Master به ادمین Tenant نمایش داده نمی‌شود."
-                )
+                from TenantRuntime.AdminBot.full_backup import send_full_backup
+                await send_full_backup(update, context, business, actor)
                 return
 
         from TenantRuntime.AdminBot import userbot_management
@@ -3131,4 +3129,3 @@ def register_admin_handlers(application: Application) -> None:
         MessageHandler(filters.TEXT & ~filters.COMMAND, unknown_text), group=0
     )
     application.add_error_handler(runtime_error)
-

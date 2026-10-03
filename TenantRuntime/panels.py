@@ -101,6 +101,7 @@ def decode_panel_note(raw: object) -> dict:
 
 
 class PanelAdapter(Protocol):
+    def download_backup(self, *, target: PanelTarget, secret: str): ...
     def inspect_connection(self, *, target: PanelTarget, secret: str) -> dict: ...
 
     def server_stats(self, *, target: PanelTarget, secret: str) -> dict: ...
@@ -244,6 +245,12 @@ class RoutedPanelAdapter:
         if not isinstance(data, dict):
             raise PanelError("panel server status is invalid")
         return data
+
+    def download_backup(self, *, target: PanelTarget, secret: str):
+        method = getattr(self._adapter(target), "download_backup", None)
+        if not callable(method):
+            raise PanelError("panel backup download is unavailable")
+        return method(target=target, secret=secret)
 
     def update_user(self, *, target: PanelTarget, secret: str,
                     external_ref: str, changes: dict) -> PanelUserResult:

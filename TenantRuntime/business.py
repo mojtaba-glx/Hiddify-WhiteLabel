@@ -1026,13 +1026,13 @@ class TenantBusinessService:
             xnet_api_url=str(server.get("xnet_api_url") or "").strip(),
         )
     def _panel_material(
-        self, server_id: int
+        self, server_id: int, *, allow_inactive: bool = False
     ) -> tuple[dict[str, Any], PanelTarget, str]:
         server = self.server(server_id)
         endpoint = str(server.get("endpoint") or "").strip()
         kind = str(server["panel_kind"])
         if (
-            str(server["status"]) != "active"
+            (str(server["status"]) != "active" and not allow_inactive)
             or not endpoint
             or kind == "manual"
         ):
