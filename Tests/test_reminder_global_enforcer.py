@@ -357,6 +357,120 @@ def test_reminders_are_period_scoped_and_deduplicated(
     assert all(row["status"] == "sent" for row in sent)
 
 
+def test_lifecycle_stops_already_queued_reminders_when_admin_disables_them(
+    conn, db_path, factories, cipher
+) -> None:
+    state = _setup(conn, factories, cipher)
+    sub_id = int(state["subscription"]["id"])
+    tenant_id = int(state["tenant"]["id"])
+    now = utcnow()
+    conn.execute(
+        "UPDATE tenant_subscriptions SET expires_at=?, usage_bytes=? "
+        "WHERE id=? AND tenant_id=?",
+        (
+            iso_utc(now + timedelta(days=2, minutes=5)),
+            18 * 1024**3,
+            sub_id,
+            tenant_id,
+        ),
+    )
+    tr = state["nodes"]["https://tr.example"]
+    state["panel"].users[
+        ("https://tr.example", str(tr["external_ref"]))
+    ]["usage"] = 18 * 1024**3
+
+    queued = enqueue_due_reminders(
+        conn,
+        tenant_id=tenant_id,
+        days_threshold=3,
+        remaining_gb_threshold=3,
+        now=now,
+    )
+    assert queued == 2
+    state["service"].set_userbot_setting_admin(
+        state["owner"],
+        key="reminder_enabled",
+        value=False,
+    )
+
+    sender = FakeReminderSender()
+    coordinator = TenantLifecycleCoordinator(
+        db_path=db_path,
+        cipher=cipher,
+        shard_count=1,
+        shard_index=0,
+        panel_adapter_factory=lambda: state["panel"],
+        reminder_sender=sender,
+    )
+    report = asyncio.run(coordinator.run_once())
+    assert report.reminders_sent == 0
+    assert report.reminders_skipped >= 2
+    assert sender.deliveries == []
+
+    statuses = conn.execute(
+        "SELECT status FROM tenant_subscription_notifications "
+        "WHERE tenant_id=? AND subscription_id=?",
+        (tenant_id, sub_id),
+    ).fetchall()
+    assert statuses
+    assert all(row["status"] == "skipped" for row in statuses)
+
+
+def test_lifecycle_discards_queued_events_outside_new_admin_thresholds(
+    conn, db_path, factories, cipher
+) -> None:
+    state = _setup(conn, factories, cipher)
+    sub_id = int(state["subscription"]["id"])
+    tenant_id = int(state["tenant"]["id"])
+    now = utcnow()
+    conn.execute(
+        "UPDATE tenant_subscriptions SET expires_at=?, usage_bytes=? "
+        "WHERE id=? AND tenant_id=?",
+        (
+            iso_utc(now + timedelta(days=2, minutes=5)),
+            18 * 1024**3,
+            sub_id,
+            tenant_id,
+        ),
+    )
+    tr = state["nodes"]["https://tr.example"]
+    state["panel"].users[
+        ("https://tr.example", str(tr["external_ref"]))
+    ]["usage"] = 18 * 1024**3
+
+    assert enqueue_due_reminders(
+        conn,
+        tenant_id=tenant_id,
+        days_threshold=3,
+        remaining_gb_threshold=3,
+        now=now,
+    ) == 2
+    state["service"].set_userbot_setting_admin(
+        state["owner"],
+        key="reminder_days",
+        value=1,
+    )
+    state["service"].set_userbot_setting_admin(
+        state["owner"],
+        key="reminder_remaining_gb",
+        value=1,
+    )
+
+    sender = FakeReminderSender()
+    coordinator = TenantLifecycleCoordinator(
+        db_path=db_path,
+        cipher=cipher,
+        shard_count=1,
+        shard_index=0,
+        panel_adapter_factory=lambda: state["panel"],
+        reminder_sender=sender,
+    )
+    report = asyncio.run(coordinator.run_once())
+    assert report.reminders_sent == 0
+    assert report.reminders_skipped >= 2
+    assert sender.deliveries == []
+
+
 def test_expired_notice_is_sent_once_after_verified_enforcement(
     conn, db_path, factories, cipher
 ) -> None:
