@@ -1367,6 +1367,7 @@ class TenantBusinessService:
         referral_max_rewards: int | None = None,
         referral_currency: str | None = None,
         trial_enabled: bool | None = None,
+        trial_announce_enabled: bool | None = None,
         trial_traffic_gb: int | None = None,
         trial_duration_days: int | None = None,
     ) -> dict[str, Any]:
@@ -1408,6 +1409,11 @@ class TenantBusinessService:
                 if trial_enabled is None
                 else bool(trial_enabled)
             ),
+            "trial_announce_enabled": int(
+                bool(current["trial_announce_enabled"])
+                if trial_announce_enabled is None
+                else bool(trial_announce_enabled)
+            ),
             "trial_traffic_gb": int(
                 current["trial_traffic_gb"]
                 if trial_traffic_gb is None
@@ -1439,7 +1445,8 @@ class TenantBusinessService:
                 "referral_enabled=?, referral_trial_reward=?, "
                 "referral_purchase_reward=?, referral_min_purchase=?, "
                 "referral_max_rewards=?, referral_currency=?, trial_enabled=?, "
-                "trial_traffic_gb=?, trial_duration_days=?, updated_at=? "
+                "trial_announce_enabled=?, trial_traffic_gb=?, "
+                "trial_duration_days=?, updated_at=? "
                 "WHERE tenant_id=?",
                 (
                     values["referral_enabled"],
@@ -1449,6 +1456,7 @@ class TenantBusinessService:
                     values["referral_max_rewards"],
                     values["referral_currency"],
                     values["trial_enabled"],
+                    values["trial_announce_enabled"],
                     values["trial_traffic_gb"],
                     values["trial_duration_days"],
                     now,
