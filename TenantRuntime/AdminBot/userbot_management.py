@@ -2031,7 +2031,14 @@ async def handle_callback(
     data = str(query.data or "")
 
     # Phase 13 owns broadcast/channel callbacks before the legacy partial
-    # branches below can answer or mutate state.
+    # branches below can answer or mutate state. Clear a pre-v0.50 stale
+    # broadcast/channel wizard so it cannot consume a later admin message.
+    if (
+        data == "userbot:broadcast_menu"
+        or data.startswith("userbot:broadcast:")
+        or data.startswith("channelpost:")
+    ):
+        context.user_data.pop(FLOW_KEY, None)
     from TenantRuntime.AdminBot import broadcast_channel
     from TenantRuntime.AdminBot.handlers import admin_main_keyboard
     try:
