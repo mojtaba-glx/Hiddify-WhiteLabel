@@ -929,6 +929,18 @@ class XuiPanelAdapter:
                     total_up += max(0, int(up))
                     total_down += max(0, int(down))
 
+            if total_up == 0 and total_down == 0:
+                # Modern Sanaei keeps aggregate per-client traffic on the
+                # global clients/list rows instead of inbound clientStats.
+                for client in clients:
+                    traffic = (
+                        client.get("traffic")
+                        if isinstance(client.get("traffic"), dict)
+                        else {}
+                    )
+                    total_up += max(0, _safe_int(traffic.get("up"), 0))
+                    total_down += max(0, _safe_int(traffic.get("down"), 0))
+
             total_usage = sum(
                 max(0, int(user.get("usage_bytes") or 0))
                 for user in users
