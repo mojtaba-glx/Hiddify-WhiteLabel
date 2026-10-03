@@ -364,6 +364,58 @@ class _Session:
                 raise PanelError("X-NET returned invalid JSON") from exc
 
 
+    def raw_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: Any = None,
+        params: dict[str, Any] | None = None,
+        auth: bool = True,
+    ) -> httpx.Response:
+        """Binary-capable request with the same token/JWT fallback as JSON calls."""
+        attempts = 0
+        while True:
+            attempts += 1
+            token = ""
+            using_api_token = False
+            if auth:
+                token, using_api_token = self._auth_token()
+            headers = {"Accept": "*/*"}
+            if payload is not None:
+                headers["Content-Type"] = "application/json"
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            try:
+                response = self.client.request(
+                    method.upper(),
+                    f"{self.base}/{path.lstrip('/')}",
+                    headers=headers,
+                    json=payload,
+                    params=params,
+                )
+            except httpx.TransportError as exc:
+                raise PanelError("X-NET backup connection failed") from exc
+            if auth and response.status_code in {401, 403} and attempts <= 2:
+                if using_api_token:
+                    self._api_token_rejected = True
+                    self._jwt = ""
+                    if not self.credential.get("password"):
+                        raise PanelError(
+                            "X-NET API token was rejected and no fallback is configured"
+                        )
+                    self._login(force=False)
+                    continue
+                if self.credential.get("password"):
+                    self.adapter._drop_jwt(self._cache_key)
+                    self._jwt = ""
+                    self._login(force=True)
+                    continue
+            if response.status_code >= 400:
+                raise _StatusError(response.status_code)
+            return response
+
+
 class XnetPanelAdapter:
     """Synchronous PanelAdapter implementation for X-NET."""
 
@@ -749,6 +801,96 @@ class XnetPanelAdapter:
                 if changes.get("reset_usage"):
                     session.request("POST", path + "/reset-traffic")
             return self._snapshot(session, external_ref, inbounds=self._inbounds(session))
+
+    def server_backup(self, *, target: PanelTarget, secret: str) -> dict:
+        """Create, download and best-effort delete a fresh X-NET backup."""
+        with self._session(target, secret) as session:
+            created = session.request("POST", "/api/backups")
+            meta: dict[str, Any] = {}
+            if isinstance(created, dict):
+                for key in ("data", "backup", "result"):
+                    nested = created.get(key)
+                    if isinstance(nested, dict):
+                        meta = dict(nested)
+                        break
+                if not meta:
+                    meta = dict(created)
+            backup_id = str(
+                meta.get("id")
+                or meta.get("backupId")
+                or meta.get("backup_id")
+                or ""
+            ).strip()
+            if not backup_id:
+                listed = session.request("GET", "/api/backups")
+                rows: list[dict[str, Any]] = []
+                if isinstance(listed, list):
+                    rows = [dict(x) for x in listed if isinstance(x, dict)]
+                elif isinstance(listed, dict):
+                    for key in ("data", "backups", "items", "result"):
+                        nested = listed.get(key)
+                        if isinstance(nested, list):
+                            rows = [dict(x) for x in nested if isinstance(x, dict)]
+                            break
+                if rows:
+                    rows.sort(
+                        key=lambda row: str(
+                            row.get("createdAt")
+                            or row.get("created_at")
+                            or row.get("timestamp")
+                            or ""
+                        ),
+                        reverse=True,
+                    )
+                    meta = rows[0]
+                    backup_id = str(
+                        meta.get("id")
+                        or meta.get("backupId")
+                        or meta.get("backup_id")
+                        or ""
+                    ).strip()
+            if not backup_id:
+                raise PanelError("X-NET backup id was not returned")
+
+            quoted_id = quote(backup_id, safe="")
+            download_path = f"/api/backups/{quoted_id}/download"
+            response = session.raw_request("GET", download_path)
+            content = bytes(response.content or b"")
+            if not content:
+                raise PanelError("X-NET backup is empty")
+
+            filename = str(
+                meta.get("filename")
+                or meta.get("fileName")
+                or meta.get("name")
+                or ""
+            ).strip()
+            if not filename:
+                disposition = str(response.headers.get("content-disposition") or "")
+                marker = "filename="
+                if marker in disposition.lower():
+                    pos = disposition.lower().find(marker)
+                    filename = disposition[pos + len(marker):].split(";", 1)[0]
+                    filename = filename.strip().strip("'\"")
+            filename = filename.replace("\\", "/").split("/")[-1].strip()
+            filename = "".join(
+                ch if (ch.isalnum() or ch in "._- @()") else "_"
+                for ch in filename
+            ).strip(" .")
+            if not filename:
+                host = urlsplit(_clean_base(target.xnet_api_url or target.endpoint)).hostname or "xnet"
+                stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+                filename = f"xnet-{host}-{stamp}.db"
+
+            try:
+                session.request("DELETE", f"/api/backups/{quoted_id}")
+            except PanelError:
+                pass
+            return {
+                "filename": filename,
+                "content": content,
+                "source_url": f"{session.base}{download_path}",
+            }
 
     def server_stats(self, *, target: PanelTarget, secret: str) -> dict:
         """SellBot-compatible X-NET system, traffic and presence statistics."""
