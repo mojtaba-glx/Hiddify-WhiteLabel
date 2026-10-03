@@ -554,6 +554,7 @@ def create_tenant_full_backup(
     full_manifest_items: list[dict[str, Any]] = []
     used_names: set[str] = set()
     shared_members = _shared_export_members(snapshot)
+    shared_members["Shared/manifest.json"] = tenant_manifest
 
     bot_files: list[dict[str, Any]] = [
         {
