@@ -25,6 +25,11 @@ from Shared.crypto import fingerprint_token
 from Shared.timeutils import iso_utc, utcnow
 from TenantRuntime.business import TenantBusinessError
 from TenantRuntime.backup import create_tenant_backup, restore_tenant_backup
+from TenantRuntime.legacy_sellbot_restore import (
+    LEGACY_FORMAT as SELLBOT_LEGACY_FORMAT,
+    is_sellbot_backup,
+    restore_sellbot_backup,
+)
 from TenantRuntime.button_styles import (
     inline_button as InlineKeyboardButton,
     keyboard_button as KeyboardButton,
@@ -2174,10 +2179,23 @@ async def _send_backup(
 
 
 async def _restore_backup(business: Any, data: bytes):
+    raw = bytes(data)
+    if is_sellbot_backup(raw):
+        if business.secret_cipher is None:
+            raise TenantBusinessError(
+                "رمزنگاری Tenant برای بازیابی بکاپ SellBot در دسترس نیست."
+            )
+        return restore_sellbot_backup(
+            business.conn,
+            tenant_id=int(business.tenant_id),
+            owner_telegram_id=int(business.owner_telegram_id),
+            cipher=business.secret_cipher,
+            data=raw,
+        )
     return restore_tenant_backup(
         business.conn,
         tenant_id=int(business.tenant_id),
-        data=bytes(data),
+        data=raw,
     )
 
 
@@ -3722,8 +3740,11 @@ async def handle_callback(
     if data == "userbot:settings:backup:restore":
         context.user_data[FLOW_KEY] = {"kind": "backup_restore"}
         await query.message.reply_text(
-            "📦 فایل بکاپ همین Tenant را ارسال کنید.\n"
-            "فرمت جدید ZIP v2 و JSON قدیمی v1 پشتیبانی می‌شوند.",
+            "📦 فایل بکاپ را ارسال کنید.\n"
+            "• Backup_All ربات اصلی Hiddify-SellBot\n"
+            "• بکاپ ZIP v2 همین WhiteLabel\n"
+            "• JSON قدیمی v1\n\n"
+            "قبل از اعمال، ساختار ZIP، Manifest، SHA-256 و دیتابیس‌ها بررسی می‌شوند.",
             reply_markup=userbot_cancel_keyboard(),
         )
         return True
@@ -4728,11 +4749,35 @@ async def handle_document(
         )
         return True
     context.user_data.pop(FLOW_KEY,None)
+    if str(report.format) == SELLBOT_LEGACY_FORMAT:
+        lines = [
+            "✅ بکاپ اصلی SellBot با موفقیت به Tenant بازیابی شد.",
+            f"👥 کاربران: {int(report.users)}",
+            f"📦 اشتراک‌ها: {int(report.services)}",
+            f"🧾 سفارش‌ها: {int(report.orders)}",
+            f"📩 تیکت‌ها: {int(report.tickets)}",
+            f"🖥 بکاپ پنل‌های حفظ‌شده: {int(report.panel_backups)}",
+            f"🗄 فایل‌های منبع رمزنگاری و حفظ‌شده: {int(report.assets_preserved)}",
+            f"🗂 جداول WhiteLabel: {int(report.tables_restored)}",
+            f"📊 رکوردهای بازیابی‌شده: {int(report.rows_restored)}",
+            "🔐 توکن فعال AdminBot/UserBot فعلی تغییر نکرد.",
+        ]
+        if report.warnings:
+            lines.append(f"⚠️ هشدارهای تبدیل: {len(report.warnings)} مورد")
+        lines.append(
+            "ℹ️ دیتای AgentBot/CustomerBot قدیمی بدون فعال‌کردن منوهای نمایندگی "
+            "به‌صورت رمزنگاری‌شده برای مرحله بعد حفظ شد."
+        )
+        result_text = "\n".join(lines)
+    else:
+        result_text = (
+            "✅ بکاپ Tenant بازیابی شد.\n"
+            f"🗂 جداول: {int(report.tables_restored)}\n"
+            f"📊 رکوردها: {int(report.rows_restored)}\n"
+            f"🧩 فرمت: {report.format}"
+        )
     await update.effective_message.reply_text(
-        "✅ بکاپ Tenant بازیابی شد.\n"
-        f"🗂 جداول: {int(report.tables_restored)}\n"
-        f"📊 رکوردها: {int(report.rows_restored)}\n"
-        f"🧩 فرمت: {report.format}",
+        result_text,
         reply_markup=admin_main_keyboard(),
     )
     await _send_system_event(
