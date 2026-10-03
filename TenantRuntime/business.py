@@ -67,18 +67,63 @@ USERBOT_SETTING_DEFAULTS: dict[str, Any] = {
     "show_smart_link": False,
     "smart_base_url": "",
 
-    # Texts editable from Tenant AdminBot.
-    "welcome_message": "",
-    "faq_text": "",
+    # Texts editable from Tenant AdminBot. Keep these defaults aligned
+    # with the proven Hiddify-SellBot UserBot so a new tenant has useful
+    # output before the owner customizes anything.
+    "welcome_message": "سلام {full_name} عزیز 👋\nبه ربات ما خوش آمدید.",
+    "faq_text": (
+        "❓ سوالات متداول\n\n"
+        "1) لینک اشتراک را کجا بزنم؟\n"
+        "از بخش «📊وضعیت اشتراک» وارد سرویس شوید و روی «لینک اشتراک» بزنید.\n\n"
+        "2) اگر کانفیگ وصل نشد چه کنم؟\n"
+        "اول اینترنت و تاریخ/ساعت گوشی را چک کنید، سپس دوباره وضعیت سرویس را بررسی کنید.\n\n"
+        "3) چطور تمدید کنم؟\n"
+        "از «♾تمدید اشتراک» سرویس را انتخاب کنید و پلن تمدید را بخرید.\n\n"
+        "4) پشتیبانی از کجاست؟\n"
+        "از دکمه «📩پشتیبانی» پیام خود را ارسال کنید."
+    ),
     "guide_text": "انتخاب سیستم عامل ⬇️",
-    "guide_android_text": "",
-    "guide_ios_text": "",
-    "guide_windows_text": "",
-    "guide_mac_text": "",
-    "guide_linux_text": "",
-    "servers_list_text": "",
-    "plans_list_text": "",
-    "ticket_panel_text": "",
+    "guide_android_text": (
+        "📱 راهنمای اندروید\n\n"
+        "1) Hiddify Next را نصب کنید.\n"
+        "2) لینک اشتراک را Import کنید.\n"
+        "3) پروفایل را انتخاب و Connect کنید."
+    ),
+    "guide_ios_text": (
+        "📱 راهنمای iOS\n\n"
+        "1) یک کلاینت سازگار مانند Streisand یا Hiddify نصب کنید.\n"
+        "2) لینک اشتراک را Import کنید.\n"
+        "3) اتصال را فعال کنید."
+    ),
+    "guide_windows_text": (
+        "🖥️ راهنمای ویندوز\n\n"
+        "1) Hiddify Next یا v2rayN را نصب کنید.\n"
+        "2) لینک اشتراک را Paste/Import کنید.\n"
+        "3) پروفایل را انتخاب و Connect کنید."
+    ),
+    "guide_mac_text": (
+        "💻 راهنمای macOS\n\n"
+        "1) یک کلاینت سازگار نصب کنید.\n"
+        "2) لینک اشتراک را Import کنید.\n"
+        "3) اتصال را فعال کنید."
+    ),
+    "guide_linux_text": (
+        "🖥️ راهنمای Linux\n\n"
+        "1) Hiddify Next یا یک کلاینت سازگار نصب کنید.\n"
+        "2) لینک اشتراک را Import کنید.\n"
+        "3) اتصال را فعال کنید."
+    ),
+    "servers_list_text": "📡 لیست سرورها\nلطفاً لوکیشن مورد نظر خود را انتخاب کنید:",
+    "plans_list_text": "🛒 لطفاً پلن مورد نظر خود را انتخاب کنید:",
+    "ticket_panel_text": "📩 برای ارتباط با پشتیبانی، پیام خود را ارسال کنید.",
+    "invite_text": "💌 لینک دعوت شما:\n{invite_link}",
+    "invite_info_text": "🎁 دوستان خود را دعوت کنید و از پاداش‌های فعال بهره‌مند شوید.",
+    "invite_banner_text": (
+        "🎁 بنر دعوت اختصاصی شما\n\n"
+        "🔗 لینک دعوت شما:\n{invite_link}\n\n"
+        "دوستانت را دعوت کن و از مزایای ویژه بهره‌مند شو."
+    ),
+    "invite_banner_photo_id": "",
     "force_join_help_text": (
         "برای فعال شدن عضویت اجباری، UserBot باید در کانال مقصد دسترسی "
         "لازم برای بررسی عضویت کاربران را داشته باشد."
@@ -5746,6 +5791,26 @@ class TenantBusinessService:
                 raise ValueError("unlimited time threshold out of range")
         else:
             clean = str(value or "").strip()
+            text_reset_keys = {
+                "welcome_message",
+                "faq_text",
+                "guide_text",
+                "guide_android_text",
+                "guide_ios_text",
+                "guide_windows_text",
+                "guide_mac_text",
+                "guide_linux_text",
+                "servers_list_text",
+                "plans_list_text",
+                "ticket_panel_text",
+                "invite_text",
+                "invite_info_text",
+                "invite_banner_text",
+            }
+            if name in text_reset_keys and clean in ("0", "-", "—"):
+                clean = str(USERBOT_SETTING_DEFAULTS[name])
+            elif name == "invite_banner_photo_id" and clean in ("0", "-", "—"):
+                clean = ""
             if len(clean) > 4000:
                 raise ValueError("setting text is too long")
             if name == "button_theme" and clean not in (
