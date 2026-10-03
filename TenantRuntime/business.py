@@ -16,6 +16,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
+from urllib.parse import quote, urlsplit
 
 from Database.connection import transaction
 from Shared.crypto import TokenCipher, TokenCipherError, fingerprint_token
@@ -56,10 +57,14 @@ USERBOT_SETTING_DEFAULTS: dict[str, Any] = {
     "shuffle_server_layout": True,
     "shuffle_config_layout": True,
     "show_direct_config": True,
+    "show_auto_sub_link": False,
     "show_sub_link": True,
-    # WhiteLabel's multi-node smart link is the functional equivalent used by
-    # the tenant runtime. Keep the legacy key for already provisioned tenants.
-    "show_smart_link": True,
+    "show_sub_link_b64": False,
+    "show_multi_server": False,
+    "show_multi_server_b64": False,
+    # Deprecated compatibility key from pre-v0.15 tenants. Runtime link
+    # visibility uses the explicit SellBot-compatible keys above.
+    "show_smart_link": False,
     "smart_base_url": "",
 
     # Texts editable from Tenant AdminBot.
@@ -1107,7 +1112,13 @@ class TenantBusinessService:
         assert row is not None
         return dict(row)
 
-    def _smart_url(self, *, subscription_id: int, label: str = "") -> str:
+    def _smart_url(
+        self,
+        *,
+        subscription_id: int,
+        label: str = "",
+        base64_output: bool = True,
+    ) -> str:
         link = self._ensure_subscription_smart_link(
             subscription_id=int(subscription_id), label=label
         )
@@ -1121,7 +1132,11 @@ class TenantBusinessService:
             return ""
         from TenantRuntime.smart_subscription import smart_subscription_url
 
-        return smart_subscription_url(public_base, str(link["code"]))
+        return smart_subscription_url(
+            public_base,
+            str(link["code"]),
+            base64_output=bool(base64_output),
+        )
 
     def repair_subscription_nodes(
         self, actor_id: int, *, subscription_id: int
@@ -5534,6 +5549,18 @@ class TenantBusinessService:
                 "add", "reset"
             ):
                 raise ValueError("invalid renewal rollover mode")
+            if name == "smart_base_url" and clean:
+                parsed = urlsplit(clean)
+                if (
+                    str(parsed.scheme or "").lower() not in ("http", "https")
+                    or not parsed.hostname
+                    or parsed.username
+                    or parsed.password
+                    or parsed.query
+                    or parsed.fragment
+                ):
+                    raise ValueError("invalid smart subscription base url")
+                clean = clean.rstrip("/")
         now = iso_utc(utcnow())
         with transaction(self.conn):
             self.conn.execute(
