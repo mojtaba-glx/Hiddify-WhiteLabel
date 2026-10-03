@@ -23,11 +23,14 @@ import json
 import sqlite3
 import zipfile
 from dataclasses import dataclass
+from io import BytesIO
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from Database.connection import transaction
+from Database.repositories import BotRepository
+from Shared.crypto import TokenCipher, fingerprint_token
 from Shared.timeutils import iso_utc, parse_utc, utcnow
 
 
@@ -71,6 +74,62 @@ class TenantRestoreReport:
     tables_restored: int
     rows_restored: int
     table_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AutoBackupDelivery:
+    tenant_id: int
+    owner_telegram_id: int
+    slot_key: str
+    bot_token: str
+    event_target: str
+    artifact: TenantBackupArtifact
+
+
+class AutoBackupSender:
+    async def send(self, delivery: AutoBackupDelivery) -> None:
+        raise NotImplementedError
+
+
+class TelegramAutoBackupSender(AutoBackupSender):
+    """Deliver auto backups with the Tenant's own AdminBot credential."""
+
+    async def send(self, delivery: AutoBackupDelivery) -> None:
+        from telegram import Bot
+
+        caption = (
+            "⏰ بکاپ خودکار کامل Tenant\n"
+            f"🕐 بازه: {delivery.slot_key}\n"
+            f"🗂 جداول: {delivery.artifact.table_count}\n"
+            f"📊 رکوردها: {delivery.artifact.row_count}"
+        )
+        async with Bot(token=delivery.bot_token) as bot:
+            primary = BytesIO(delivery.artifact.data)
+            primary.name = delivery.artifact.filename
+            await bot.send_document(
+                chat_id=int(delivery.owner_telegram_id),
+                document=primary,
+                filename=delivery.artifact.filename,
+                caption=caption,
+            )
+            target = str(delivery.event_target or "").strip()
+            if target and target != str(delivery.owner_telegram_id):
+                try:
+                    event_file = BytesIO(delivery.artifact.data)
+                    event_file.name = delivery.artifact.filename
+                    chat_target: Any = (
+                        int(target) if target.lstrip("-").isdigit() else target
+                    )
+                    await bot.send_document(
+                        chat_id=chat_target,
+                        document=event_file,
+                        filename=delivery.artifact.filename,
+                        caption=caption,
+                    )
+                except Exception:
+                    # Event-channel delivery is secondary. Owner delivery is the
+                    # durable success criterion, matching SellBot behavior.
+                    pass
 
 
 def _qid(name: str) -> str:
@@ -640,6 +699,103 @@ def finish_auto_backup_slot(
         )
         if changed.rowcount != 1:
             raise TenantBackupError("auto-backup slot is not claimed")
+
+
+def _active_admin_bot_token(
+    conn: sqlite3.Connection,
+    *,
+    tenant_id: int,
+    cipher: TokenCipher,
+) -> str:
+    row = BotRepository(conn).get_by_tenant_role(int(tenant_id), "admin")
+    if row is None or str(row.get("status") or "") != "active":
+        raise TenantBackupError("tenant AdminBot is not active")
+    token = cipher.decrypt(str(row["encrypted_token"]))
+    if fingerprint_token(token) != str(row["token_fingerprint"]):
+        raise TenantBackupError("tenant AdminBot credential integrity failed")
+    return token
+
+
+def prepare_auto_backup_delivery(
+    conn: sqlite3.Connection,
+    *,
+    tenant_id: int,
+    owner_telegram_id: int,
+    cipher: TokenCipher,
+    settings: dict[str, Any],
+    now: datetime | None = None,
+) -> AutoBackupDelivery | None:
+    """Claim one six-hour slot and build the exact artifact once.
+
+    Returns None when disabled/already completed/currently claimed. Creation or
+    credential errors mark the slot failed so a later lifecycle pass may retry.
+    """
+    if not bool(settings.get("auto_backup_enabled", True)):
+        return None
+    slot = auto_backup_slot_key(now)
+    if not claim_auto_backup_slot(
+        conn,
+        tenant_id=int(tenant_id),
+        slot_key=slot,
+    ):
+        return None
+    try:
+        artifact = create_tenant_backup(
+            conn,
+            tenant_id=int(tenant_id),
+        )
+        token = _active_admin_bot_token(
+            conn,
+            tenant_id=int(tenant_id),
+            cipher=cipher,
+        )
+        target = ""
+        if bool(settings.get("system_event_channel_enabled", False)):
+            target = str(settings.get("system_event_channel_id") or "").strip()
+        return AutoBackupDelivery(
+            tenant_id=int(tenant_id),
+            owner_telegram_id=int(owner_telegram_id),
+            slot_key=slot,
+            bot_token=token,
+            event_target=target,
+            artifact=artifact,
+        )
+    except Exception as exc:
+        try:
+            finish_auto_backup_slot(
+                conn,
+                tenant_id=int(tenant_id),
+                slot_key=slot,
+                success=False,
+                error=type(exc).__name__,
+            )
+        except Exception:
+            pass
+        raise
+
+
+def complete_auto_backup_delivery(
+    conn: sqlite3.Connection,
+    *,
+    delivery: AutoBackupDelivery,
+    success: bool,
+    error: str = "",
+) -> None:
+    finish_auto_backup_slot(
+        conn,
+        tenant_id=int(delivery.tenant_id),
+        slot_key=str(delivery.slot_key),
+        success=bool(success),
+        file_size=len(delivery.artifact.data) if success else 0,
+        sha256=delivery.artifact.sha256 if success else "",
+        error=str(error or ""),
+    )
+    if success:
+        prune_backup_runs(
+            conn,
+            tenant_id=int(delivery.tenant_id),
+            keep=64,
+        )
 
 
 def prune_backup_runs(
