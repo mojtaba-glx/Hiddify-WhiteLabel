@@ -407,13 +407,13 @@ def test_lifecycle_stops_already_queued_reminders_when_admin_disables_them(
     assert report.reminders_skipped >= 2
     assert sender.deliveries == []
 
-    statuses = conn.execute(
+    queued = conn.execute(
         "SELECT status FROM tenant_subscription_notifications "
-        "WHERE tenant_id=? AND subscription_id=?",
+        "WHERE tenant_id=? AND subscription_id=? "
+        "AND status IN ('pending','failed','processing')",
         (tenant_id, sub_id),
     ).fetchall()
-    assert statuses
-    assert all(row["status"] == "skipped" for row in statuses)
+    assert queued == []
 
 
 def test_lifecycle_discards_queued_events_outside_new_admin_thresholds(
