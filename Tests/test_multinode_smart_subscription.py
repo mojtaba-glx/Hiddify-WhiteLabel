@@ -225,7 +225,7 @@ def _setup(conn, factories, cipher):
     }
 
 
-def test_purchase_fans_out_to_all_active_nodes_and_returns_smart_link(
+def test_purchase_fans_out_and_keeps_native_and_smart_links_separate(
     conn, db_path, factories, cipher, monkeypatch
 ) -> None:
     state = _setup(conn, factories, cipher)
@@ -234,8 +234,12 @@ def test_purchase_fans_out_to_all_active_nodes_and_returns_smart_link(
         state["owner"], order_id=state["order_id"]
     )
     assert result["status"] == "active"
-    assert result["subscription_url"].startswith("https://smart.example/sub/")
-    assert result["subscription_url"].endswith("/all.b64")
+    assert result["subscription_url"].startswith("https://tr.example/native/")
+    assert result["smart_subscription_url"].startswith(
+        "https://smart.example/sub/"
+    )
+    assert result["smart_subscription_url"].endswith("/all.txt")
+    assert result["subscription_url"] != result["smart_subscription_url"]
     assert len(state["panel"].provision_calls) == 3
 
     nodes = state["service"].subscription_nodes_admin(
@@ -257,7 +261,8 @@ def test_purchase_fans_out_to_all_active_nodes_and_returns_smart_link(
         if row["target"] == f"subscription:{state['subscription']['id']}"
     ]
     assert len(managed) == 1
-    assert managed[0]["public_url"] == result["subscription_url"]
+    assert managed[0]["public_url"] == result["smart_subscription_url"]
+    assert managed[0]["public_url_b64"].endswith("/all.b64")
 
 
 def test_usage_is_aggregated_across_nodes_and_global_quota_disables_every_node(
