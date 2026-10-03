@@ -137,19 +137,21 @@ def _visible_html_length(value: str) -> int:
     return len(html_unescape(plain))
 
 
-def _validate_body(kind: str, text: str) -> None:
+def _validate_body(
+    kind: str,
+    text: str,
+    *,
+    allow_long_media_text: bool = False,
+) -> None:
     kind = str(kind or "")
     size = _visible_html_length(text)
     if kind == "text":
-        if not text.strip():
-            raise ValueError("empty text")
         if size > MAX_TEXT_LENGTH:
             raise ValueError("text too long")
         return
-    # A media caption longer than Telegram's caption limit is still supported:
-    # it is sent as a separate message after the media.
-    if size > MAX_TEXT_LENGTH:
-        raise ValueError("text too long")
+    limit = MAX_TEXT_LENGTH if allow_long_media_text else MAX_CAPTION_LENGTH
+    if size > limit:
+        raise ValueError("caption too long")
 
 
 def _kind_label(kind: str) -> str:
@@ -320,102 +322,6 @@ def _broadcast_segment_keyboard() -> InlineKeyboardMarkup:
     ]])
 
 
-def _broadcast_menu_markup(draft: dict[str, Any]) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    if draft.get("kind"):
-        rows.extend([
-            [
-                InlineKeyboardButton(
-                    "✏️ ویرایش پیام",
-                    callback_data="userbot:broadcast:edit",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🔘 افزودن دکمه",
-                    callback_data="userbot:broadcast:button",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "👁 پیش‌نمایش",
-                    callback_data="userbot:broadcast:preview",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🚀 انتشار",
-                    callback_data="userbot:broadcast:publish",
-                    style="success",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🧹 پاک کردن دکمه‌ها",
-                    callback_data="userbot:broadcast:clear_buttons",
-                    style="danger",
-                )
-            ],
-        ])
-    rows.extend([
-        [
-            InlineKeyboardButton(
-                "👥 تغییر گروه هدف",
-                callback_data="userbot:broadcast_menu",
-            )
-        ],
-        [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:menu")],
-    ])
-    return InlineKeyboardMarkup(rows)
-
-
-def _broadcast_edit_markup(draft: dict[str, Any]) -> InlineKeyboardMarkup:
-    media_title = (
-        "🖼 افزودن عکس / ویدئو"
-        if str(draft.get("kind") or "") == "text"
-        else "🖼 ویرایش عکس / ویدئو"
-    )
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "📝 ویرایش متن / کپشن",
-                callback_data="userbot:broadcast:edit_text",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                media_title,
-                callback_data="userbot:broadcast:edit_media",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🔄 جایگزینی کامل پیام",
-                callback_data="userbot:broadcast:edit_replace",
-                style="danger",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🔙 بازگشت",
-                callback_data="userbot:broadcast:draft",
-            )
-        ],
-    ])
-
-
-def _broadcast_summary(draft: dict[str, Any], target_count: int) -> str:
-    segment = str(draft.get("segment") or "all")
-    return (
-        "📧 <b>ارسال پیام همگانی</b>\n\n"
-        f"👥 گروه: <b>{SEGMENT_LABELS.get(segment, segment)}</b>\n"
-        f"🎯 تعداد فعلی گیرنده‌ها: <b>{int(target_count)}</b>\n"
-        f"📝 نوع پیام: <b>{_kind_label(str(draft.get('kind') or ''))}</b>\n"
-        f"🔘 تعداد دکمه‌ها: <b>{len(draft.get('buttons') or [])}</b>\n\n"
-        "قبل از انتشار می‌توانید پیش‌نمایش را بررسی یا پیام را ویرایش کنید."
-    )
-
-
 async def show_broadcast_menu(
     update: Update, business: Any, actor: int
 ) -> None:
@@ -424,23 +330,6 @@ async def show_broadcast_menu(
         update,
         _broadcast_stats_text(stats),
         _broadcast_segment_keyboard(),
-    )
-
-
-async def _show_broadcast_draft(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    business: Any,
-    actor: int,
-) -> None:
-    draft = _broadcast_draft(context)
-    segment = str(draft.get("segment") or "all")
-    targets = business.broadcast_targets_admin(actor, segment=segment)
-    await _edit_or_send(
-        update,
-        _broadcast_summary(draft, len(targets)),
-        _broadcast_menu_markup(draft),
-        parse_mode="HTML",
     )
 
 
@@ -520,49 +409,57 @@ async def _send_broadcast(
     draft: dict[str, Any],
 ) -> dict[str, int]:
     segment = str(draft.get("segment") or "all")
+    text = str(draft.get("text") or "").strip()
+    if not text:
+        raise ValueError("empty broadcast")
+    _validate_body("text", text)
+
+    photo_file_id = (
+        str(draft.get("file_id") or "").strip()
+        if str(draft.get("kind") or "") == "photo"
+        else ""
+    )
+    message_kind = "photo" if photo_file_id else "text"
     targets = business.broadcast_targets_admin(actor, segment=segment)
-    kind = str(draft.get("kind") or "text")
-    text = str(draft.get("text") or "")
-    _validate_body(kind, text)
-    buttons = list(draft.get("buttons") or [])
 
     if not targets:
         run_id = business.start_broadcast_run_admin(
             actor,
             segment=segment,
-            message_kind=kind,
+            message_kind=message_kind,
             target_count=0,
-            buttons_count=len(buttons),
+            buttons_count=0,
         )
         business.finish_broadcast_run_admin(
             actor, run_id=run_id, sent=0, failed=0
         )
         return {
-            "target": 0, "sent": 0, "failed": 0, "recovered": 0,
-            "unreachable": 0, "temporary": 0, "telegram": 0, "other": 0,
+            "target": 0,
+            "sent": 0,
+            "failed": 0,
+            "recovered": 0,
+            "unreachable": 0,
+            "temporary": 0,
+            "telegram": 0,
+            "other": 0,
         }
 
-    media_bytes = b""
-    if kind in {"photo", "video"}:
-        media_bytes = await _download_admin_media(
-            context, str(draft.get("file_id") or "")
-        )
+    photo_bytes = b""
+    if photo_file_id:
+        photo_bytes = await _download_admin_media(context, photo_file_id)
 
-    # Verify the sibling credential before opening an audit run. A missing or
-    # corrupt UserBot token is a setup error, not a completed delivery run.
     token = _sibling_user_bot_token(business)
     run_id = business.start_broadcast_run_admin(
         actor,
         segment=segment,
-        message_kind=kind,
+        message_kind=message_kind,
         target_count=len(targets),
-        buttons_count=len(buttons),
+        buttons_count=0,
     )
 
-    markup = _markup(draft)
     sent = failed = recovered = 0
     unreachable = temporary = telegram_error = other = 0
-    reusable_file_id = ""
+    reusable_userbot_photo_id = ""
 
     try:
         async with Bot(token=token) as bot:
@@ -571,68 +468,43 @@ async def _send_broadcast(
                 recipient_retried = False
                 category = ""
                 ok = False
-                long_caption = (
-                    kind in {"photo", "video"}
-                    and _visible_html_length(text) > MAX_CAPTION_LENGTH
-                )
 
-                if kind == "text":
-                    async def send_text():
-                        return await bot.send_message(
+                if photo_file_id:
+                    async def send_photo():
+                        if reusable_userbot_photo_id:
+                            outgoing: Any = reusable_userbot_photo_id
+                        else:
+                            outgoing = BytesIO(photo_bytes)
+                            outgoing.name = "broadcast.jpg"
+                        if len(text) <= MAX_CAPTION_LENGTH:
+                            return await bot.send_photo(
+                                chat_id=chat_id,
+                                photo=outgoing,
+                                caption=text,
+                            )
+                        return await bot.send_photo(
                             chat_id=chat_id,
-                            text=text,
-                            parse_mode="HTML",
-                            reply_markup=markup,
+                            photo=outgoing,
                         )
 
-                    ok, _, category, retries, _ = await _send_with_retry(
-                        send_text
-                    )
-                    recipient_retried = retries > 0
-                else:
-                    async def send_media():
-                        if reusable_file_id:
-                            media: Any = reusable_file_id
-                        else:
-                            media = BytesIO(media_bytes)
-                            media.name = (
-                                "broadcast.jpg"
-                                if kind == "photo"
-                                else "broadcast.mp4"
-                            )
-                        kwargs = {
-                            "chat_id": chat_id,
-                            "caption": None if long_caption else (text or None),
-                            "parse_mode": "HTML",
-                            "reply_markup": None if long_caption else markup,
-                        }
-                        if kind == "photo":
-                            return await bot.send_photo(photo=media, **kwargs)
-                        return await bot.send_video(video=media, **kwargs)
-
                     ok, sent_media, category, retries, _ = (
-                        await _send_with_retry(send_media)
+                        await _send_with_retry(send_photo)
                     )
                     recipient_retried = retries > 0
-                    if ok and not reusable_file_id:
-                        if kind == "photo":
-                            photos = list(
-                                getattr(sent_media, "photo", None) or []
-                            )
-                            if photos:
-                                reusable_file_id = str(photos[-1].file_id)
-                        else:
-                            video = getattr(sent_media, "video", None)
-                            if video is not None:
-                                reusable_file_id = str(video.file_id)
+                    if ok and not reusable_userbot_photo_id:
+                        photos = list(
+                            getattr(sent_media, "photo", None) or []
+                        )
+                        if photos:
+                            reusable_userbot_photo_id = str(
+                                getattr(photos[-1], "file_id", "") or ""
+                            ).strip()
 
-                    if ok and long_caption and text:
+                    if ok and len(text) > MAX_CAPTION_LENGTH:
                         async def send_long_text():
                             return await bot.send_message(
                                 chat_id=chat_id,
                                 text=text,
-                                parse_mode="HTML",
-                                reply_markup=markup,
                             )
 
                         ok, _, category, retries2, _ = (
@@ -641,6 +513,17 @@ async def _send_broadcast(
                         recipient_retried = (
                             recipient_retried or retries2 > 0
                         )
+                else:
+                    async def send_text():
+                        return await bot.send_message(
+                            chat_id=chat_id,
+                            text=text,
+                        )
+
+                    ok, _, category, retries, _ = (
+                        await _send_with_retry(send_text)
+                    )
+                    recipient_retried = retries > 0
 
                 if ok:
                     sent += 1
@@ -656,11 +539,8 @@ async def _send_broadcast(
                         telegram_error += 1
                     else:
                         other += 1
-                # Same safe pacing used by SellBot; RetryAfter takes priority.
                 await asyncio.sleep(0.06)
     except Exception:
-        # Bot initialization/shutdown failures are uncommon, but the audit row
-        # must never remain permanently "running".
         remaining = max(0, len(targets) - sent - failed)
         failed += remaining
         other += remaining
@@ -754,18 +634,21 @@ def _channel_admin_menu(draft: dict[str, Any]) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     "✏️ ویرایش پست",
                     callback_data="channelpost:edit",
+                    style="primary",
                 )
             ],
             [
                 InlineKeyboardButton(
                     "🔘 افزودن دکمه",
                     callback_data="channelpost:button",
+                    style="primary",
                 )
             ],
             [
                 InlineKeyboardButton(
                     "👁 پیش‌نمایش",
                     callback_data="channelpost:preview",
+                    style="primary",
                 )
             ],
             [
@@ -783,19 +666,12 @@ def _channel_admin_menu(draft: dict[str, Any]) -> InlineKeyboardMarkup:
                 )
             ],
         ])
-    rows.extend([
-        [
-            InlineKeyboardButton(
-                "⚙️ تنظیم کانال مقصد",
-                callback_data="channelpost:set",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🔙 بازگشت به مدیریت ربات کاربران",
-                callback_data="userbot:menu",
-            )
-        ],
+    rows.append([
+        InlineKeyboardButton(
+            "🔙 بازگشت به مدیریت ربات کاربران",
+            callback_data="channelpost:back_userbot",
+            style="primary",
+        )
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -811,12 +687,14 @@ def _channel_edit_markup(draft: dict[str, Any]) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 "📝 ویرایش متن / کپشن",
                 callback_data="channelpost:edit_text",
+                style="primary",
             )
         ],
         [
             InlineKeyboardButton(
                 media_title,
                 callback_data="channelpost:edit_media",
+                style="primary",
             )
         ],
         [
@@ -830,6 +708,7 @@ def _channel_edit_markup(draft: dict[str, Any]) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 "🔙 بازگشت",
                 callback_data="channelpost:menu",
+                style="primary",
             )
         ],
     ])
@@ -843,7 +722,11 @@ async def _show_channel_menu(
 ) -> None:
     settings = business.userbot_settings_admin(actor)
     draft = _channel_draft(context)
-    target = str(settings.get("channel_id") or "").strip() or "تنظیم نشده"
+    target = str(
+        settings.get("channel_id")
+        or settings.get("force_join_channel")
+        or ""
+    ).strip() or "تنظیم نشده"
     text = (
         "📢 <b>مدیریت پست کانال</b>\n\n"
         f"📝 نوع پست: <b>{_kind_label(str(draft.get('kind') or ''))}</b>\n"
@@ -866,10 +749,16 @@ async def _publish_channel(
 ) -> bool:
     draft = _channel_draft(context)
     settings = business.userbot_settings_admin(actor)
-    target = str(settings.get("channel_id") or "").strip()
+    target = str(
+        settings.get("channel_id")
+        or settings.get("force_join_channel")
+        or ""
+    ).strip()
     if not target:
         await update.effective_message.reply_text(
-            "❌ کانال مقصد تنظیم نشده است."
+            "❌ کانال مقصد تنظیم نشده است.\n"
+            "اگر کانال عضویت اجباری در ربات کاربران تنظیم شده باشد "
+            "همان کانال استفاده می‌شود."
         )
         return False
     kind = str(draft.get("kind") or "")
@@ -887,7 +776,7 @@ async def _publish_channel(
             if kind == "text":
                 sent = await bot.send_message(
                     chat_id=target,
-                    text=text,
+                    text=text or " ",
                     parse_mode="HTML",
                     reply_markup=markup,
                 )
@@ -899,29 +788,19 @@ async def _publish_channel(
                 stream.name = (
                     "channel.jpg" if kind == "photo" else "channel.mp4"
                 )
-                long_caption = (
-                    _visible_html_length(text) > MAX_CAPTION_LENGTH
-                )
                 if kind == "photo":
                     sent = await bot.send_photo(
                         chat_id=target,
                         photo=stream,
-                        caption=None if long_caption else (text or None),
+                        caption=text or None,
                         parse_mode="HTML",
-                        reply_markup=None if long_caption else markup,
+                        reply_markup=markup,
                     )
                 else:
                     sent = await bot.send_video(
                         chat_id=target,
                         video=stream,
-                        caption=None if long_caption else (text or None),
-                        parse_mode="HTML",
-                        reply_markup=None if long_caption else markup,
-                    )
-                if long_caption and text:
-                    sent = await bot.send_message(
-                        chat_id=target,
-                        text=text,
+                        caption=text or None,
                         parse_mode="HTML",
                         reply_markup=markup,
                     )
@@ -971,6 +850,7 @@ async def handle_callback(
 
     if data == "userbot:broadcast_menu":
         _clear_flow(context)
+        context.user_data.pop(BROADCAST_DRAFT_KEY, None)
         await show_broadcast_menu(update, business, actor)
         return True
 
@@ -991,176 +871,111 @@ async def handle_callback(
         )
         return True
 
-    if data == "userbot:broadcast:draft":
+    if data.startswith("userbot:broadcast:"):
         _clear_flow(context)
-        await _show_broadcast_draft(
-            update, context, business, actor
-        )
-        return True
-
-    if data == "userbot:broadcast:edit":
-        draft = _broadcast_draft(context)
-        if not draft.get("kind"):
-            raise TenantBusinessError("broadcast is empty")
-        await _edit_or_send(
-            update,
-            "✏️ <b>ویرایش پیام همگانی</b>\n\n"
-            "بخشی که می‌خواهید تغییر کند را انتخاب کنید.",
-            _broadcast_edit_markup(draft),
-            parse_mode="HTML",
-        )
-        return True
-
-    if data == "userbot:broadcast:edit_text":
-        context.user_data[FLOW_KEY] = {
-            "kind": "broadcast_edit_text"
-        }
-        await query.message.reply_text(
-            "📝 متن یا کپشن جدید را بفرستید.",
-            reply_markup=_cancel_keyboard(),
-        )
-        return True
-
-    if data == "userbot:broadcast:edit_media":
-        context.user_data[FLOW_KEY] = {
-            "kind": "broadcast_edit_media"
-        }
-        await query.message.reply_text(
-            "🖼 عکس یا ویدئوی جدید را بفرستید.\n"
-            "متن و دکمه‌های فعلی تغییر نمی‌کنند.",
-            reply_markup=_cancel_keyboard(),
-        )
-        return True
-
-    if data == "userbot:broadcast:edit_replace":
-        context.user_data[FLOW_KEY] = {
-            "kind": "broadcast_replace"
-        }
-        await query.message.reply_text(
-            "🔄 نسخه کامل جدید پیام را بفرستید؛ متن، عکس + کپشن "
-            "یا ویدئو + کپشن. دکمه‌های فعلی حفظ می‌شوند.",
-            reply_markup=_cancel_keyboard(),
-        )
-        return True
-
-    if data == "userbot:broadcast:button":
-        draft = _broadcast_draft(context)
-        if not draft.get("kind"):
-            raise TenantBusinessError("broadcast is empty")
-        if len(draft.get("buttons") or []) >= MAX_BUTTONS:
-            await query.message.reply_text(
-                f"❌ حداکثر {MAX_BUTTONS} دکمه مجاز است."
-            )
-            return True
-        context.user_data[FLOW_KEY] = {
-            "kind": "broadcast_button_text"
-        }
-        await query.message.reply_text(
-            "🔘 عنوان دکمه را بفرستید؛ مثلاً: 🛒 خرید سرویس",
-            reply_markup=_cancel_keyboard(),
-        )
-        return True
-
-    if data == "userbot:broadcast:preview":
-        await _preview_draft(query.message, _broadcast_draft(context))
-        return True
-
-    if data == "userbot:broadcast:clear_buttons":
-        _broadcast_draft(context)["buttons"] = []
-        await query.message.reply_text("✅ همه دکمه‌ها پاک شدند.")
-        await _show_broadcast_draft(update, context, business, actor)
-        return True
-
-    if data == "userbot:broadcast:publish":
-        draft = _broadcast_draft(context)
-        try:
-            result = await _send_broadcast(
-                context, business, actor, draft
-            )
-        except Exception as exc:
-            await query.message.reply_text(
-                "❌ آماده‌سازی یا ارسال پیام همگانی با خطا مواجه شد.\n"
-                f"خطا: <code>{type(exc).__name__}</code>",
-                parse_mode="HTML",
-            )
-            return True
         context.user_data.pop(BROADCAST_DRAFT_KEY, None)
-        _clear_flow(context)
         await query.message.reply_text(
-            _broadcast_result_text(result),
-            reply_markup=admin_main_keyboard(),
+            "🔄 مسیر قدیمی پیش‌نمایش حذف شده است. گروه هدف را دوباره انتخاب کنید."
         )
+        await show_broadcast_menu(update, business, actor)
         return True
 
-    # Channel management.
     if data == "channelpost:menu":
         _clear_flow(context)
         await _show_channel_menu(update, context, business, actor)
         return True
 
-    if data == "channelpost:set":
-        context.user_data[FLOW_KEY] = {"kind": "channel_set"}
-        await query.message.reply_text(
-            "📢 @channel یا شناسه -100... را ارسال کنید:",
-            reply_markup=_cancel_keyboard(),
+    if data == "channelpost:back_userbot":
+        _clear_flow(context)
+        context.user_data.pop(CHANNEL_DRAFT_KEY, None)
+        from TenantRuntime.AdminBot.userbot_management import (
+            send_userbot_main_menu,
         )
+        await send_userbot_main_menu(update, context)
+        return True
+
+    if data == "channelpost:set":
+        # Compatibility with stale v0.50.0 inline keyboards. The SellBot
+        # reference has no target-setting button inside Channel Manager.
+        _clear_flow(context)
+        await _show_channel_menu(update, context, business, actor)
         return True
 
     if data == "channelpost:new":
         context.user_data[CHANNEL_DRAFT_KEY] = _empty_channel()
         context.user_data[FLOW_KEY] = {"kind": "channel_content"}
         await query.message.reply_text(
-            "📝 متن پست را بفرست، یا عکس/ویدئو را همراه کپشن ارسال کن.",
-            reply_markup=_cancel_keyboard(),
+            "📝 متن پست را بفرست، یا عکس/ویدئو را همراه کپشن ارسال کن.\n\n"
+            "برای انصراف «❌ لغو» را بفرست."
         )
         return True
 
     if data == "channelpost:edit":
         draft = _channel_draft(context)
         if not draft.get("kind"):
-            raise TenantBusinessError("channel post is empty")
-        await _edit_or_send(
-            update,
+            await query.message.reply_text(
+                "❌ هنوز پستی برای ویرایش وجود ندارد."
+            )
+            return True
+        _clear_flow(context)
+        await query.message.reply_text(
             "✏️ <b>ویرایش پست</b>\n\n"
-            "بخشی که می‌خواهید تغییر کند را انتخاب کنید.\n"
+            "بخشی که می‌خواهی تغییر کند را انتخاب کن.\n"
             "متن، رسانه و دکمه‌ها مستقل از هم نگه داشته می‌شوند.",
-            _channel_edit_markup(draft),
             parse_mode="HTML",
+            reply_markup=_channel_edit_markup(draft),
         )
         return True
 
     if data == "channelpost:edit_text":
+        draft = _channel_draft(context)
+        if not draft.get("kind"):
+            await query.message.reply_text(
+                "❌ هنوز پستی برای ویرایش وجود ندارد."
+            )
+            return True
         context.user_data[FLOW_KEY] = {"kind": "channel_edit_text"}
         await query.message.reply_text(
-            "📝 متن یا کپشن جدید را بفرستید.\n"
-            "برای پاک‌کردن کامل متن، عدد 0 را بفرستید.",
-            reply_markup=_cancel_keyboard(),
+            "📝 متن یا کپشن جدید را بفرست.\n\n"
+            "عکس/ویدئو و دکمه‌های فعلی تغییر نمی‌کنند.\n"
+            "برای پاک‌کردن کامل متن، عدد 0 را بفرست."
         )
         return True
 
     if data == "channelpost:edit_media":
+        draft = _channel_draft(context)
+        if not draft.get("kind"):
+            await query.message.reply_text(
+                "❌ هنوز پستی برای ویرایش وجود ندارد."
+            )
+            return True
         context.user_data[FLOW_KEY] = {"kind": "channel_edit_media"}
         await query.message.reply_text(
-            "🖼 عکس یا ویدئوی جدید را بفرستید.\n"
-            "متن/کپشن و دکمه‌های فعلی تغییر نمی‌کنند.",
-            reply_markup=_cancel_keyboard(),
+            "🖼 عکس یا ویدئوی جدید را بفرست.\n\n"
+            "متن/کپشن و دکمه‌های فعلی تغییر نمی‌کنند."
         )
         return True
 
     if data == "channelpost:edit_replace":
+        draft = _channel_draft(context)
+        if not draft.get("kind"):
+            await query.message.reply_text(
+                "❌ هنوز پستی برای ویرایش وجود ندارد."
+            )
+            return True
         context.user_data[FLOW_KEY] = {"kind": "channel_replace"}
         await query.message.reply_text(
-            "🔄 نسخه کامل جدید پست را بفرستید.\n"
+            "🔄 نسخه کامل جدید پست را بفرست.\n\n"
             "می‌تواند متن، عکس + کپشن یا ویدئو + کپشن باشد.\n"
-            "🔘 دکمه‌های فعلی حفظ می‌شوند.",
-            reply_markup=_cancel_keyboard(),
+            "🔘 دکمه‌های فعلی همچنان حفظ می‌شوند."
         )
         return True
 
     if data == "channelpost:button":
         draft = _channel_draft(context)
         if not draft.get("kind"):
-            raise TenantBusinessError("channel post is empty")
+            await query.message.reply_text("❌ ابتدا محتوای پست را بساز.")
+            return True
         if len(draft.get("buttons") or []) >= MAX_BUTTONS:
             await query.message.reply_text(
                 f"❌ حداکثر {MAX_BUTTONS} دکمه مجاز است."
@@ -1168,8 +983,7 @@ async def handle_callback(
             return True
         context.user_data[FLOW_KEY] = {"kind": "channel_button_text"}
         await query.message.reply_text(
-            "🔘 عنوان دکمه را بفرستید؛ مثلاً: 🛒 خرید سرویس",
-            reply_markup=_cancel_keyboard(),
+            "🔘 عنوان دکمه را بفرست؛ مثلاً: 🛒 خرید سرویس"
         )
         return True
 
@@ -1195,7 +1009,7 @@ async def handle_callback(
         )
         return True
 
-    return False
+    return True
 
 
 async def handle_text(
@@ -1213,30 +1027,18 @@ async def handle_text(
     if message is None:
         return False
     text = str(message.text or "").strip()
-
     kind = str(flow.get("kind") or "")
 
     if _is_cancel(text):
         _clear_flow(context)
-        if kind.startswith("channel_"):
+        if kind == "broadcast" or kind.startswith("broadcast_"):
+            context.user_data.pop(BROADCAST_DRAFT_KEY, None)
             await message.reply_text(
                 "❌ لغو شد.", reply_markup=admin_main_keyboard()
-            )
-            await _show_channel_menu(
-                update, context, business, actor
             )
             return True
-        if kind == "broadcast" or kind.startswith("broadcast_"):
-            await message.reply_text(
-                "❌ لغو شد.", reply_markup=admin_main_keyboard()
-            )
-            draft = _broadcast_draft(context)
-            if draft.get("kind"):
-                await _show_broadcast_draft(
-                    update, context, business, actor
-                )
-            else:
-                await show_broadcast_menu(update, business, actor)
+        if kind.startswith("channel_"):
+            await _show_channel_menu(update, context, business, actor)
             return True
         await message.reply_text(
             "❌ لغو شد.", reply_markup=admin_main_keyboard()
@@ -1245,123 +1047,81 @@ async def handle_text(
 
     if kind == "broadcast":
         draft = _broadcast_draft(context)
-        step = str(flow.get("step") or "wait_text")
+        step = str(flow.get("step") or "wait_text").strip().lower()
         if step == "wait_text":
-            body = _message_html(message).strip()
-            _validate_body("text", body)
-            draft.update(kind="text", text=body, file_id="")
+            body = str(message.text or "").strip()
+            if not body:
+                await message.reply_text(
+                    "❌ لطفاً متن پیام را کامل ارسال کنید.",
+                    reply_markup=_cancel_keyboard(),
+                )
+                return True
+            if len(body) > MAX_TEXT_LENGTH:
+                await message.reply_text(
+                    f"❌ متن بیش از حد طولانی است. حداکثر {MAX_TEXT_LENGTH} کاراکتر مجاز است.",
+                    reply_markup=_cancel_keyboard(),
+                )
+                return True
+            draft.update(kind="text", text=body, file_id="", buttons=[])
             flow["step"] = "wait_media"
             await message.reply_text(
-                "🖼️ عکس یا ویدئو را ارسال کنید، یا روی "
-                "[⏩رد کردن] بزنید:",
+                "🖼️ لطفا عکس خود را برای ارسال به کاربران ارسال کنید "
+                "یا روی دکمه [⏩رد کردن] کلیک کنید:",
                 reply_markup=_skip_cancel_keyboard(),
             )
             return True
+
         if step == "wait_media" and _is_skip(text):
+            try:
+                result = await _send_broadcast(
+                    context, business, actor, draft
+                )
+            except Exception as exc:
+                await message.reply_text(
+                    "❌ آماده‌سازی یا ارسال پیام همگانی با خطا مواجه شد.\n"
+                    f"خطا: <code>{type(exc).__name__}</code>",
+                    parse_mode="HTML",
+                    reply_markup=_skip_cancel_keyboard(),
+                )
+                return True
             _clear_flow(context)
+            context.user_data.pop(BROADCAST_DRAFT_KEY, None)
             await message.reply_text(
-                "✅ پیام آماده شد.",
+                _broadcast_result_text(result),
                 reply_markup=admin_main_keyboard(),
             )
-            await _show_broadcast_draft(
-                update, context, business, actor
+            return True
+
+        if step in {"preview", "sending"}:
+            flow["step"] = "wait_media"
+            await message.reply_text(
+                "🔄 مسیر قدیمی پیش‌نمایش حذف شده است. "
+                "عکس را ارسال کنید یا «⏩رد کردن» را بزنید.",
+                reply_markup=_skip_cancel_keyboard(),
             )
             return True
-        await message.reply_text(
-            "❌ عکس/ویدئو ارسال کنید یا «⏩رد کردن» را بزنید.",
-            reply_markup=_skip_cancel_keyboard(),
-        )
-        return True
 
-    if kind == "broadcast_edit_text":
-        body = _message_html(message).strip()
-        draft = _broadcast_draft(context)
-        if text in {"0", "-", "—"}:
-            body = ""
-        draft_kind = str(draft.get("kind") or "text")
-        if draft_kind == "text" and not body.strip():
-            raise ValueError("text broadcast cannot be empty")
-        _validate_body(draft_kind, body)
-        draft["text"] = body
-        _clear_flow(context)
-        await message.reply_text(
-            "✅ متن/کپشن پیام ویرایش شد.",
-            reply_markup=admin_main_keyboard(),
-        )
-        await _show_broadcast_draft(update, context, business, actor)
-        return True
+        if step == "wait_media":
+            await message.reply_text(
+                "❌ لطفا عکس ارسال کنید یا روی دکمه [⏩رد کردن] بزنید.",
+                reply_markup=_skip_cancel_keyboard(),
+            )
+            return True
 
-    if kind == "broadcast_replace":
-        body = _message_html(message).strip()
-        _validate_body("text", body)
-        draft = _broadcast_draft(context)
-        buttons = list(draft.get("buttons") or [])
-        segment = str(draft.get("segment") or "all")
-        draft.clear()
-        draft.update(
-            segment=segment,
-            kind="text",
-            text=body,
-            file_id="",
-            buttons=buttons,
-        )
-        _clear_flow(context)
+        flow["step"] = "wait_text"
         await message.reply_text(
-            "✅ پیام جایگزین شد.",
-            reply_markup=admin_main_keyboard(),
-        )
-        await _show_broadcast_draft(update, context, business, actor)
-        return True
-
-    if kind == "broadcast_button_text":
-        if not text or len(text) > 64:
-            raise ValueError("button text")
-        flow["label"] = text
-        flow["kind"] = "broadcast_button_url"
-        await message.reply_text(
-            "🔗 حالا لینک دکمه را بفرستید؛ لینک کامل یا @username.",
+            f"✍ لطفا پیام خود را برای «{SEGMENT_LABELS.get(str(draft.get('segment') or 'all'), 'تمام کاربران')}» وارد کنید:",
             reply_markup=_cancel_keyboard(),
         )
         return True
 
-    if kind == "broadcast_button_url":
-        url = _normalize_button_url(text)
-        if not url:
-            raise ValueError("button url")
-        draft = _broadcast_draft(context)
-        buttons = list(draft.get("buttons") or [])
-        if len(buttons) >= MAX_BUTTONS:
-            raise TenantBusinessError("broadcast button limit reached")
-        buttons.append({
-            "text": str(flow.get("label") or "لینک"),
-            "url": url,
-            "style": "primary",
-        })
-        draft["buttons"] = buttons
-        _clear_flow(context)
-        await message.reply_text(
-            "✅ دکمه اضافه شد.", reply_markup=admin_main_keyboard()
-        )
-        await _show_broadcast_draft(update, context, business, actor)
-        return True
-
-    if kind == "channel_set":
-        target = _normalize_channel_target(text)
-        if not target:
-            raise ValueError("channel target")
-        business.set_userbot_setting_admin(
-            actor, key="channel_id", value=target
-        )
-        _clear_flow(context)
-        await message.reply_text(
-            "✅ کانال ذخیره شد.", reply_markup=admin_main_keyboard()
-        )
-        await _show_channel_menu(update, context, business, actor)
-        return True
-
     if kind in {"channel_content", "channel_replace"}:
         body = _message_html(message).strip()
-        _validate_body("text", body)
+        if _visible_html_length(body) > MAX_TEXT_LENGTH:
+            await message.reply_text(
+                f"❌ متن بیش از حد طولانی است. حداکثر {MAX_TEXT_LENGTH} کاراکتر مجاز است."
+            )
+            return True
         draft = _channel_draft(context)
         buttons = list(draft.get("buttons") or [])
         draft.clear()
@@ -1372,59 +1132,81 @@ async def handle_text(
             buttons=buttons if kind == "channel_replace" else [],
         )
         _clear_flow(context)
-        await message.reply_text(
-            "✅ محتوای پست ذخیره/ویرایش شد.",
-            reply_markup=admin_main_keyboard(),
-        )
+        await message.reply_text("✅ محتوای پست ذخیره/ویرایش شد.")
         await _show_channel_menu(update, context, business, actor)
         return True
 
     if kind == "channel_edit_text":
+        if not message.text:
+            await message.reply_text(
+                "❌ برای ویرایش متن/کپشن فقط متن بفرست.\n"
+                "برای پاک‌کردن کامل متن، عدد 0 را بفرست."
+            )
+            return True
         draft = _channel_draft(context)
         body = _message_html(message)
         if text in {"0", "-", "—"}:
             body = ""
-        if str(draft.get("kind") or "") == "text" and not body.strip():
-            raise ValueError("text post cannot be empty")
-        _validate_body(str(draft.get("kind") or "text"), body)
+        else:
+            try:
+                _validate_body(str(draft.get("kind") or "text"), body)
+            except ValueError:
+                limit = (
+                    MAX_TEXT_LENGTH
+                    if str(draft.get("kind") or "text") == "text"
+                    else MAX_CAPTION_LENGTH
+                )
+                label = "متن" if limit == MAX_TEXT_LENGTH else "کپشن"
+                await message.reply_text(
+                    f"❌ {label} بیش از حد طولانی است. حداکثر {limit} کاراکتر مجاز است."
+                )
+                return True
         draft["text"] = body
         _clear_flow(context)
-        await message.reply_text(
-            "✅ متن/کپشن پست ویرایش شد.",
-            reply_markup=admin_main_keyboard(),
-        )
+        await message.reply_text("✅ متن/کپشن پست ویرایش شد.")
         await _show_channel_menu(update, context, business, actor)
         return True
 
     if kind == "channel_button_text":
         if not text or len(text) > 64:
-            raise ValueError("button text")
+            await message.reply_text(
+                "❌ عنوان دکمه باید بین ۱ تا ۶۴ کاراکتر باشد."
+            )
+            return True
         flow["label"] = text
         flow["kind"] = "channel_button_url"
         await message.reply_text(
-            "🔗 حالا لینک دکمه را بفرستید؛ لینک کامل یا @username.",
-            reply_markup=_cancel_keyboard(),
+            "🔗 حالا لینک دکمه را بفرست.\n"
+            "می‌توانی لینک کامل یا آیدی تلگرام بفرستی؛ مثال:\n"
+            "• https://t.me/YourBot\n"
+            "• @YourBot"
         )
         return True
 
     if kind == "channel_button_url":
         url = _normalize_button_url(text)
         if not url:
-            raise ValueError("button url")
+            await message.reply_text(
+                "❌ لینک معتبر نیست.\n"
+                "لینک کامل مثل https://example.com یا https://t.me/YourBot، "
+                "یا آیدی تلگرام مثل @YourBot بفرست."
+            )
+            return True
         draft = _channel_draft(context)
         buttons = list(draft.get("buttons") or [])
         if len(buttons) >= MAX_BUTTONS:
-            raise TenantBusinessError("channel button limit reached")
-        buttons.append({
-            "text": str(flow.get("label") or "لینک"),
-            "url": url,
-            "style": "primary",
-        })
-        draft["buttons"] = buttons
+            await message.reply_text(
+                f"❌ حداکثر {MAX_BUTTONS} دکمه برای هر پست مجاز است."
+            )
+        else:
+            buttons.append({
+                "text": str(flow.get("label") or "لینک"),
+                "url": url,
+                "style": "primary",
+            })
+            draft["buttons"] = buttons
+            await message.reply_text("✅ دکمه اضافه شد.")
         _clear_flow(context)
-        await message.reply_text(
-            "✅ دکمه اضافه شد.", reply_markup=admin_main_keyboard()
-        )
         await _show_channel_menu(update, context, business, actor)
         return True
 
@@ -1452,53 +1234,43 @@ async def handle_media(
     caption = _message_html(message, caption=True)
 
     if kind == "broadcast" and str(flow.get("step") or "") == "wait_media":
+        if media_kind != "photo":
+            await message.reply_text(
+                "❌ لطفا عکس ارسال کنید یا روی دکمه [⏩رد کردن] بزنید.",
+                reply_markup=_skip_cancel_keyboard(),
+            )
+            return True
         draft = _broadcast_draft(context)
-        draft["kind"] = media_kind
+        draft["kind"] = "photo"
         draft["file_id"] = file_id
-        # The text was collected in the preceding SellBot-style text step.
+        try:
+            result = await _send_broadcast(
+                context, business, actor, draft
+            )
+        except Exception as exc:
+            await message.reply_text(
+                "❌ آماده‌سازی یا ارسال پیام همگانی با خطا مواجه شد.\n"
+                f"خطا: <code>{type(exc).__name__}</code>",
+                parse_mode="HTML",
+                reply_markup=_skip_cancel_keyboard(),
+            )
+            return True
         _clear_flow(context)
+        context.user_data.pop(BROADCAST_DRAFT_KEY, None)
         await message.reply_text(
-            "✅ رسانه پیام ذخیره شد.",
+            _broadcast_result_text(result),
             reply_markup=admin_main_keyboard(),
         )
-        await _show_broadcast_draft(update, context, business, actor)
-        return True
-
-    if kind == "broadcast_edit_media":
-        draft = _broadcast_draft(context)
-        draft["kind"] = media_kind
-        draft["file_id"] = file_id
-        _clear_flow(context)
-        await message.reply_text(
-            "✅ عکس/ویدئوی پیام ویرایش شد.",
-            reply_markup=admin_main_keyboard(),
-        )
-        await _show_broadcast_draft(update, context, business, actor)
-        return True
-
-    if kind == "broadcast_replace":
-        _validate_body(media_kind, caption)
-        draft = _broadcast_draft(context)
-        buttons = list(draft.get("buttons") or [])
-        segment = str(draft.get("segment") or "all")
-        draft.clear()
-        draft.update(
-            segment=segment,
-            kind=media_kind,
-            text=caption,
-            file_id=file_id,
-            buttons=buttons,
-        )
-        _clear_flow(context)
-        await message.reply_text(
-            "✅ پیام جایگزین شد.",
-            reply_markup=admin_main_keyboard(),
-        )
-        await _show_broadcast_draft(update, context, business, actor)
         return True
 
     if kind in {"channel_content", "channel_replace"}:
-        _validate_body(media_kind, caption)
+        try:
+            _validate_body(media_kind, caption)
+        except ValueError:
+            await message.reply_text(
+                f"❌ کپشن بیش از حد طولانی است. حداکثر {MAX_CAPTION_LENGTH} کاراکتر مجاز است."
+            )
+            return True
         draft = _channel_draft(context)
         buttons = list(draft.get("buttons") or [])
         draft.clear()
@@ -1509,28 +1281,60 @@ async def handle_media(
             buttons=buttons if kind == "channel_replace" else [],
         )
         _clear_flow(context)
-        await message.reply_text(
-            "✅ محتوای پست ذخیره/ویرایش شد.",
-            reply_markup=admin_main_keyboard(),
-        )
+        await message.reply_text("✅ محتوای پست ذخیره/ویرایش شد.")
         await _show_channel_menu(update, context, business, actor)
         return True
 
     if kind == "channel_edit_media":
         draft = _channel_draft(context)
+        if _visible_html_length(str(draft.get("text") or "")) > MAX_CAPTION_LENGTH:
+            await message.reply_text(
+                f"❌ متن فعلی برای کپشن طولانی است. ابتدا آن را به کمتر از {MAX_CAPTION_LENGTH} کاراکتر کاهش بده."
+            )
+            return True
+        if media_kind not in {"photo", "video"}:
+            await message.reply_text(
+                "❌ فقط عکس یا ویدئو بفرست.\n"
+                "متن/کپشن فعلی و دکمه‌ها بدون تغییر می‌مانند."
+            )
+            return True
         draft["kind"] = media_kind
         draft["file_id"] = file_id
         _clear_flow(context)
-        await message.reply_text(
-            "✅ عکس/ویدئوی پست ویرایش شد.",
-            reply_markup=admin_main_keyboard(),
-        )
+        await message.reply_text("✅ عکس/ویدئوی پست ویرایش شد.")
         await _show_channel_menu(update, context, business, actor)
         return True
 
     return False
 
 
+async def handle_document(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    business: Any,
+    actor: int,
+    admin_main_keyboard: Any,
+) -> bool:
+    message = update.effective_message
+    document = getattr(message, "document", None) if message else None
+    mime = str(getattr(document, "mime_type", "") or "").lower()
+    flow = context.user_data.get(FLOW_KEY)
+    if not (
+        document
+        and mime.startswith("image/")
+        and isinstance(flow, dict)
+        and str(flow.get("kind") or "") == "broadcast"
+        and str(flow.get("step") or "") == "wait_media"
+    ):
+        return False
+    return await handle_media(
+        update,
+        context,
+        business=business,
+        actor=actor,
+        admin_main_keyboard=admin_main_keyboard,
+    )
 async def handle_document(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
