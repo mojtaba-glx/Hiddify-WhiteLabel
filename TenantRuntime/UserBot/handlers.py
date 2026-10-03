@@ -31,7 +31,7 @@ from telegram.ext import (
 from Gateway.catalog import RuntimeBotSpec
 from TenantRuntime.business import TenantBusinessError
 from TenantRuntime.button_styles import keyboard_button as KeyboardButton
-from Shared.timeutils import parse_utc, utcnow
+from Shared.timeutils import format_tehran, parse_utc, utcnow
 from TenantRuntime.common import _deny_update, _services, runtime_access_gate, runtime_error
 
 def _money_lines(items: list[dict]) -> list[str]:
@@ -44,6 +44,160 @@ def _money_lines(items: list[dict]) -> list[str]:
     ]
 
 
+def _account_status_label(value: object) -> str:
+    return {
+        "active": "🟢 فعال",
+        "blocked": "🔴 مسدود",
+    }.get(str(value or "").strip().lower(), str(value or "نامشخص"))
+
+
+def _subscription_status_label(item: dict[str, Any]) -> str:
+    if int(item.get("enforcement_pending") or 0):
+        return "🟠 در حال قطع خودکار"
+    return {
+        "active": "🟢 فعال",
+        "disabled": "🟡 غیرفعال",
+        "expired": "🔴 منقضی",
+        "pending_provisioning": "🟠 در انتظار فعال‌سازی",
+    }.get(
+        str(item.get("status") or "").strip().lower(),
+        str(item.get("status") or "نامشخص"),
+    )
+
+
+def _order_status_label(value: object) -> str:
+    return {
+        "pending_payment": "🟠 در انتظار پرداخت",
+        "payment_review": "🟠 در انتظار بررسی",
+        "paid": "🔵 پرداخت‌شده / در انتظار فعال‌سازی",
+        "fulfilled": "🟢 تکمیل‌شده",
+        "cancelled": "⚪ لغوشده",
+        "rejected": "🔴 ردشده",
+    }.get(str(value or "").strip().lower(), str(value or "نامشخص"))
+
+
+def _local_time_text(raw: object) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return "-"
+    try:
+        return format_tehran(parse_utc(text))
+    except Exception:
+        return text
+
+
+def _days_left(raw: object) -> int | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        seconds = (parse_utc(text) - utcnow()).total_seconds()
+    except Exception:
+        return None
+    if seconds <= 0:
+        return 0
+    days = int(seconds // 86400)
+    return days + (1 if seconds % 86400 else 0)
+
+
+def _last_online_text(raw: object) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return "هنوز ثبت نشده"
+    try:
+        delta = (utcnow() - parse_utc(text)).total_seconds()
+    except Exception:
+        return text
+    if delta < 0:
+        return _local_time_text(text)
+    if delta < 60:
+        return "چند ثانیه پیش"
+    if delta < 3600:
+        return f"{max(1, int(delta // 60))} دقیقه پیش"
+    if delta < 86400:
+        return f"{max(1, int(delta // 3600))} ساعت پیش"
+    if delta < 86400 * 30:
+        return f"{max(1, int(delta // 86400))} روز پیش"
+    return _local_time_text(text)
+
+
+def _subscription_metrics(
+    item: dict[str, Any],
+    settings: dict[str, Any],
+) -> dict[str, Any]:
+    usage_gb = max(0.0, float(item.get("usage_bytes") or 0) / (1024 ** 3))
+    limit_gb = max(0.0, float(item.get("traffic_bytes") or 0) / (1024 ** 3))
+    remaining_gb = max(0.0, limit_gb - usage_gb)
+    days_left = _days_left(item.get("expires_at"))
+
+    unlimited_volume = (
+        bool(settings.get("renew_unlimited_volume", False))
+        and limit_gb >= float(
+            settings.get("renew_unlimited_volume_from_gb") or 1000
+        )
+    )
+    unlimited_time = (
+        bool(settings.get("renew_unlimited_time", False))
+        and days_left is not None
+        and days_left >= int(
+            settings.get("renew_unlimited_time_from_days") or 365
+        )
+    )
+    return {
+        "usage_gb": usage_gb,
+        "limit_gb": limit_gb,
+        "remaining_gb": remaining_gb,
+        "days_left": days_left,
+        "unlimited_volume": unlimited_volume,
+        "unlimited_time": unlimited_time,
+    }
+
+
+def _subscription_detail_text(
+    item: dict[str, Any],
+    settings: dict[str, Any],
+) -> str:
+    metrics = _subscription_metrics(item, settings)
+    username = str(item.get("customer_username") or "").strip().lstrip("@")
+    display_name = str(item.get("customer_display_name") or "").strip()
+    days = metrics["days_left"]
+
+    usage_line = (
+        f"{metrics['usage_gb']:.2f} گیگ از نامحدود"
+        if metrics["unlimited_volume"]
+        else f"{metrics['usage_gb']:.2f} از {metrics['limit_gb']:.2f} گیگ"
+    )
+    remaining_line = (
+        "نامحدود"
+        if metrics["unlimited_volume"]
+        else f"{metrics['remaining_gb']:.2f} گیگ"
+    )
+    if metrics["unlimited_time"]:
+        remaining_time = "نامحدود"
+    elif days is None:
+        remaining_time = "نامشخص"
+    elif days <= 0:
+        remaining_time = "منقضی شده"
+    else:
+        remaining_time = f"{days} روز"
+
+    lines = ["📄 اطلاعات اشتراک شما", ""]
+    if bool(settings.get("show_username", True)):
+        identity = f"@{username}" if username else (display_name or "-")
+        lines.append(f"👤 کاربر: {identity}")
+    lines.extend([
+        f"📦 پلن: {item.get('plan_name') or '-'}",
+        f"📡 سرور: {item.get('server_label') or 'نامشخص'}",
+        f"📶 وضعیت: {_subscription_status_label(item)}",
+        f"📊 میزان استفاده: {usage_line}",
+        f"📥 حجم باقی‌مانده: {remaining_line}",
+        f"📅 تاریخ انقضا: {'نامحدود' if metrics['unlimited_time'] else _local_time_text(item.get('expires_at'))}",
+        f"⏳ زمان باقی‌مانده: {remaining_time}",
+        f"🕓 آخرین اتصال: {_last_online_text(item.get('last_online'))}",
+        f"🔑 شناسه: {item.get('id')}",
+    ])
+    return "\n".join(lines)
+
 
 def _user_account_text(
     summary: dict, settings: dict | None = None
@@ -53,7 +207,7 @@ def _user_account_text(
     subs = dict(summary.get("subscriptions") or {})
     username = str(customer.get("username") or "").strip()
     lines = [
-        "👤 حساب من",
+        "👤 پروفایل کاربر",
         f"نام: {customer.get('display_name') or 'کاربر'}",
     ]
     if bool(settings.get("show_username", True)):
@@ -62,14 +216,20 @@ def _user_account_text(
         )
     lines.extend([
         f"Telegram ID: {customer.get('telegram_user_id')}",
-        f"وضعیت حساب: {customer.get('status')}",
+        f"وضعیت کاربر: {_account_status_label(customer.get('status'))}",
+        f"تاریخ عضویت: {_local_time_text(customer.get('created_at'))}",
         "",
-        "📦 اشتراک‌ها",
+        "📦 وضعیت سرویس‌ها",
         f"• فعال: {int(subs.get('active') or 0)}",
         f"• غیرفعال: {int(subs.get('disabled') or 0)}",
         f"• منقضی: {int(subs.get('expired') or 0)}",
         f"• در انتظار فعال‌سازی: {int(subs.get('pending') or 0)}",
-        f"🧾 سفارش باز: {int(summary.get('pending_orders') or 0)}",
+        "",
+        "🧾 سفارش‌ها",
+        f"• کل سفارش‌ها: {int(summary.get('orders_total') or 0)}",
+        f"• تکمیل‌شده: {int(summary.get('fulfilled_orders') or 0)}",
+        f"• باز / در انتظار: {int(summary.get('pending_orders') or 0)}",
+        f"• لغوشده: {int(summary.get('cancelled_orders') or 0)}",
         "",
         "💰 پرداخت‌های تأییدشده",
         *_money_lines(list(summary.get("paid_totals") or [])),
