@@ -219,17 +219,15 @@ def reconcile_reminder_queue_settings(
     remaining_gb_threshold: int,
     now: datetime | None = None,
 ) -> int:
-    moment = ensure_utc(now) if now is not None else utcnow()
-    now_iso = iso_utc(moment)
+    if now is not None:
+        ensure_utc(now)
     if bool(enabled):
         changed = conn.execute(
-            "UPDATE tenant_subscription_notifications "
-            "SET status='skipped', locked_at=NULL, next_attempt_at=NULL, updated_at=? "
+            "DELETE FROM tenant_subscription_notifications "
             "WHERE tenant_id=? AND status IN ('pending','failed','processing') "
             "AND ((event_type='days' AND stage_value>?) "
             "OR (event_type='usage' AND stage_value>?))",
             (
-                now_iso,
                 int(tenant_id),
                 max(1, int(days_threshold)),
                 max(1, int(remaining_gb_threshold)),
@@ -237,10 +235,9 @@ def reconcile_reminder_queue_settings(
         )
     else:
         changed = conn.execute(
-            "UPDATE tenant_subscription_notifications "
-            "SET status='skipped', locked_at=NULL, next_attempt_at=NULL, updated_at=? "
+            "DELETE FROM tenant_subscription_notifications "
             "WHERE tenant_id=? AND status IN ('pending','failed','processing')",
-            (now_iso, int(tenant_id)),
+            (int(tenant_id),),
         )
     return max(0, int(changed.rowcount))
 
