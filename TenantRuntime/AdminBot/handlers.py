@@ -2598,6 +2598,30 @@ def _tenant_debug_stats(business: Any) -> dict[str, int]:
             tid,
             "COALESCE(fail_count,0)>0",
         ),
+        "panel_frozen_nodes": _debug_count(
+            conn,
+            "tenant_panel_user_nodes",
+            tid,
+            "frozen_at IS NOT NULL",
+        ),
+        "panel_failed_nodes": _debug_count(
+            conn,
+            "tenant_panel_user_nodes",
+            tid,
+            "COALESCE(fail_count,0)>0",
+        ),
+        "notifications_pending": _debug_count(
+            conn,
+            "tenant_subscription_notifications",
+            tid,
+            "status IN ('pending','processing')",
+        ),
+        "notifications_failed": _debug_count(
+            conn,
+            "tenant_subscription_notifications",
+            tid,
+            "status='failed'",
+        ),
         "enforcement_pending": _debug_count(
             conn,
             "tenant_subscriptions",
@@ -2826,8 +2850,11 @@ async def _build_admin_debug_report(
         f"- agents={stats['agents']} | active={stats['agents_active']} | "
         f"customers={stats['agent_customers']} | services={stats['agent_services']}",
         f"- customer_bots={stats['customer_bots']} | active={stats['customer_bots_active']}",
-        f"- frozen_nodes={stats['frozen_nodes']} | fail_count_nodes={stats['failed_nodes']} | "
+        f"- frozen_nodes={stats['frozen_nodes'] + stats['panel_frozen_nodes']} | "
+        f"fail_count_nodes={stats['failed_nodes'] + stats['panel_failed_nodes']} | "
         f"enforcement_pending={stats['enforcement_pending']}",
+        f"- reminder_queue: pending={stats['notifications_pending']} | "
+        f"failed={stats['notifications_failed']}",
         "",
         "🗄 Database Health",
         f"- whitelabel.db: {_debug_sqlite_quick_check(business.conn)}",
