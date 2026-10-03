@@ -29,7 +29,7 @@ def test_install_dry_run_does_not_require_root_or_reveal_secrets() -> None:
     assert "MASTER_BOT_TOKEN" not in output
 
 
-def test_restart_dry_run_stops_then_starts_all_units() -> None:
+def test_restart_dry_run_restarts_all_units_and_plans_health_check() -> None:
     result = subprocess.run(
         [str(ROOT / "install.sh"), "--dry-run", "restart"],
         cwd=ROOT,
@@ -39,10 +39,22 @@ def test_restart_dry_run_stops_then_starts_all_units() -> None:
     )
     assert result.returncode == 0, result.stderr
     output = result.stdout
-    assert "systemctl stop hiddify-whitelabel-master.service" in output
-    assert "systemctl start hiddify-whitelabel-master.service" in output
-    assert output.index("systemctl stop") < output.index("systemctl start")
+    assert "systemctl daemon-reload" in output
+    assert "systemctl restart hiddify-whitelabel-master.service" in output
+    assert "systemctl restart hiddify-whitelabel-runtime@0.service" in output
+    assert "health check after restart" in output
+    assert "Restarting WhiteLabel bots" in output
 
+
+
+def test_restart_discovers_active_runtime_instances_and_reports_result() -> None:
+    content = (ROOT / "install.sh").read_text(encoding="utf-8")
+    restart = content.split("restart_services() {", 1)[1].split("enable_services() {", 1)[0]
+    assert "active_runtime_units" in restart
+    assert "sort -u" in restart
+    assert "health_services" in restart
+    assert "all WhiteLabel bots restarted successfully" in restart
+    assert "one or more WhiteLabel services failed after restart" in restart
 
 def test_update_dry_run_does_not_touch_git_or_require_root() -> None:
     result = subprocess.run(
