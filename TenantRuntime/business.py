@@ -6324,6 +6324,87 @@ class TenantBusinessService:
             raise TenantBusinessError("receipt not found")
         return dict(row)
 
+    def update_coupon_admin(
+        self,
+        actor_id: int,
+        *,
+        coupon_id: int,
+        code: str | None = None,
+        value: int | None = None,
+        max_uses: int | None = None,
+        per_customer_limit: int | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        current = self.coupon(int(coupon_id))
+        updates: list[str] = []
+        args: list[Any] = []
+
+        if code is not None:
+            clean_code = str(code or "").strip().upper()
+            if not re.fullmatch(r"[A-Z0-9_-]{3,48}", clean_code):
+                raise ValueError("invalid coupon code")
+            duplicate = self.conn.execute(
+                "SELECT 1 FROM tenant_coupons "
+                "WHERE tenant_id=? AND code=? AND id<>?",
+                (self.tenant_id, clean_code, int(coupon_id)),
+            ).fetchone()
+            if duplicate is not None:
+                raise TenantBusinessError("coupon code already exists")
+            updates.append("code=?")
+            args.append(clean_code)
+
+        if value is not None:
+            clean_value = int(value)
+            if clean_value <= 0:
+                raise ValueError("invalid coupon value")
+            if (
+                str(current["discount_kind"]) == "percent"
+                and clean_value > 100
+            ):
+                raise ValueError("percent coupon cannot exceed 100")
+            updates.append("value=?")
+            args.append(clean_value)
+
+        if max_uses is not None:
+            clean_max_uses = int(max_uses)
+            if clean_max_uses < 0:
+                raise ValueError("invalid coupon usage limit")
+            updates.append("max_uses=?")
+            args.append(clean_max_uses)
+
+        if per_customer_limit is not None:
+            clean_customer_limit = int(per_customer_limit)
+            if clean_customer_limit < 0:
+                raise ValueError("invalid coupon customer limit")
+            updates.append("per_customer_limit=?")
+            args.append(clean_customer_limit)
+
+        if expires_at is not None:
+            clean_expiry = str(expires_at or "").strip()
+            if clean_expiry in {"", "0", "-", "—"}:
+                normalized_expiry = None
+            else:
+                normalized_expiry = iso_utc(parse_utc(clean_expiry))
+            updates.append("expires_at=?")
+            args.append(normalized_expiry)
+
+        if not updates:
+            return current
+
+        updates.append("updated_at=?")
+        args.append(iso_utc(utcnow()))
+        args.extend([self.tenant_id, int(coupon_id)])
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_coupons SET " + ", ".join(updates) +
+                " WHERE tenant_id=? AND id=?",
+                tuple(args),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("coupon not found")
+        return self.coupon(int(coupon_id))
+
     def list_coupon_redemptions_admin(
         self, actor_id: int, *, coupon_id: int | None = None
     ) -> list[dict[str, Any]]:
