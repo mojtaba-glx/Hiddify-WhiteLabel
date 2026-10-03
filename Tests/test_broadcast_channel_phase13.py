@@ -241,6 +241,17 @@ def test_broadcast_menu_matches_sellbot_segments_and_has_no_draft_editor() -> No
         assert f'callback_data="{callback}"' not in source
 
 
+def test_broadcast_skip_keyboard_matches_sellbot() -> None:
+    markup = phase13._skip_cancel_keyboard()
+    labels = [
+        button.text
+        for row in markup.keyboard
+        for button in row
+    ]
+    assert labels == ["⏩رد کردن", "❌لغو"]
+    assert markup.one_time_keyboard is True
+
+
 def test_broadcast_skip_sends_directly_without_preview(
     monkeypatch, conn, factories, cipher
 ):
