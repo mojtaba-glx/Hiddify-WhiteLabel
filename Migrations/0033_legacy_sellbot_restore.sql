@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS tenant_legacy_restore_assets (
         CHECK(kind IN ('database','json','media','panel_backup','manifest','other')),
     size INTEGER NOT NULL DEFAULT 0 CHECK(size >= 0),
     sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+    encoding TEXT NOT NULL DEFAULT 'fernet-chunked-b64',
     content BLOB NOT NULL,
     created_at TEXT NOT NULL,
     UNIQUE(tenant_id, restore_id, path)
