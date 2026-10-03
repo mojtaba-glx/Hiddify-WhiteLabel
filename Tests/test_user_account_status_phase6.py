@@ -167,19 +167,24 @@ def test_account_summary_contains_real_order_counters(
     assert int(order["plan_duration_days"]) == 30
 
 
-def test_show_username_changes_profile_after_subscription_detail_removed(
+def test_show_username_controls_subscription_name_line(
     conn, factories, cipher
 ) -> None:
     service, _panel, actor, subscription_id, _order_id = _service(
         conn, factories, cipher
     )
     summary = service.customer_account_summary(actor)
+    item = service.customer_subscription_status(
+        actor,
+        subscription_id=subscription_id,
+        refresh=False,
+    )
 
     visible = service.runtime_userbot_settings()
     profile_visible = user_handlers._user_account_text(summary, visible)
-    service_menu = user_handlers._subscription_menu_text()
+    service_visible = user_handlers._subscription_detail_text(item, visible)
     assert "@status_user" in profile_visible
-    assert "@status_user" not in service_menu
+    assert "👤نام:" in service_visible
 
     service.set_userbot_setting_admin(
         7001, key="show_username", value=False
@@ -188,7 +193,9 @@ def test_show_username_changes_profile_after_subscription_detail_removed(
     assert "@status_user" not in user_handlers._user_account_text(
         summary, hidden
     )
-    assert "@status_user" not in user_handlers._subscription_menu_text()
+    assert "👤نام:" not in user_handlers._subscription_detail_text(
+        item, hidden
+    )
 
 
 def test_phase6_runtime_has_active_expired_and_service_detail_routes() -> None:
@@ -212,11 +219,19 @@ def test_phase6_runtime_has_active_expired_and_service_detail_routes() -> None:
         "تغییر لینک اشتراک🚨",
     ):
         assert label in source
+    for shown in (
+        "📄اطلاعات اشتراک شما",
+        "📊میزان استفاده",
+        "⏳زمان باقی مانده",
+        "💰قیمت اشتراک",
+        "🔑شناسه",
+    ):
+        assert shown in source
     for removed in (
-        "📊 میزان استفاده",
         "📥 حجم باقی‌مانده",
         "📅 تاریخ انقضا",
         "🕓 آخرین اتصال",
+        "🔄 آخرین بروزرسانی",
     ):
         assert removed not in source
 
