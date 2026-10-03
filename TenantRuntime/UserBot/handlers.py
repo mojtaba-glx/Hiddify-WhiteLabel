@@ -3185,7 +3185,7 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.effective_message.reply_text("از منوی ربات استفاده کنید.", reply_markup=_main_keyboard(spec, business)); return
     try:
         if flow.get("kind") == "wallet_receipt":
-            business.submit_wallet_topup_receipt(
+            receipt = business.submit_wallet_topup_receipt(
                 actor,
                 topup_id=int(flow["topup_id"]),
                 method_id=int(flow["method_id"]),
@@ -3194,8 +3194,30 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             success_text = "✅ تصویر رسید شارژ کیف پول برای بررسی ارسال شد."
         else:
-            business.submit_receipt(actor, order_id=int(flow['order_id']), method_id=int(flow['method_id']), reference=str(update.effective_message.caption or "").strip() or None, telegram_file_id=str(update.effective_message.photo[-1].file_id))
+            receipt = business.submit_receipt(
+                actor,
+                order_id=int(flow["order_id"]),
+                method_id=int(flow["method_id"]),
+                reference=str(update.effective_message.caption or "").strip() or None,
+                telegram_file_id=str(update.effective_message.photo[-1].file_id),
+            )
             success_text = "✅ تصویر رسید برای بررسی ارسال شد."
+        try:
+            tg_file = await context.bot.get_file(
+                str(update.effective_message.photo[-1].file_id)
+            )
+            media = bytes(await tg_file.download_as_bytearray())
+            business.attach_payment_receipt_media(
+                actor,
+                payment_key=str(receipt["payment_key"]),
+                media=media,
+                mime_type="image/jpeg",
+            )
+        except Exception:
+            success_text += (
+                "\n⚠️ ثبت تراکنش انجام شد اما آرشیو تصویر کامل نشد؛ "
+                "کد پیگیری را برای پشتیبانی نگه دارید."
+            )
         context.user_data.pop("biz_flow", None)
         await update.effective_message.reply_text(success_text, reply_markup=_main_keyboard(spec, business))
     except (ValueError, TenantBusinessError, sqlite3.IntegrityError):
