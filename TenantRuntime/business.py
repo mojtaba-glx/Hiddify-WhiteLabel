@@ -3928,21 +3928,102 @@ class TenantBusinessService:
                 )
         return self.order(actor_id, int(order_id))
 
-    def submit_receipt(self, actor_id: int, *, order_id: int, method_id: int, reference: str | None = None, telegram_file_id: str | None = None) -> dict[str, Any]:
+    def _record_payment_event_tx(
+        self,
+        *,
+        source: str,
+        payment_ref_id: int,
+        provider_key: str,
+        event_type: str,
+        actor_id: int | None,
+        external_event_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+        idempotency_key: str,
+    ) -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO tenant_payment_events "
+            "(tenant_id,payment_source,payment_ref_id,provider_key,event_type,"
+            "actor_id,external_event_id,payload_json,idempotency_key,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                self.tenant_id,
+                source,
+                int(payment_ref_id),
+                str(provider_key or "unknown"),
+                event_type,
+                int(actor_id) if actor_id is not None else None,
+                _text(external_event_id, 180, required=False) or None,
+                json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":")),
+                idempotency_key,
+                iso_utc(utcnow()),
+            ),
+        )
+
+    def submit_receipt(
+        self,
+        actor_id: int,
+        *,
+        order_id: int,
+        method_id: int,
+        reference: str | None = None,
+        telegram_file_id: str | None = None,
+    ) -> dict[str, Any]:
         order = self.order(actor_id, order_id)
-        if order["status"] != "pending_payment": raise TenantBusinessError("order is not awaiting payment")
+        if order["status"] != "pending_payment":
+            raise TenantBusinessError("order is not awaiting payment")
         method = self.method(method_id, currency=str(order["currency"]))
-        ref = _text(reference, 160, required=False) or None; file_id = _text(telegram_file_id, 256, required=False) or None
-        if not ref and not file_id: raise ValueError("receipt is required")
+        ref = _text(reference, 160, required=False) or None
+        file_id = _text(telegram_file_id, 256, required=False) or None
+        if bool(method.get("requires_receipt", True)) and not ref and not file_id:
+            raise ValueError("receipt is required")
         now = iso_utc(utcnow())
         with transaction(self.conn):
-            changed = self.conn.execute("UPDATE tenant_orders SET status='payment_review', updated_at=? WHERE id=? AND tenant_id=? AND status='pending_payment'", (now, int(order_id), self.tenant_id))
-            if changed.rowcount != 1: raise TenantBusinessError("order state changed")
-            cursor = self.conn.execute("INSERT INTO tenant_receipts (tenant_id, order_id, payment_method_id, reference, telegram_file_id, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)", (self.tenant_id, int(order_id), int(method["id"]), ref, file_id, now))
-        return {"id": int(cursor.lastrowid or 0), "order_id": int(order_id)}
+            changed = self.conn.execute(
+                "UPDATE tenant_orders SET status='payment_review', updated_at=? "
+                "WHERE id=? AND tenant_id=? AND status='pending_payment'",
+                (now, int(order_id), self.tenant_id),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("order state changed")
+            cursor = self.conn.execute(
+                "INSERT INTO tenant_receipts "
+                "(tenant_id,order_id,payment_method_id,reference,telegram_file_id,"
+                "status,created_at) VALUES (?,?,?,?,?,'pending',?)",
+                (
+                    self.tenant_id,
+                    int(order_id),
+                    int(method["id"]),
+                    ref,
+                    file_id,
+                    now,
+                ),
+            )
+            receipt_id = int(cursor.lastrowid or 0)
+            self._record_payment_event_tx(
+                source="order",
+                payment_ref_id=receipt_id,
+                provider_key=str(method.get("provider_key") or method.get("kind") or ""),
+                event_type="submitted",
+                actor_id=actor_id,
+                idempotency_key=(
+                    f"tenant:{self.tenant_id}:payment:order:{receipt_id}:submitted"
+                ),
+            )
+        return {
+            "id": receipt_id,
+            "order_id": int(order_id),
+            "payment_key": f"order:{receipt_id}",
+            "status": "pending",
+        }
 
     def review_receipt(
-        self, actor_id: int, receipt_id: int, *, approve: bool
+        self,
+        actor_id: int,
+        receipt_id: int,
+        *,
+        approve: bool,
+        note: str = "",
+        external_event_id: str | None = None,
     ) -> dict[str, Any]:
         """Approve money first; fulfillment and referral credit stay retry-safe."""
         self._admin(actor_id)
@@ -3969,12 +4050,15 @@ class TenantBusinessService:
 
             receipt_status = "approved" if approve else "rejected"
             changed = self.conn.execute(
-                "UPDATE tenant_receipts SET status=?, reviewed_by=?, reviewed_at=? "
+                "UPDATE tenant_receipts SET status=?, reviewed_by=?, reviewed_at=?, "
+                "review_note=?, provider_event_id=COALESCE(?, provider_event_id) "
                 "WHERE id=? AND tenant_id=? AND status='pending'",
                 (
                     receipt_status,
                     int(actor_id),
                     now,
+                    _text(note, 500, required=False),
+                    _text(external_event_id, 180, required=False) or None,
                     int(receipt_id),
                     self.tenant_id,
                 ),
@@ -4005,6 +4089,26 @@ class TenantBusinessService:
                         "WHERE tenant_id=? AND order_id=?",
                         (self.tenant_id, int(receipt["order_id"])),
                     )
+                method_row = self.conn.execute(
+                    "SELECT kind, provider_key FROM tenant_payment_methods "
+                    "WHERE tenant_id=? AND id=?",
+                    (self.tenant_id, int(receipt["payment_method_id"])),
+                ).fetchone()
+                provider_key = (
+                    str(method_row["provider_key"] or method_row["kind"])
+                    if method_row is not None else "unknown"
+                )
+                self._record_payment_event_tx(
+                    source="order",
+                    payment_ref_id=int(receipt_id),
+                    provider_key=provider_key,
+                    event_type="rejected",
+                    actor_id=actor_id,
+                    external_event_id=external_event_id,
+                    idempotency_key=(
+                        f"tenant:{self.tenant_id}:payment:order:{int(receipt_id)}:rejected"
+                    ),
+                )
                 return {
                     "order_id": int(receipt["order_id"]),
                     "status": "rejected",
@@ -4043,6 +4147,26 @@ class TenantBusinessService:
                     reward_type="purchase",
                     order_id=int(receipt["order_id"]),
                 )
+            method_row = self.conn.execute(
+                "SELECT kind, provider_key FROM tenant_payment_methods "
+                "WHERE tenant_id=? AND id=?",
+                (self.tenant_id, int(receipt["payment_method_id"])),
+            ).fetchone()
+            provider_key = (
+                str(method_row["provider_key"] or method_row["kind"])
+                if method_row is not None else "unknown"
+            )
+            self._record_payment_event_tx(
+                source="order",
+                payment_ref_id=int(receipt_id),
+                provider_key=provider_key,
+                event_type="approved",
+                actor_id=actor_id,
+                external_event_id=external_event_id,
+                idempotency_key=(
+                    f"tenant:{self.tenant_id}:payment:order:{int(receipt_id)}:approved"
+                ),
+            )
         return {
             "order_id": int(receipt["order_id"]),
             "status": "paid",
