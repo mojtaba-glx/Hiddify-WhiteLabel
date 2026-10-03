@@ -1530,6 +1530,8 @@ async def _handle_main_reply_action(
                 str(settings.get("plans_list_text") or "").strip()
                 or "📋 پلن موردنظر را انتخاب کنید:"
             )
+        from TenantRuntime.UserBot import dynamic_plans
+        rows.extend(dynamic_plans.rows(business))
         await update.effective_message.reply_text(
             body,
             reply_markup=InlineKeyboardMarkup(rows),
@@ -1916,6 +1918,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     settings = _set_button_settings(business.runtime_userbot_settings())
     try:
+        from TenantRuntime.UserBot import dynamic_plans
+        if await dynamic_plans.handle_callback(update,context,business=business,actor=actor,settings=settings):
+            return
         if data == "shop:account":
             summary = business.customer_account_summary(actor, refresh=True)
             await update.callback_query.edit_message_text(
@@ -2204,6 +2209,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                             settings=settings,
                         )
                     ])
+                from TenantRuntime.UserBot import dynamic_plans
+                rows.extend(dynamic_plans.rows(business))
                 rows.append([
                     _button(
                         "🔙بازگشت",
@@ -2221,6 +2228,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             rows = _plan_buttons(plans, settings)
             if not rows:
                 rows = [[InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")]]
+            from TenantRuntime.UserBot import dynamic_plans
+            rows.extend(dynamic_plans.rows(business))
             rows.append([
                 _button(
                     "🔙بازگشت",
@@ -2278,7 +2287,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 raise TenantBusinessError("purchase is disabled")
             plan_id = int(data.rsplit(":", 1)[1])
             plan = business.plan(plan_id, public=True)
-            servers = business.list_purchase_servers()
+            servers = [x for x in business.list_purchase_servers() if plan.get("server_id") in (None,int(x["id"]))]
             rows = _purchase_server_rows(
                 servers,
                 plan_id=plan_id,
@@ -2352,7 +2361,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 or str(order.get("status") or "") != "pending_payment"
             ):
                 raise TenantBusinessError("purchase order server cannot be changed")
-            servers = business.list_purchase_servers()
+            current_plan = business.plan(int(order["plan_id"]),public=False)
+            servers = [x for x in business.list_purchase_servers() if current_plan.get("server_id") in (None,int(x["id"]))]
             rows = _purchase_server_rows(
                 servers,
                 plan_id=int(order["plan_id"]),
@@ -3001,7 +3011,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     ]]),
                 )
                 return
-            plans = business.list_plans()
+            from TenantRuntime.UserBot import dynamic_plans
+            plans = business.list_plans(server_id=int(owned["server_id"]))
             plan_buttons = [
                 InlineKeyboardButton(
                     f"{p['name']} · {p['traffic_gb']}GB · "
@@ -3014,6 +3025,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 plan_buttons,
                 int(settings.get("plan_columns") or 1),
             )
+            rows.extend(dynamic_plans.rows(business,subscription=owned))
             if not rows:
                 rows = [[
                     InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")

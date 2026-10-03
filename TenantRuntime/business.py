@@ -489,8 +489,8 @@ class TenantBusinessService:
         ).fetchone()
         plans_row = self.conn.execute(
             "SELECT COUNT(*) AS total FROM tenant_sale_plans "
-            "WHERE tenant_id=? AND status!='archived'",
-            (self.tenant_id,),
+            "WHERE tenant_id=? AND status!='archived' AND is_dynamic=0 AND (server_id IS NULL OR server_id=?) AND name NOT GLOB '__WHITELABEL_*'",
+            (self.tenant_id,int(server_id)),
         ).fetchone()
         nodes_row = self.conn.execute(
             "SELECT COUNT(*) AS total FROM tenant_nodes "
@@ -613,7 +613,16 @@ class TenantBusinessService:
             raise TenantBusinessError(
                 "server is selected by unfinished purchase orders"
             )
+        inventory=self.conn.execute("SELECT 1 FROM tenant_panel_users WHERE tenant_id=? AND server_id=? AND state!='deleted' LIMIT 1",
+                                    (self.tenant_id,int(server_id))).fetchone()
+        if inventory:
+            raise TenantBusinessError("server still has panel users")
         with transaction(self.conn):
+            self.conn.execute("UPDATE tenant_sale_plans SET status='archived',server_id=NULL WHERE tenant_id=? AND server_id=?",(self.tenant_id,int(server_id)))
+            self.conn.execute("DELETE FROM tenant_panel_user_nodes WHERE tenant_id=? AND (server_id=? OR source_user_id IN (SELECT id FROM tenant_panel_users WHERE tenant_id=? AND server_id=?))",
+                              (self.tenant_id,int(server_id),self.tenant_id,int(server_id)))
+            for table in ("tenant_server_domains","tenant_server_sales_settings","tenant_panel_users"):
+                self.conn.execute(f"DELETE FROM {table} WHERE tenant_id=? AND server_id=?",(self.tenant_id,int(server_id)))
             self.conn.execute(
                 "DELETE FROM tenant_nodes WHERE tenant_id=? "
                 "AND (server_id=? OR parent_server_id=?)",
@@ -851,17 +860,22 @@ class TenantBusinessService:
             material.clear()
 
     def _panel_target(self, server: dict[str, Any]) -> PanelTarget:
+        row = self.conn.execute(
+            "SELECT origin FROM tenant_server_domains WHERE tenant_id=? AND server_id=? AND is_primary=1",
+            (self.tenant_id,int(server.get("id") or 0))).fetchone()
+        public_origin = str(row["origin"]) if row else ""
         return PanelTarget(
+            public_origin=public_origin,
             kind=str(server.get("panel_kind") or "").strip().lower(),
             endpoint=str(server.get("endpoint") or "").strip(),
             admin_path=str(server.get("admin_path") or "").strip(),
             user_path=str(server.get("user_path") or "").strip(),
             xui_flavor=str(server.get("xui_flavor") or "").strip().lower(),
             xui_inbound_ids=str(server.get("xui_inbound_ids") or "").strip(),
-            xui_public_origin=str(server.get("xui_public_origin") or "").strip(),
+            xui_public_origin=public_origin or str(server.get("xui_public_origin") or "").strip(),
             xui_sub_path=str(server.get("xui_sub_path") or "").strip(),
             xnet_inbound_ids=str(server.get("xnet_inbound_ids") or "").strip(),
-            xnet_public_origin=str(server.get("xnet_public_origin") or "").strip(),
+            xnet_public_origin=public_origin or str(server.get("xnet_public_origin") or "").strip(),
             xnet_sub_port=int(server.get("xnet_sub_port") or 0),
             xnet_sub_path=str(server.get("xnet_sub_path") or "").strip(),
             xnet_api_url=str(server.get("xnet_api_url") or "").strip(),
@@ -3352,10 +3366,13 @@ class TenantBusinessService:
         currency: str = "IRR",
         category_id: int | None = None,
         priority: int = 0,
+        server_id: int | None = None,
     ) -> dict[str, Any]:
         self._admin(actor_id)
         if min(int(traffic_gb), int(duration_days)) <= 0 or int(price) < 0:
             raise ValueError("invalid plan values")
+        if server_id is not None:
+            self.server(int(server_id))
         clean_category: int | None = None
         if category_id is not None:
             clean_category = int(category_id)
@@ -3365,8 +3382,8 @@ class TenantBusinessService:
             cursor = self.conn.execute(
                 "INSERT INTO tenant_sale_plans "
                 "(tenant_id,name,traffic_gb,duration_days,price,currency,status,"
-                "category_id,priority,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,'active',?,?,?,?)",
+                "category_id,priority,created_at,updated_at,server_id) "
+                "VALUES (?,?,?,?,?,?,'active',?,?,?,?,?)",
                 (
                     self.tenant_id,
                     _text(name, 80),
@@ -3378,6 +3395,7 @@ class TenantBusinessService:
                     int(priority),
                     now,
                     now,
+                    int(server_id) if server_id is not None else None,
                 ),
             )
         return self.plan(int(cursor.lastrowid or 0), public=False)
@@ -3407,6 +3425,7 @@ class TenantBusinessService:
         *,
         public: bool = True,
         category_id: int | None = None,
+        server_id: int | None = None,
     ) -> list[dict[str, Any]]:
         query = (
             "SELECT p.*, c.title AS category_title, "
@@ -3414,7 +3433,7 @@ class TenantBusinessService:
             "FROM tenant_sale_plans p "
             "LEFT JOIN tenant_plan_categories c "
             "ON c.id=p.category_id AND c.tenant_id=p.tenant_id "
-            "WHERE p.tenant_id=?"
+            "WHERE p.tenant_id=? AND p.is_dynamic=0"
         )
         args: list[Any] = [self.tenant_id]
         if public:
@@ -3422,6 +3441,15 @@ class TenantBusinessService:
                 " AND p.status='active' "
                 "AND (p.category_id IS NULL OR c.status='active')"
             )
+        if public:
+            query += " AND (p.server_id IS NULL OR NOT EXISTS (SELECT 1 FROM tenant_server_sales_settings ss WHERE ss.tenant_id=p.tenant_id AND ss.server_id=p.server_id AND json_extract(ss.settings_json,'$.mode')='dynamic'))"
+        if server_id is not None:
+            self.server(int(server_id))
+            if public:
+                settings=self.conn.execute("SELECT settings_json FROM tenant_server_sales_settings WHERE tenant_id=? AND server_id=?",(self.tenant_id,int(server_id))).fetchone()
+                if settings and json.loads(settings["settings_json"]).get("mode")=="dynamic": return []
+            query += " AND (p.server_id IS NULL OR p.server_id=?)"
+            args.append(int(server_id))
         if category_id is not None:
             query += " AND p.category_id=?"
             args.append(int(category_id))
@@ -3711,10 +3739,18 @@ class TenantBusinessService:
     ) -> dict[str, Any]:
         customer = self._customer(actor_id)
         plan = self.plan(plan_id, public=True)
+        if plan.get("server_id") is not None:
+            if server_id is not None and int(server_id)!=int(plan["server_id"]):
+                raise TenantBusinessError("plan does not belong to this server")
+            server_id=int(plan["server_id"])
         selected_server_id: int | None = None
         if server_id is not None:
             selected = self._purchase_server(int(server_id))
             selected_server_id = int(selected["id"])
+        if selected_server_id is not None and not plan.get("is_dynamic"):
+            row=self.conn.execute("SELECT settings_json FROM tenant_server_sales_settings WHERE tenant_id=? AND server_id=?",(self.tenant_id,selected_server_id)).fetchone()
+            if row and json.loads(row["settings_json"]).get("mode")=="dynamic":
+                raise TenantBusinessError("server only accepts dynamic plans")
         now = iso_utc(utcnow())
         with transaction(self.conn):
             cursor = self.conn.execute(
@@ -3747,6 +3783,13 @@ class TenantBusinessService:
     ) -> dict[str, Any]:
         customer = self._customer(actor_id)
         selected = self._purchase_server(int(server_id))
+        current = self.order(actor_id,int(order_id))
+        plan = self.plan(int(current["plan_id"]),public=False)
+        if plan.get("server_id") is not None and int(plan["server_id"])!=int(server_id):
+            raise TenantBusinessError("plan does not belong to this server")
+        sales = self.conn.execute("SELECT settings_json FROM tenant_server_sales_settings WHERE tenant_id=? AND server_id=?", (self.tenant_id, int(server_id))).fetchone()
+        if sales and json.loads(sales["settings_json"]).get("mode")=="dynamic" and not plan.get("is_dynamic"):
+            raise TenantBusinessError("fixed plans are disabled on this server")
         now = iso_utc(utcnow())
         with transaction(self.conn):
             changed = self.conn.execute(
@@ -3938,6 +3981,12 @@ class TenantBusinessService:
         customer = self._customer(actor_id)
         self._require_completed_rotation(subscription_id)
         plan = self.plan(plan_id, public=True)
+        try:
+            subscription = self.customer_subscription_status(actor_id,subscription_id=subscription_id,refresh=False)
+        except TenantBusinessError as exc:
+            raise TenantBusinessError("subscription cannot be renewed") from exc
+        if plan.get("server_id") is not None and int(plan["server_id"])!=int(subscription.get("server_id") or 0):
+            raise TenantBusinessError("renewal plan does not belong to this server")
         eligibility = self.renewal_eligibility(
             actor_id, subscription_id=int(subscription_id)
         )
@@ -4684,6 +4733,8 @@ class TenantBusinessService:
             raise TenantBusinessError("subscription is not awaiting provisioning")
         subscription = dict(row)
         plan = self.plan(int(subscription["plan_id"]), public=False)
+        if plan.get("server_id") is not None and int(plan["server_id"])!=int(server_id):
+            raise TenantBusinessError("plan does not belong to this server")
         _, target, secret = self._panel_material(int(server_id))
         try:
             result = self.panel_adapter.provision(
@@ -4917,7 +4968,7 @@ class TenantBusinessService:
                 int(subscription["server_id"])
             )
         }
-        mappings = [
+        all_mappings = [
             row
             for row in self.conn.execute(
                 "SELECT * FROM tenant_subscription_nodes "
@@ -4926,15 +4977,18 @@ class TenantBusinessService:
                 "ORDER BY is_primary DESC, id",
                 (self.tenant_id, int(subscription_id)),
             ).fetchall()
-            if int(row["server_id"]) in desired_ids
         ]
+        mappings = [row for row in all_mappings if int(row["server_id"]) in desired_ids]
         if not mappings:
             raise TenantBusinessError("subscription has no panel targets")
 
         snapshots: list[tuple[sqlite3.Row, Any]] = []
         failed_mappings: list[sqlite3.Row] = []
         primary_usage = None
-        total_usage = 0
+        # Disabled attachments retain their last measured consumption. Otherwise
+        # disabling a node would restore quota the customer already consumed.
+        total_usage = sum(max(0, int(row["usage_bytes"] or 0)) for row in all_mappings
+                          if int(row["server_id"]) not in desired_ids)
         node_errors = 0
         last_online_values: list[str] = []
 
@@ -5279,7 +5333,9 @@ class TenantBusinessService:
         self._ensure_primary_subscription_node(subscription)
         next_plan_id = int(plan_id or subscription["plan_id"])
         if plan_id is not None:
-            self.plan(next_plan_id, public=False)
+            renewal_plan=self.plan(next_plan_id,public=False)
+            if renewal_plan.get("server_id") is not None and int(renewal_plan["server_id"])!=int(subscription["server_id"]):
+                raise TenantBusinessError("renewal plan does not belong to this server")
         clean_volume_mode = str(volume_mode or "reset").strip().lower()
         clean_time_mode = str(time_mode or "reset").strip().lower()
         if clean_volume_mode not in ("add", "reset"):
@@ -5693,7 +5749,7 @@ class TenantBusinessService:
         if str(target.kind or "").lower() != "hiddify":
             raise TenantBusinessError("panel user page is unavailable")
 
-        base = str(target.endpoint or "").strip().rstrip("/")
+        base = str(target.public_origin or target.endpoint or "").strip().rstrip("/")
         parsed = urlsplit(base)
         if (
             str(parsed.scheme or "").lower() not in ("http", "https")

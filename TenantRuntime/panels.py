@@ -30,6 +30,7 @@ class PanelTarget:
     xnet_sub_port: int = 0
     xnet_sub_path: str = ""
     xnet_api_url: str = ""
+    public_origin: str = ""
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,8 @@ class ProvisionRequest:
     duration_days: int
     expires_at: str
     idempotency_key: str
+    external_ref: str = ""
+    name: str = ""
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,8 @@ class PanelUserResult:
     expires_at: str | None = None
     last_online: str | None = None
     subscription_url: str = ""
+    name: str = ""
+    comment: str = ""
 
 
 @dataclass(frozen=True)
@@ -78,8 +83,30 @@ class UsageResult:
     last_online: str | None = None
 
 
+def decode_panel_note(raw: object) -> dict:
+    """Keep user aliases when existing renewal markers follow JSON notes."""
+    import json
+    text = str(raw or "").strip()
+    try:
+        value, end = json.JSONDecoder().raw_decode(text)
+        if isinstance(value, dict):
+            tail = text[end:].strip()
+            if tail:
+                value["note"] = (str(value.get("note") or "") + " " + tail).strip()
+            return value
+    except ValueError:
+        pass
+    return {"note": text}
+
+
 class PanelAdapter(Protocol):
     def inspect_connection(self, *, target: PanelTarget, secret: str) -> dict: ...
+
+    def list_users(self, *, target: PanelTarget, secret: str) -> list[dict]: ...
+
+    def update_user(self, *, target: PanelTarget, secret: str,
+                    external_ref: str, changes: dict) -> PanelUserResult: ...
+
 
     def provision(
         self, *, target: PanelTarget, secret: str, request: ProvisionRequest
@@ -195,6 +222,19 @@ class RoutedPanelAdapter:
         if inspect is None:
             raise PanelError("panel connection inspection is unavailable")
         return inspect(target=target, secret=secret)
+
+    def list_users(self, *, target: PanelTarget, secret: str) -> list[dict]:
+        method = getattr(self._adapter(target), "list_users", None)
+        if not callable(method):
+            raise PanelError("panel user inventory is unavailable")
+        return method(target=target, secret=secret)
+
+    def update_user(self, *, target: PanelTarget, secret: str,
+                    external_ref: str, changes: dict) -> PanelUserResult:
+        method = getattr(self._adapter(target), "update_user", None)
+        if not callable(method):
+            raise PanelError("panel user edits are unavailable")
+        return method(target=target, secret=secret, external_ref=external_ref, changes=changes)
 
     def provision(
         self, *, target: PanelTarget, secret: str, request: ProvisionRequest
