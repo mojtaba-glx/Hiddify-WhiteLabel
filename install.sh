@@ -364,9 +364,682 @@ stop_services() {
     run_systemctl stop "$MASTER_UNIT" || true
 }
 
-restart_services() {
+active_runtime_units() {
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        return 0
+    fi
+    systemctl list-units \
+        --type=service \
+        --state=active \
+        --full \
+        --no-legend \
+        'hiddify-whitelabel-runtime@*.service' 2>/dev/null \
+        | awk '{print $1}' \
+        | grep -E '^hiddify-whitelabel-runtime@[0-9]+\.service
+enable_services() {
+    local unit
+    run_systemctl enable "$MASTER_UNIT"
+    while IFS= read -r unit; do run_systemctl enable "$unit"; done < <(runtime_units)
+}
+
+disable_services() {
+    local unit
+    while IFS= read -r unit; do run_systemctl disable "$unit" || true; done < <(runtime_units)
+    run_systemctl disable "$MASTER_UNIT" || true
+}
+
+disable_obsolete_shards() {
+    local old_count new_count index unit
+    new_count="$(shard_count)"
+    old_count="$new_count"
+    if [[ -f "$ROOT_DIR/runtime/installed-shard-count" ]]; then
+        old_count="$(cat "$ROOT_DIR/runtime/installed-shard-count")"
+        [[ "$old_count" =~ ^[1-9][0-9]*$ ]] || old_count="$new_count"
+    fi
+    if (( old_count > new_count )); then
+        for ((index=new_count; index<old_count; index++)); do
+            unit="hiddify-whitelabel-runtime@${index}.service"
+            run_systemctl stop "$unit" || true
+            run_systemctl disable "$unit" || true
+        done
+    fi
+}
+
+status_services() {
+    local unit master_state
+    echo
+    echo "Hiddify WhiteLabel v$(version)"
+    master_state="$(systemctl is-active "$MASTER_UNIT" 2>/dev/null || true)"
+    printf 'MasterBot: %s\n' "${master_state:-unknown}"
+    while IFS= read -r unit; do
+        printf '%s: %s\n' "$unit" "$(systemctl is-active "$unit" 2>/dev/null || true)"
+    done < <(runtime_units)
+}
+
+health_services() {
+    local unit failed=0
+    as_service_user "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/healthcheck.py"         --env-file "$ENV_FILE" || failed=1
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+        systemctl is-active --quiet "$MASTER_UNIT" || {
+            echo "ERROR: $MASTER_UNIT is not active."
+            failed=1
+        }
+        while IFS= read -r unit; do
+            systemctl is-active --quiet "$unit" || {
+                echo "ERROR: $unit is not active."
+                failed=1
+            }
+        done < <(runtime_units)
+    fi
+    return "$failed"
+}
+
+migrate_action() {
+    as_service_user "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/migrate.py"         --env-file "$ENV_FILE"
+}
+
+install_all() {
+    require_root
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo "DRY-RUN: create/repair venv, environment, database, systemd units and manager command."
+        run_systemctl daemon-reload
+        enable_services
+        start_services
+        return
+    fi
+    ensure_directories
+    ensure_venv
+    ensure_environment
+    migrate_action
+
+    trap rollback_units ERR
+    install_units
+    systemctl daemon-reload
+    disable_obsolete_shards
+    enable_services
+    restart_services
+    health_services
+    printf '%s\n' "$(shard_count)" > "$ROOT_DIR/runtime/installed-shard-count"
+    chmod 600 "$ROOT_DIR/runtime/installed-shard-count"
+    install_manager_command
+    trap - ERR
+
+    echo
+    echo "OK: Hiddify WhiteLabel v$(version) installed."
+    echo "Manager command: sudo whitelabel"
+}
+
+run_update_preflight() {
+    echo "Running quick update validation..."
+    as_service_user "$ROOT_DIR/.venv/bin/python" -m compileall -q         "$ROOT_DIR/MasterBot"         "$ROOT_DIR/TenantRuntime"         "$ROOT_DIR/Gateway"         "$ROOT_DIR/LicenseService"         "$ROOT_DIR/Provisioning"         "$ROOT_DIR/Shared"         "$ROOT_DIR/Database"         "$ROOT_DIR/scripts"
+    bash -n "$ROOT_DIR/install.sh"
+    bash -n "$ROOT_DIR/bootstrap.sh"
+    as_service_user "$ROOT_DIR/.venv/bin/python"         "$ROOT_DIR/scripts/release_drill.py" --plan-only --json >/dev/null
+    echo "Quick update validation passed."
+}
+
+update_action() {
+    require_root
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo "DRY-RUN: fetch $UPDATE_REMOTE/$UPDATE_BRANCH, validate new code, snapshot .env/database, migrate, refresh units, restart and rollback everything on failure."
+        return
+    fi
+    require_command git
+    [[ -d "$ROOT_DIR/.git" ]] || {
+        echo "ERROR: this installation is not a Git checkout." >&2
+        return 1
+    }
+
+    local dirty old_sha new_sha old_version new_version snapshot_dir update_failed=0
+    dirty="$(as_service_user git -C "$ROOT_DIR" status --porcelain --untracked-files=no)"
+    if [[ -n "$dirty" ]]; then
+        echo "ERROR: tracked project files have local changes; update aborted." >&2
+        return 1
+    fi
+
+    old_sha="$(as_service_user git -C "$ROOT_DIR" rev-parse HEAD)"
+    old_version="$(version)"
+    as_service_user git -C "$ROOT_DIR" fetch "$UPDATE_REMOTE" "$UPDATE_BRANCH" --prune
+    new_sha="$(as_service_user git -C "$ROOT_DIR" rev-parse "$UPDATE_REMOTE/$UPDATE_BRANCH")"
+    new_version="$(as_service_user git -C "$ROOT_DIR" show "$new_sha:VERSION" 2>/dev/null | tr -d '\r\n' || echo unknown)"
+
+    if [[ "$old_sha" == "$new_sha" ]]; then
+        echo "Already up to date: v$old_version"
+        health_services
+        return
+    fi
+
+    echo "Preparing update v$old_version -> v$new_version"
+    as_service_user git -C "$ROOT_DIR" checkout -q "$UPDATE_BRANCH"
+    as_service_user git -C "$ROOT_DIR" reset --hard "$new_sha"
+    ensure_directories
+    ensure_venv
+    if ! run_update_preflight; then
+        echo "ERROR: new version failed quick validation; restoring previous source." >&2
+        as_service_user git -C "$ROOT_DIR" reset --hard "$old_sha"
+        ensure_venv
+        return 1
+    fi
+
+    snapshot_dir="$(
+        as_service_user "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/update_snapshot.py" create \
+            --env-file "$ENV_FILE" \
+            --output-root "$ROOT_DIR/runtime/update-rollback" \
+            --source-sha "$old_sha"
+    )"
+    [[ -n "$snapshot_dir" && -d "$snapshot_dir" ]] || {
+        echo "ERROR: update snapshot could not be created." >&2
+        as_service_user git -C "$ROOT_DIR" reset --hard "$old_sha"
+        ensure_venv
+        return 1
+    }
+    echo "Rollback snapshot created."
+
     stop_services
-    start_services
+    if ! migrate_action; then update_failed=1; fi
+    if [[ "$update_failed" -eq 0 ]] && ! install_units; then update_failed=1; fi
+    if [[ "$update_failed" -eq 0 ]] && ! systemctl daemon-reload; then update_failed=1; fi
+    if [[ "$update_failed" -eq 0 ]] && ! disable_obsolete_shards; then update_failed=1; fi
+    if [[ "$update_failed" -eq 0 ]] && ! enable_services; then update_failed=1; fi
+    if [[ "$update_failed" -eq 0 ]] && ! start_services; then update_failed=1; fi
+    if [[ "$update_failed" -eq 0 ]] && ! health_services; then update_failed=1; fi
+
+    if [[ "$update_failed" -ne 0 ]]; then
+        echo "ERROR: update failed after snapshot; restoring v$old_version." >&2
+        stop_services || true
+        # Restore data before resetting source: update_snapshot.py belongs to
+        # the candidate version and may not exist in the previous release.
+        as_service_user "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/update_snapshot.py" restore "$snapshot_dir" || {
+            echo "CRITICAL: automatic database/environment rollback failed." >&2
+            return 1
+        }
+        as_service_user git -C "$ROOT_DIR" reset --hard "$old_sha" || true
+        ensure_venv || true
+        install_units || true
+        systemctl daemon-reload || true
+        disable_obsolete_shards || true
+        enable_services || true
+        start_services || true
+        if health_services; then
+            echo "ROLLBACK OK: v$old_version restored." >&2
+        else
+            echo "CRITICAL: rollback completed but health check still fails." >&2
+        fi
+        return 1
+    fi
+
+    printf '%s\n' "$(shard_count)" > "$ROOT_DIR/runtime/installed-shard-count"
+    chmod 600 "$ROOT_DIR/runtime/installed-shard-count"
+    install_manager_command
+    echo "OK: update completed. Current version: v$(version)"
+    echo "Rollback snapshot retained at: $snapshot_dir"
+}
+
+backup_action() {
+    as_service_user "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/backup.py"         --env-file "$ENV_FILE"
+}
+
+restore_action() {
+    require_root
+    local backup_file
+    read_tty backup_file -p "Encrypted backup file: "
+    stop_services
+    if as_service_user "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/restore.py"         "$backup_file" --env-file "$ENV_FILE" --yes; then
+        start_services
+        health_services
+    else
+        echo "ERROR: restore failed; starting existing installation." >&2
+        start_services
+        return 1
+    fi
+}
+
+change_master_token() {
+    require_root
+    local token backup
+    read_tty_secret token "New MasterBot token (hidden): "
+    if ! verify_master_token_value "$token"; then
+        unset token
+        echo "ERROR: token was not changed." >&2
+        return 1
+    fi
+    backup="$ROOT_DIR/runtime/env-before-token-$$"
+    cp -a "$ENV_FILE" "$backup"
+    chmod 600 "$backup"
+    if ! edit_env_value MASTER_BOT_TOKEN "$token"; then
+        rm -f "$backup"
+        unset token
+        return 1
+    fi
+    unset token
+    run_systemctl restart "$MASTER_UNIT"
+    sleep 2
+    if systemctl is-active --quiet "$MASTER_UNIT"; then
+        rm -f "$backup"
+        echo "OK: MasterBot token updated."
+    else
+        echo "ERROR: MasterBot failed after token change; restoring previous .env." >&2
+        cp -a "$backup" "$ENV_FILE"
+        rm -f "$backup"
+        run_systemctl restart "$MASTER_UNIT" || true
+        return 1
+    fi
+}
+
+change_admin_id() {
+    require_root
+    local admin_id env_backup
+    read_tty admin_id -p "New Master admin numeric Telegram ID: "
+    env_backup="$(mktemp "$ROOT_DIR/runtime/env-before-admin.XXXXXX")"
+    cp -a "$ENV_FILE" "$env_backup"
+    chmod 600 "$env_backup"
+    if ! edit_env_value MASTER_ADMIN_ID "$admin_id"; then
+        rm -f "$env_backup"
+        return 1
+    fi
+    if run_systemctl restart "$MASTER_UNIT" && sleep 2 && systemctl is-active --quiet "$MASTER_UNIT"; then
+        rm -f "$env_backup"
+        echo "OK: Master admin ID updated."
+        return 0
+    fi
+    echo "ERROR: MasterBot failed after admin ID change; restoring previous .env." >&2
+    cp -a "$env_backup" "$ENV_FILE"
+    rm -f "$env_backup"
+    run_systemctl restart "$MASTER_UNIT" || true
+    return 1
+}
+
+change_shards() {
+    require_root
+    local count env_backup
+    read_tty count -p "Runtime shard count (1-64): "
+    env_backup="$ROOT_DIR/runtime/env-before-shards-$$"
+    cp -a "$ENV_FILE" "$env_backup"
+    chmod 600 "$env_backup"
+
+    if ! edit_env_value RUNTIME_SHARD_COUNT "$count"; then
+        rm -f "$env_backup"
+        return 1
+    fi
+
+    if install_units \
+        && systemctl daemon-reload \
+        && disable_obsolete_shards \
+        && enable_services \
+        && restart_services \
+        && health_services; then
+        printf '%s\n' "$(shard_count)" > "$ROOT_DIR/runtime/installed-shard-count"
+        chmod 600 "$ROOT_DIR/runtime/installed-shard-count"
+        rm -f "$env_backup"
+        echo "OK: runtime shard count updated."
+        return 0
+    fi
+
+    echo "ERROR: shard change failed; restoring previous configuration." >&2
+    cp -a "$env_backup" "$ENV_FILE"
+    rm -f "$env_backup"
+    rollback_units || true
+    systemctl daemon-reload || true
+    return 1
+}
+
+change_timezone() {
+    require_root
+    local timezone env_backup
+    read_tty timezone -p "Display timezone (example: Asia/Tehran): "
+    [[ -e "/usr/share/zoneinfo/$timezone" ]] || {
+        echo "ERROR: timezone does not exist on this server." >&2
+        return 1
+    }
+    env_backup="$ROOT_DIR/runtime/env-before-timezone-$$"
+    cp -a "$ENV_FILE" "$env_backup"
+    chmod 600 "$env_backup"
+    if ! edit_env_value DISPLAY_TIMEZONE "$timezone"; then
+        rm -f "$env_backup"
+        return 1
+    fi
+    if run_systemctl restart "$MASTER_UNIT" && sleep 2 && systemctl is-active --quiet "$MASTER_UNIT"; then
+        rm -f "$env_backup"
+        echo "OK: display timezone updated."
+        return 0
+    fi
+    echo "ERROR: MasterBot failed after timezone change; restoring previous .env." >&2
+    cp -a "$env_backup" "$ENV_FILE"
+    rm -f "$env_backup"
+    run_systemctl restart "$MASTER_UNIT" || true
+    return 1
+}
+
+change_smart_sub_url() {
+    require_root
+    local public_url env_backup
+    read_tty public_url -p "Smart subscription public base URL (example: https://sub.example.com): "
+    env_backup="$ROOT_DIR/runtime/env-before-smart-sub-url-$$"
+    cp -a "$ENV_FILE" "$env_backup"
+    chmod 600 "$env_backup"
+    if ! edit_env_value SMART_SUB_PUBLIC_BASE_URL "$public_url"; then
+        rm -f "$env_backup"
+        return 1
+    fi
+    if restart_services && health_services; then
+        rm -f "$env_backup"
+        echo "OK: smart subscription public URL updated."
+        return 0
+    fi
+    echo "ERROR: services failed after smart subscription URL change; restoring previous .env." >&2
+    cp -a "$env_backup" "$ENV_FILE"
+    rm -f "$env_backup"
+    restart_services || true
+    return 1
+}
+
+change_smart_sub_port() {
+    require_root
+    local port env_backup
+    read_tty port -p "Smart subscription listener port (1-65535): "
+    env_backup="$ROOT_DIR/runtime/env-before-smart-sub-port-$$"
+    cp -a "$ENV_FILE" "$env_backup"
+    chmod 600 "$env_backup"
+    if ! edit_env_value SMART_SUB_PORT "$port"; then
+        rm -f "$env_backup"
+        return 1
+    fi
+    if restart_services && health_services; then
+        rm -f "$env_backup"
+        echo "OK: smart subscription listener port updated."
+        return 0
+    fi
+    echo "ERROR: services failed after smart subscription port change; restoring previous .env." >&2
+    cp -a "$env_backup" "$ENV_FILE"
+    rm -f "$env_backup"
+    restart_services || true
+    return 1
+}
+change_enforcer_interval() {
+    require_root
+    local value env_backup
+    read_tty value -p "Global enforcer interval in seconds (10-3600): "
+    env_backup="$ROOT_DIR/runtime/env-before-enforcer-$$"
+    cp -a "$ENV_FILE" "$env_backup"; chmod 600 "$env_backup"
+    if ! edit_env_value RUNTIME_ENFORCER_SECONDS "$value"; then rm -f "$env_backup"; return 1; fi
+    if restart_services && health_services; then rm -f "$env_backup"; echo "OK: enforcer interval updated."; return 0; fi
+    cp -a "$env_backup" "$ENV_FILE"; rm -f "$env_backup"; restart_services || true; return 1
+}
+
+change_reminder_days() {
+    require_root
+    local value env_backup
+    read_tty value -p "Renewal reminder days threshold (1-30): "
+    env_backup="$ROOT_DIR/runtime/env-before-reminder-days-$$"
+    cp -a "$ENV_FILE" "$env_backup"; chmod 600 "$env_backup"
+    if ! edit_env_value RUNTIME_REMINDER_DAYS "$value"; then rm -f "$env_backup"; return 1; fi
+    if restart_services && health_services; then rm -f "$env_backup"; echo "OK: reminder days updated."; return 0; fi
+    cp -a "$env_backup" "$ENV_FILE"; rm -f "$env_backup"; restart_services || true; return 1
+}
+
+change_reminder_gb() {
+    require_root
+    local value env_backup
+    read_tty value -p "Renewal reminder remaining GB threshold (1-1000): "
+    env_backup="$ROOT_DIR/runtime/env-before-reminder-gb-$$"
+    cp -a "$ENV_FILE" "$env_backup"; chmod 600 "$env_backup"
+    if ! edit_env_value RUNTIME_REMINDER_REMAINING_GB "$value"; then rm -f "$env_backup"; return 1; fi
+    if restart_services && health_services; then rm -f "$env_backup"; echo "OK: reminder GB threshold updated."; return 0; fi
+    cp -a "$env_backup" "$ENV_FILE"; rm -f "$env_backup"; restart_services || true; return 1
+}
+show_nonsecret_settings() {
+    local admin_id shards timezone token_state smart_url smart_port enforcer_seconds reminder_days reminder_gb
+    admin_id="$(sed -n 's/^MASTER_ADMIN_ID=//p' "$ENV_FILE" | tail -n 1)"
+    shards="$(shard_count)"
+    timezone="$(sed -n 's/^DISPLAY_TIMEZONE=//p' "$ENV_FILE" | tail -n 1)"
+    smart_url="$(sed -n 's/^SMART_SUB_PUBLIC_BASE_URL=//p' "$ENV_FILE" | tail -n 1)"
+    smart_port="$(sed -n 's/^SMART_SUB_PORT=//p' "$ENV_FILE" | tail -n 1)"
+    enforcer_seconds="$(sed -n 's/^RUNTIME_ENFORCER_SECONDS=//p' "$ENV_FILE" | tail -n 1)"
+    reminder_days="$(sed -n 's/^RUNTIME_REMINDER_DAYS=//p' "$ENV_FILE" | tail -n 1)"
+    reminder_gb="$(sed -n 's/^RUNTIME_REMINDER_REMAINING_GB=//p' "$ENV_FILE" | tail -n 1)"
+    [[ -n "$timezone" ]] || timezone="Asia/Tehran"
+    [[ -n "$smart_port" ]] || smart_port="8091"
+    [[ -n "$enforcer_seconds" ]] || enforcer_seconds="20"
+    [[ -n "$reminder_days" ]] || reminder_days="3"
+    [[ -n "$reminder_gb" ]] || reminder_gb="3"
+    if grep -q '^MASTER_BOT_TOKEN=..*' "$ENV_FILE" 2>/dev/null; then token_state="configured"; else token_state="missing"; fi
+    echo
+    echo "------ Current settings ------"
+    echo "Version: v$(version)"
+    echo "MasterBot token: $token_state"
+    echo "Master admin ID: ${admin_id:-missing}"
+    echo "Runtime shards: $shards"
+    echo "Display timezone: $timezone"
+    echo "Smart subscription URL: ${smart_url:-not configured}"
+    echo "Smart subscription port: $smart_port"
+    echo "Global enforcer interval: ${enforcer_seconds}s"
+    echo "Reminder days threshold: $reminder_days"
+    echo "Reminder remaining GB: $reminder_gb"
+    echo "Database: configured in private .env"
+    echo "------------------------------"
+}
+logs_menu() {
+    require_root
+    local choice
+    cat <<'EOF'
+
+========== Logs ==========
+1) MasterBot - last 200 lines
+2) MasterBot - live
+3) TenantRuntime - last 200 lines
+4) TenantRuntime - live
+5) Errors from all WhiteLabel services
+0) Back
+EOF
+    read_tty choice -p "Select: "
+    case "$choice" in
+        1) journalctl -u "$MASTER_UNIT" -n 200 --no-pager ;;
+        2) journalctl -u "$MASTER_UNIT" -f ;;
+        3) journalctl -u 'hiddify-whitelabel-runtime@*' -n 200 --no-pager ;;
+        4) journalctl -u 'hiddify-whitelabel-runtime@*' -f ;;
+        5) journalctl -u "$MASTER_UNIT" -u 'hiddify-whitelabel-runtime@*' -p warning -n 250 --no-pager ;;
+        0) return 0 ;;
+        *) echo "Invalid option." >&2; return 2 ;;
+    esac
+}
+
+settings_menu() {
+    require_root
+    local choice
+    while true; do
+        cat <<'EOF'
+
+======== Settings ========
+1) Show current non-secret settings
+2) Change MasterBot token
+3) Change Master admin Telegram ID
+4) Change Runtime shard count
+5) Change display timezone
+6) Change Smart Subscription public URL
+7) Change Smart Subscription listener port
+8) Change Global Enforcer interval
+9) Change Reminder days threshold
+10) Change Reminder remaining GB threshold
+0) Back
+EOF
+        read_tty choice -p "Select: "
+        case "$choice" in
+            1) show_nonsecret_settings ;;
+            2) change_master_token ;;
+            3) change_admin_id ;;
+            4) change_shards ;;
+            5) change_timezone ;;
+            6) change_smart_sub_url ;;
+            7) change_smart_sub_port ;;
+            8) change_enforcer_interval ;;
+            9) change_reminder_days ;;
+            10) change_reminder_gb ;;
+            0) return 0 ;;
+            *) echo "Invalid option." >&2 ;;
+        esac
+    done
+}
+
+uninstall_units() {
+    require_root
+    stop_services || true
+    disable_services
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+        rm -f "$SYSTEMD_DIR/$MASTER_UNIT" "$SYSTEMD_DIR/$RUNTIME_TEMPLATE"
+        systemctl daemon-reload
+    else
+        echo "DRY-RUN: remove WhiteLabel systemd units; keep project/data."
+    fi
+    echo "OK: services removed; project and data preserved."
+}
+
+full_uninstall() {
+    require_root
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo "DRY-RUN: stop/disable services, remove units, manager command, project files and dedicated service user."
+        return
+    fi
+
+    local confirm user
+    echo
+    echo "WARNING: this removes the application, database, .env, backups and logs."
+    echo "Create/export any backup you need before continuing."
+    read_tty confirm -p "Type DELETE ALL to continue: "
+    [[ "$confirm" == "DELETE ALL" ]] || {
+        echo "Cancelled."
+        return 0
+    }
+
+    user="$(service_user)"
+    stop_services || true
+    disable_services || true
+    rm -f "$SYSTEMD_DIR/$MASTER_UNIT" "$SYSTEMD_DIR/$RUNTIME_TEMPLATE" "$MANAGER_COMMAND"
+    systemctl daemon-reload || true
+    cd /
+    rm -rf -- "$ROOT_DIR"
+    if [[ "$user" == "whitelabel" ]] && id "$user" >/dev/null 2>&1; then
+        userdel -r "$user" >/dev/null 2>&1 || userdel "$user" >/dev/null 2>&1 || true
+    fi
+    echo "OK: Hiddify WhiteLabel was completely removed."
+}
+
+main_menu() {
+    local choice
+    while true; do
+        cat <<EOF
+
+========================================
+ Hiddify WhiteLabel v$(version)
+========================================
+1) Install / Repair
+2) Update from GitHub
+3) Restart all bots
+4) Service status
+5) Logs
+6) Health check
+7) Settings
+8) Create encrypted backup
+9) Restore encrypted backup
+10) Run database migrations
+11) Start all bots
+12) Stop all bots
+13) Remove services (keep data)
+14) FULL uninstall
+0) Exit
+========================================
+EOF
+        read_tty choice -p "Select: "
+        case "$choice" in
+            1) install_all ;;
+            2) update_action ;;
+            3) require_root; restart_services ;;
+            4) status_services ;;
+            5) logs_menu ;;
+            6) health_services ;;
+            7) settings_menu ;;
+            8) backup_action ;;
+            9) restore_action ;;
+            10) migrate_action ;;
+            11) require_root; start_services ;;
+            12) require_root; stop_services ;;
+            13) uninstall_units ;;
+            14) full_uninstall; return 0 ;;
+            0) return 0 ;;
+            *) echo "Invalid option." >&2 ;;
+        esac
+    done
+}
+
+dispatch() {
+    case "$ACTION" in
+        install) install_all ;;
+        update) update_action ;;
+        start) require_root; start_services ;;
+        stop) require_root; stop_services ;;
+        restart) require_root; restart_services ;;
+        status) status_services ;;
+        health) health_services ;;
+        logs) logs_menu ;;
+        backup) backup_action ;;
+        restore) restore_action ;;
+        migrate) migrate_action ;;
+        settings) settings_menu ;;
+        token) change_master_token ;;
+        admin-id) change_admin_id ;;
+        shards) change_shards ;;
+        timezone) change_timezone ;;
+        smart-sub-url) change_smart_sub_url ;;
+        smart-sub-port) change_smart_sub_port ;;
+        enforcer-interval) change_enforcer_interval ;;
+        reminder-days) change_reminder_days ;;
+        reminder-gb) change_reminder_gb ;;
+        uninstall) uninstall_units ;;
+        uninstall-full) full_uninstall ;;
+        version) version; echo ;;
+        "") main_menu ;;
+    esac
+}
+
+dispatch
+ \
+        || true
+}
+
+restart_services() {
+    local unit
+
+    echo "Restarting WhiteLabel bots..."
+    run_systemctl daemon-reload
+
+    echo "  - MasterBot"
+    run_systemctl restart "$MASTER_UNIT"
+
+    while IFS= read -r unit; do
+        [[ -n "$unit" ]] || continue
+        echo "  - $unit"
+        run_systemctl restart "$unit"
+    done < <(
+        {
+            runtime_units
+            active_runtime_units
+        } | sort -u
+    )
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo "DRY-RUN: health check after restart"
+        return 0
+    fi
+
+    sleep 2
+    if health_services; then
+        echo "OK: all WhiteLabel bots restarted successfully."
+        status_services
+        return 0
+    fi
+
+    echo "ERROR: one or more WhiteLabel services failed after restart." >&2
+    status_services
+    return 1
 }
 
 enable_services() {
