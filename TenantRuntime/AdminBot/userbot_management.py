@@ -758,6 +758,19 @@ async def _send_payment_detail(
         f"◈ یادداشت بررسی: {pay.get('review_note') or '-'}",
         InlineKeyboardMarkup(rows),
     )
+    media = business.payment_receipt_media_admin(
+        actor, payment_key=pay["payment_key"]
+    )
+    if media is not None and update.effective_message is not None:
+        receipt_file = BytesIO(bytes(media["media"]))
+        receipt_file.name = "receipt.jpg"
+        try:
+            await update.effective_message.reply_photo(
+                photo=receipt_file,
+                caption=f"🧾 تصویر رسید {pay['payment_key']}",
+            )
+        except (BadRequest, Forbidden, NetworkError, TimedOut):
+            pass
 
 
 def _gift_stats(business: Any, actor: int) -> dict[str, int]:
