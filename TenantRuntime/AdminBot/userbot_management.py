@@ -167,10 +167,19 @@ def build_users_search_menu_keyboard() -> InlineKeyboardMarkup:
 
 def build_payments_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅لیست تراکنشات تایید شده", callback_data="userbot:payments:list:approved")],
-        [InlineKeyboardButton("🚫لیست تراکنشات رد شده", callback_data="userbot:payments:list:rejected")],
-        [InlineKeyboardButton("⏳لیست تراکنشات در انتظار", callback_data="userbot:payments:list:pending")],
-        [InlineKeyboardButton("💳لیست تراکنشات کارت به کارت", callback_data="userbot:payments:list:card")],
+        [InlineKeyboardButton("⏳ در انتظار بررسی", callback_data="userbot:payments:list:pending")],
+        [
+            InlineKeyboardButton("✅ تایید شده", callback_data="userbot:payments:list:approved"),
+            InlineKeyboardButton("🚫 رد شده", callback_data="userbot:payments:list:rejected"),
+        ],
+        [
+            InlineKeyboardButton("💳 کارت به کارت", callback_data="userbot:payments:list:card"),
+            InlineKeyboardButton("🪙 Crypto", callback_data="userbot:payments:list:crypto"),
+        ],
+        [
+            InlineKeyboardButton("➕ شارژ کیف پول", callback_data="userbot:payments:list:wallet_topup"),
+            InlineKeyboardButton("💰 پرداخت کیف پول", callback_data="userbot:payments:list:wallet_order"),
+        ],
         [InlineKeyboardButton("🔍جستجوی تراکنش", callback_data="userbot:payments:search")],
         [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:menu")],
     ])
@@ -630,17 +639,32 @@ async def _send_order_detail(update: Update, business: Any, actor: int, order_id
     )
 
 
-async def _send_payments_page(update: Update, business: Any, actor: int, filter_type: str, page: int = 1) -> None:
+async def _send_payments_page(
+    update: Update,
+    business: Any,
+    actor: int,
+    filter_type: str,
+    page: int = 1,
+) -> None:
     status = filter_type if filter_type in ("approved", "rejected", "pending") else None
-    kind = "card" if filter_type == "card" else None
-    items = business.list_receipts_history_admin(actor, status=status, kind=kind)
+    kind = filter_type if filter_type in ("card", "crypto") else None
+    source = filter_type if filter_type in ("wallet_topup", "wallet_order") else None
+    items = business.list_payments_admin(
+        actor,
+        status=status,
+        kind=kind,
+        source=source,
+    )
     selected, page, pages = _page(items, page)
     title = {
-        "approved": "لیست تراکنشات تایید شده ✅",
-        "rejected": "لیست تراکنشات رد شده 🚫",
-        "pending": "لیست تراکنشات در انتظار ⏳",
-        "card": "لیست تراکنشات کارت به کارت 💳",
-    }.get(filter_type, "لیست تراکنشات")
+        "approved": "تراکنشات تایید شده ✅",
+        "rejected": "تراکنشات رد شده 🚫",
+        "pending": "تراکنشات در انتظار ⏳",
+        "card": "تراکنشات کارت به کارت 💳",
+        "crypto": "تراکنشات Crypto 🪙",
+        "wallet_topup": "شارژهای کیف پول ➕",
+        "wallet_order": "پرداخت‌های مستقیم کیف پول 💰",
+    }.get(filter_type, "همه تراکنشات")
     money: dict[str, int] = {}
     for item in items:
         currency = str(item.get("currency") or "")
@@ -648,17 +672,28 @@ async def _send_payments_page(update: Update, business: Any, actor: int, filter_
     rows: list[list[InlineKeyboardButton]] = []
     current: list[InlineKeyboardButton] = []
     for item in selected:
-        current.append(InlineKeyboardButton(str(item["id"]), callback_data=f"userbot:pay:detail:{int(item['id'])}"))
+        icon = str(item.get("provider_icon") or "💳")
+        current.append(InlineKeyboardButton(
+            f"{icon} {int(item['id'])}",
+            callback_data=f"userbot:pay:detail:{item['payment_key']}",
+        ))
         if len(current) == 3:
-            rows.append(current); current = []
+            rows.append(current)
+            current = []
     if current:
         rows.append(current)
     nav: list[InlineKeyboardButton] = []
     if page > 1:
-        nav.append(InlineKeyboardButton("➡️", callback_data=f"userbot:payments:list:{filter_type}:{page-1}"))
+        nav.append(InlineKeyboardButton(
+            "➡️",
+            callback_data=f"userbot:payments:list:{filter_type}:{page-1}",
+        ))
     nav.append(InlineKeyboardButton(f"{page}/{pages}", callback_data="userbot:noop"))
     if page < pages:
-        nav.append(InlineKeyboardButton("⬅️", callback_data=f"userbot:payments:list:{filter_type}:{page+1}"))
+        nav.append(InlineKeyboardButton(
+            "⬅️",
+            callback_data=f"userbot:payments:list:{filter_type}:{page+1}",
+        ))
     rows.append(nav)
     rows.append([InlineKeyboardButton("🔙بازگشت", callback_data="userbot:payments_menu")])
     await _edit_or_send(
@@ -672,23 +707,44 @@ async def _send_payments_page(update: Update, business: Any, actor: int, filter_
     )
 
 
-async def _send_payment_detail(update: Update, business: Any, actor: int, receipt_id: int) -> None:
-    pay = business.receipt_admin(actor, receipt_id=receipt_id)
-    status_title = {"approved": "✅ تایید شده", "rejected": "❌ رد شده", "pending": "⏳ در انتظار"}.get(str(pay.get("status")), str(pay.get("status")))
+async def _send_payment_detail(
+    update: Update,
+    business: Any,
+    actor: int,
+    payment_key: str | int,
+) -> None:
+    pay = business.payment_admin(actor, payment_key=payment_key)
+    status_title = {
+        "approved": "✅ تایید شده",
+        "rejected": "❌ رد شده",
+        "pending": "⏳ در انتظار",
+    }.get(str(pay.get("status")), str(pay.get("status")))
+    source_title = {
+        "order": "سفارش",
+        "wallet_topup": "شارژ کیف پول",
+        "wallet_order": "پرداخت مستقیم کیف پول",
+    }.get(str(pay.get("source") or ""), str(pay.get("source") or "-"))
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton("👤 پروفایل کاربر", callback_data=f"userbot:user:{int(pay['customer_id'])}")]
+        [InlineKeyboardButton(
+            "👤 پروفایل کاربر",
+            callback_data=f"userbot:user:{int(pay['customer_id'])}",
+        )]
     ]
-    if pay["status"] == "pending":
-        rows.extend([
-            [
-                InlineKeyboardButton("✅ تایید", callback_data=f"userbot:pay:review:{receipt_id}:yes"),
-                InlineKeyboardButton("❌ رد", callback_data=f"userbot:pay:review:{receipt_id}:no"),
-            ]
+    if pay["status"] == "pending" and pay.get("source") in ("order", "wallet_topup"):
+        rows.append([
+            InlineKeyboardButton(
+                "✅ تایید",
+                callback_data=f"userbot:pay:review:{pay['payment_key']}:yes",
+            ),
+            InlineKeyboardButton(
+                "❌ رد",
+                callback_data=f"userbot:pay:review:{pay['payment_key']}:no",
+            ),
         ])
     rows.append([InlineKeyboardButton("🔙بازگشت", callback_data="userbot:payments_menu")])
     await _edit_or_send(
         update,
-        f"◈ شناسه تراکنش: {receipt_id}\n"
+        f"◈ شناسه تراکنش: {pay['payment_key']}\n"
         f"👤 کاربر: {pay.get('display_name') or '-'}\n"
         f"◈ نام کاربری: {'@' + str(pay.get('username')).lstrip('@') if pay.get('username') else '-'}\n"
         f"◈ شناسه کاربر: {pay.get('telegram_user_id') or '-'}\n"
@@ -696,8 +752,10 @@ async def _send_payment_detail(update: Update, business: Any, actor: int, receip
         f"◈ مبلغ تراکنش: {int(pay.get('amount') or 0):,} {pay.get('currency') or ''}\n"
         "❖ • -------------------------- • ❖\n"
         f"◈ وضعیت: {status_title}\n"
-        f"◈ روش تراکنش: {pay.get('payment_kind') or '-'}\n"
-        f"◈ پیگیری: {pay.get('reference') or ('تصویر رسید' if pay.get('telegram_file_id') else '-')}",
+        f"◈ نوع: {source_title}\n"
+        f"◈ Provider: {pay.get('provider_icon') or ''} {pay.get('provider_title') or pay.get('payment_title') or '-'}\n"
+        f"◈ پیگیری: {pay.get('reference') or ('تصویر رسید' if pay.get('telegram_file_id') else '-')}\n"
+        f"◈ یادداشت بررسی: {pay.get('review_note') or '-'}",
         InlineKeyboardMarkup(rows),
     )
 
