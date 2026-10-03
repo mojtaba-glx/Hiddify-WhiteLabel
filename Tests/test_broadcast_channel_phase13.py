@@ -382,3 +382,146 @@ def test_result_text_distinguishes_success_partial_and_empty() -> None:
     assert "⚠️ ارسال همگانی به‌صورت ناقص انجام شد." in partial
     assert "✅ موفق: 4" in partial
     assert "❌ ناموفق: 2" in partial
+
+
+def test_channel_publish_bridges_admin_media_through_userbot(
+    monkeypatch, conn, factories, cipher
+):
+    service, _panel, _actor, _sid, _ = _service(
+        conn, factories, cipher
+    )
+    factories.bot(service.tenant_id, "user", cipher)
+    owner = service.owner_telegram_id
+    service.set_userbot_setting_admin(
+        owner, key="channel_id", value="@speedll_channel"
+    )
+    calls = []
+
+    class AdminFile:
+        async def download_as_bytearray(self):
+            return bytearray(b"channel-photo-bytes")
+
+    class AdminBot:
+        async def get_file(self, file_id):
+            assert file_id == "admin-photo-id"
+            return AdminFile()
+
+    class FakeUserBot:
+        def __init__(self, token):
+            assert token
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+        async def send_photo(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(message_id=88)
+
+    monkeypatch.setattr(phase13, "Bot", FakeUserBot)
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_message=message,
+        callback_query=None,
+    )
+    context = SimpleNamespace(
+        bot=AdminBot(),
+        user_data={
+            phase13.CHANNEL_DRAFT_KEY: {
+                "kind": "photo",
+                "text": "<b>پست</b>",
+                "file_id": "admin-photo-id",
+                "buttons": [{
+                    "text": "ورود",
+                    "url": "https://t.me/example_bot",
+                    "style": "primary",
+                }],
+            }
+        },
+    )
+
+    def admin_keyboard():
+        return "ADMIN"
+
+    ok = asyncio.run(
+        phase13._publish_channel(
+            update,
+            context,
+            service,
+            owner,
+            admin_keyboard,
+        )
+    )
+    assert ok
+    assert calls[0]["chat_id"] == "@speedll_channel"
+    assert hasattr(calls[0]["photo"], "read")
+    assert calls[0]["reply_markup"].inline_keyboard[0][0].text == "ورود"
+    assert phase13.CHANNEL_DRAFT_KEY not in context.user_data
+    assert "Message ID: <code>88</code>" in message.sent[-1][0]
+    assert message.sent[-1][1]["reply_markup"] == "ADMIN"
+
+
+def test_channel_publish_failure_keeps_draft_for_retry(
+    monkeypatch, conn, factories, cipher
+):
+    service, _panel, _actor, _sid, _ = _service(
+        conn, factories, cipher
+    )
+    factories.bot(service.tenant_id, "user", cipher)
+    owner = service.owner_telegram_id
+    service.set_userbot_setting_admin(
+        owner, key="channel_id", value="@speedll_channel"
+    )
+
+    class FailingUserBot:
+        def __init__(self, token):
+            assert token
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+        async def send_message(self, **kwargs):
+            raise RuntimeError("telegram down")
+
+    monkeypatch.setattr(phase13, "Bot", FailingUserBot)
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_message=message,
+        callback_query=None,
+    )
+    draft = {
+        "kind": "text",
+        "text": "retry me",
+        "file_id": "",
+        "buttons": [],
+    }
+    context = SimpleNamespace(
+        bot=SimpleNamespace(),
+        user_data={phase13.CHANNEL_DRAFT_KEY: draft},
+    )
+
+    ok = asyncio.run(
+        phase13._publish_channel(
+            update,
+            context,
+            service,
+            owner,
+            lambda: "ADMIN",
+        )
+    )
+    assert not ok
+    assert context.user_data[phase13.CHANNEL_DRAFT_KEY] is draft
+    assert "❌ انتشار ناموفق بود" in message.sent[-1][0]
+
+
+def test_userbot_management_routes_all_phase13_input_types() -> None:
+    source = open(
+        "TenantRuntime/AdminBot/userbot_management.py",
+        encoding="utf-8",
+    ).read()
+    for route in (
+        "broadcast_channel.handle_callback",
+        "broadcast_channel.handle_text",
+        "broadcast_channel.handle_media",
+        "broadcast_channel.handle_document",
+    ):
+        assert route in source
