@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 
 from telegram import Update
 from telegram.ext import Application
@@ -40,6 +41,7 @@ def build_tenant_application(
         .build()
     )
     application.bot_data["runtime_spec"] = spec
+    application.bot_data["runtime_started_at"] = time.time()
     application.bot_data["runtime_policy"] = policy
     application.bot_data["runtime_state"] = TenantStateStore(
         conn, scope=StateScope(tenant_id=spec.tenant_id, bot_role=spec.role)
