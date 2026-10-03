@@ -240,6 +240,7 @@ class TenantLifecycleCoordinator:
                             owner_telegram_id=owner_id,
                             cipher=self.cipher,
                             settings=reminder_values,
+                            business=service,
                         )
                         if backup_delivery is not None:
                             backup_deliveries.append(backup_delivery)
