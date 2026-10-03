@@ -155,10 +155,24 @@ USERBOT_SETTING_DEFAULTS: dict[str, Any] = {
     "enable_discount_code": True,
 
     # Force join and event/channel settings.
+    # Keep force_join_channel + event_channel_* as legacy compatibility keys.
     "force_join_enabled": False,
     "force_join_channel": "",
+    "force_join_channel_id": "",
+    "force_join_channel_username": "",
+    "force_join_channel_link": "",
+    "force_join_guide_text": (
+        "🔒 برای استفاده از ربات، ابتدا در کانال پشتیبانی عضو شوید.\n"
+        "پس از عضویت روی «✅ بررسی عضویت» بزنید."
+    ),
     "event_channel_enabled": False,
     "event_channel_id": "",
+    "purchase_event_channel_enabled": False,
+    "purchase_event_channel_id": "",
+    "payment_event_channel_enabled": False,
+    "payment_event_channel_id": "",
+    "system_event_channel_enabled": False,
+    "system_event_channel_id": "",
     "channel_id": "",
 
     # Telegram button styling.
@@ -6719,6 +6733,38 @@ class TenantBusinessService:
             and "show_multi_server" not in stored_keys
         ):
             result["show_multi_server"] = bool(result.get("show_smart_link"))
+
+        # Phase 14 compatibility: old v0.50 tenants had one force-join target
+        # and one generic event channel. Preserve those choices until each new
+        # SellBot-compatible setting is explicitly saved by the tenant.
+        legacy_force = str(result.get("force_join_channel") or "").strip()
+        if legacy_force:
+            if (
+                "force_join_channel_username" not in stored_keys
+                and legacy_force.startswith("@")
+            ):
+                result["force_join_channel_username"] = legacy_force.lstrip("@")
+            if (
+                "force_join_channel_id" not in stored_keys
+                and legacy_force.lstrip("-").isdigit()
+            ):
+                result["force_join_channel_id"] = legacy_force
+            if (
+                "force_join_channel_link" not in stored_keys
+                and legacy_force.startswith("@")
+            ):
+                result["force_join_channel_link"] = (
+                    "https://t.me/" + legacy_force.lstrip("@")
+                )
+
+        if "purchase_event_channel_enabled" not in stored_keys:
+            result["purchase_event_channel_enabled"] = bool(
+                result.get("event_channel_enabled", False)
+            )
+        if "purchase_event_channel_id" not in stored_keys:
+            result["purchase_event_channel_id"] = str(
+                result.get("event_channel_id") or ""
+            ).strip()
         return result
 
     def userbot_settings_admin(self, actor_id: int) -> dict[str, Any]:
