@@ -1061,6 +1061,16 @@ class TenantBusinessService:
             raise TenantBusinessError(
                 "panel credential cannot be decrypted"
             ) from exc
+    def prepare_server_backup(
+        self,
+        actor_id: int,
+        *,
+        server_id: int,
+    ) -> tuple[dict[str, Any], PanelTarget, str]:
+        """Resolve one tenant-owned panel backup without exposing other tenants."""
+        self._admin(actor_id)
+        return self._panel_material(int(server_id))
+
     def prepare_server_connection(
         self, actor_id: int, *, settings: dict | None = None,
         credentials: dict | None = None, server_id: int | None = None,

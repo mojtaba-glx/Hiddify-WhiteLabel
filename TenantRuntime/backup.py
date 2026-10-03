@@ -37,7 +37,7 @@ from Shared.timeutils import iso_utc, parse_utc, utcnow
 BACKUP_FORMAT = "hiddify-whitelabel-tenant-v2"
 LEGACY_FORMAT = "hiddify-whitelabel-tenant-userbot-v1"
 MAX_BACKUP_BYTES = 128 * 1024 * 1024
-MAX_ZIP_MEMBERS = 8
+MAX_ZIP_MEMBERS = 256
 AUTO_BACKUP_TIMEZONE = "Asia/Tehran"
 AUTO_BACKUP_HOURS = (0, 6, 12, 18)
 AUTO_BACKUP_MAX_ATTEMPTS = 3
@@ -65,6 +65,18 @@ class TenantBackupArtifact:
     sha256: str
     table_count: int
     row_count: int
+
+
+@dataclass(frozen=True)
+class TenantFullBackupArtifact:
+    tenant_id: int
+    filename: str
+    data: bytes
+    sha256: str
+    table_count: int
+    row_count: int
+    panel_backups_count: int
+    panel_errors: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -334,6 +346,135 @@ def create_tenant_backup(
     )
 
 
+def _safe_archive_name(value: object, *, default: str) -> str:
+    raw = str(value or "").strip().replace("\\", "/").split("/")[-1]
+    cleaned = "".join(
+        ch if (ch.isalnum() or ch in "._- @()") else "_"
+        for ch in raw
+    ).strip(" .")
+    return cleaned or default
+
+
+def create_tenant_full_backup(
+    conn: sqlite3.Connection,
+    *,
+    tenant_id: int,
+    panel_backups: list[dict[str, Any]] | None = None,
+    panel_errors: list[str] | None = None,
+    app_version: str = "",
+) -> TenantFullBackupArtifact:
+    """Combine the safe Tenant backup with panel DB/config backups.
+
+    tenant.json + manifest.json stay at ZIP root so the existing Tenant restore
+    path can consume a full backup without restoring panel files automatically.
+    """
+    tenant_artifact = create_tenant_backup(
+        conn,
+        tenant_id=int(tenant_id),
+    )
+    backups = list(panel_backups or [])
+    errors = tuple(str(x or "")[:1000] for x in (panel_errors or []))
+
+    with zipfile.ZipFile(io.BytesIO(tenant_artifact.data), mode="r") as src:
+        tenant_payload = src.read("tenant.json")
+        tenant_manifest = src.read("manifest.json")
+
+    full_manifest_items: list[dict[str, Any]] = []
+    used_names: set[str] = set()
+    out = io.BytesIO()
+    with zipfile.ZipFile(
+        out,
+        mode="w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=6,
+        allowZip64=True,
+    ) as zf:
+        zf.writestr("tenant.json", tenant_payload)
+        zf.writestr("manifest.json", tenant_manifest)
+        used_names.update({"tenant.json", "manifest.json", "full_manifest.json"})
+
+        for item in backups:
+            content = item.get("content")
+            if not isinstance(content, (bytes, bytearray, memoryview)):
+                continue
+            raw = bytes(content)
+            if not raw:
+                continue
+            server_id = int(item.get("server_id") or 0)
+            label = _safe_archive_name(
+                item.get("server_label"),
+                default=f"server-{server_id or 'unknown'}",
+            )
+            filename = _safe_archive_name(
+                item.get("filename"),
+                default=f"server-{server_id or 'unknown'}.backup",
+            )
+            arcname = f"PanelBackups/{label}/{filename}"
+            suffix = 1
+            while arcname in used_names:
+                stem, dot, ext = filename.rpartition(".")
+                stem = stem or filename
+                ext = f".{ext}" if dot else ""
+                arcname = f"PanelBackups/{label}/{stem}_{suffix}{ext}"
+                suffix += 1
+            used_names.add(arcname)
+            zf.writestr(arcname, raw)
+            full_manifest_items.append(
+                {
+                    "server_id": server_id,
+                    "server_label": str(item.get("server_label") or ""),
+                    "provider": str(item.get("provider") or ""),
+                    "filename": filename,
+                    "archive_path": arcname,
+                    "size": len(raw),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                    "source_url": str(item.get("source_url") or ""),
+                }
+            )
+
+        full_manifest = {
+            "format": BACKUP_FORMAT,
+            "backup_type": "full",
+            "tenant_id": int(tenant_id),
+            "created_at": iso_utc(utcnow()),
+            "app_version": str(app_version or ""),
+            "tenant_backup_sha256": tenant_artifact.sha256,
+            "table_count": tenant_artifact.table_count,
+            "row_count": tenant_artifact.row_count,
+            "panel_backups_count": len(full_manifest_items),
+            "panel_errors_count": len(errors),
+            "panel_backups": full_manifest_items,
+            "panel_errors": list(errors),
+            "security": {
+                "tenant_scoped": True,
+                "live_tenant_bot_credentials_included": False,
+                "platform_master_key_included": False,
+                "stored_panel_secrets_remain_encrypted": True,
+            },
+        }
+        zf.writestr("full_manifest.json", _json_bytes(full_manifest))
+
+    data = out.getvalue()
+    if len(data) > MAX_BACKUP_BYTES:
+        raise TenantBackupError("full backup exceeds size limit")
+    with zipfile.ZipFile(io.BytesIO(data), mode="r") as check:
+        bad = check.testzip()
+        if bad:
+            raise TenantBackupError("full backup zip CRC check failed")
+
+    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    return TenantFullBackupArtifact(
+        tenant_id=int(tenant_id),
+        filename=f"Backup_All_Tenant_{int(tenant_id)}_{stamp}.zip",
+        data=data,
+        sha256=hashlib.sha256(data).hexdigest(),
+        table_count=tenant_artifact.table_count,
+        row_count=tenant_artifact.row_count,
+        panel_backups_count=len(full_manifest_items),
+        panel_errors=errors,
+    )
+
+
 def _decode_zip(data: bytes) -> dict[str, Any]:
     if len(data) > MAX_BACKUP_BYTES:
         raise TenantBackupError("backup exceeds size limit")
@@ -343,8 +484,22 @@ def _decode_zip(data: bytes) -> dict[str, Any]:
             if not infos or len(infos) > MAX_ZIP_MEMBERS:
                 raise TenantBackupError("invalid backup zip member count")
             names = {str(info.filename) for info in infos if not info.is_dir()}
-            if names != {"manifest.json", "tenant.json"}:
+            required = {"manifest.json", "tenant.json"}
+            if not required.issubset(names):
                 raise TenantBackupError("invalid backup zip layout")
+            extras = names - required
+            if any(
+                name != "full_manifest.json"
+                and not name.startswith("PanelBackups/")
+                for name in extras
+            ):
+                raise TenantBackupError("invalid backup zip layout")
+            if any(
+                ".." in str(name).split("/")
+                or str(name).startswith(("/", "\\"))
+                for name in names
+            ):
+                raise TenantBackupError("unsafe backup zip member")
             total = sum(int(info.file_size or 0) for info in infos)
             if total > MAX_BACKUP_BYTES:
                 raise TenantBackupError("backup expands beyond size limit")

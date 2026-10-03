@@ -236,6 +236,67 @@ class HiddifyPanelAdapter:
         ) as client:
             return client.request(method, url, headers=headers, json=payload)
 
+    def _raw_response(
+        self,
+        method: str,
+        url: str,
+        secret: str,
+    ) -> httpx.Response:
+        """Authenticated binary request used by backup download endpoints."""
+        headers = {"Accept": "*/*", "Hiddify-API-Key": str(secret)}
+        mode = _ssl_mode()
+
+        def _send(verify: bool | ssl.SSLContext) -> httpx.Response:
+            with httpx.Client(
+                timeout=max(self._timeout, 60.0),
+                verify=verify,
+                transport=self._transport,
+                follow_redirects=True,
+            ) as client:
+                return client.request(method, url, headers=headers)
+
+        try:
+            if mode == "insecure":
+                response = _send(_insecure_context())
+            elif mode == "auto":
+                try:
+                    response = _send(True)
+                except httpx.TransportError as exc:
+                    if not _looks_like_tls_error(exc):
+                        raise
+                    response = _send(_insecure_context())
+            else:
+                response = _send(True)
+        except httpx.TransportError as exc:
+            raise PanelError("Hiddify backup connection failed") from exc
+        if response.status_code >= 400:
+            raise _StatusError(response.status_code)
+        return response
+
+    @staticmethod
+    def _backup_filename(
+        target: PanelTarget,
+        headers: httpx.Headers,
+    ) -> str:
+        disposition = str(headers.get("content-disposition") or "")
+        filename = ""
+        match = re.search(
+            r"filename\*?=(?:UTF-8''|\")?([^\";]+)",
+            disposition,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            filename = str(match.group(1) or "").strip().strip("'\"")
+        filename = filename.replace("\\", "/").split("/")[-1].strip()
+        filename = re.sub(r"[^A-Za-z0-9._ @()\-]+", "_", filename).strip(" .")
+        if not filename:
+            host = urlsplit(_clean_base(target.endpoint)).hostname or "hiddify"
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+            filename = f"hiddify-{host}-{stamp}.json"
+        if "." not in filename:
+            filename += ".json"
+        return filename
+
     def _request(
         self,
         method: str,
@@ -420,6 +481,48 @@ class HiddifyPanelAdapter:
             payload["last_reset_time"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         self._patch(target, secret, external_ref, payload)
         return self.get_user(target=target, secret=secret, external_ref=external_ref)
+
+    def server_backup(self, *, target: PanelTarget, secret: str) -> dict:
+        """Download Hiddify v11/v12/v13 backup with SellBot-compatible routes."""
+        if str(target.kind or "").strip().lower() != "hiddify":
+            raise PanelError("Hiddify adapter received the wrong panel kind")
+        base = _admin_base(target)
+        candidates = [
+            f"{base}/admin/backup/backupfile",
+            f"{base}/admin/backup/backupfile/",
+            f"{base}/backup",
+            f"{base}/admin/backup",
+            f"{base}/api/v2/admin/backup/",
+            f"{base}/api/v2/admin/backup",
+            f"{base}/api/v2/admin/user/backup/",
+            f"{base}/api/v2/admin/user/backup",
+        ]
+        last_error: PanelError | None = None
+        for url in candidates:
+            try:
+                response = self._raw_response("GET", url, secret)
+            except PanelError as exc:
+                last_error = exc
+                continue
+            content = bytes(response.content or b"")
+            if not content:
+                last_error = PanelError("Hiddify backup response is empty")
+                continue
+            ctype = str(response.headers.get("content-type") or "").lower()
+            head = content[:256].lower()
+            if (
+                ("text/html" in ctype)
+                or b"<html" in head
+                or b"<!doctype html" in head
+            ):
+                last_error = PanelError("Hiddify backup endpoint returned HTML")
+                continue
+            return {
+                "filename": self._backup_filename(target, response.headers),
+                "content": content,
+                "source_url": str(response.url),
+            }
+        raise PanelError("Hiddify backup download failed") from last_error
 
     def server_stats(self, *, target: PanelTarget, secret: str) -> dict:
         """SellBot-compatible Hiddify system and traffic statistics."""

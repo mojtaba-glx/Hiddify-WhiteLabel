@@ -6,7 +6,10 @@ User-shop handlers are intentionally kept out of this package.
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
+from io import BytesIO
+from pathlib import Path
 from html import escape
 from typing import Any
 
@@ -29,6 +32,12 @@ from telegram.ext import (
 from Gateway.catalog import RuntimeBotSpec
 from Shared.timeutils import parse_utc, utcnow
 from TenantRuntime.business import TenantBusinessError
+from TenantRuntime.backup import (
+    TenantBackupError,
+    claim_auto_backup_slot,
+    create_tenant_full_backup,
+    finish_auto_backup_slot,
+)
 from TenantRuntime.panels import PanelError
 from TenantRuntime.server_connections import (
     optional as server_optional, url as server_url, path as server_path,
@@ -2281,6 +2290,178 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.callback_query.answer("این دکمه معتبر نیست.", show_alert=True)
 
 
+def _application_version() -> str:
+    try:
+        return (
+            Path(__file__).resolve().parents[2] / "VERSION"
+        ).read_text(encoding="utf-8").strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
+async def send_admin_full_backup(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """SellBot-style full backup, safely restricted to the current Tenant."""
+    spec, policy, state_store, business = _services(context)
+    set_button_settings(business.runtime_userbot_settings())
+    if spec.role != "admin":
+        raise RuntimeError("AdminBot backup registered for non-admin role")
+    actor = int(update.effective_user.id) if update.effective_user else 0
+    decision = policy.check(spec, telegram_user_id=actor)
+    if not decision.allowed:
+        await _deny_update(update, decision.reason)
+        raise ApplicationHandlerStop
+
+    message = update.effective_message
+    if message is None:
+        return
+    await message.reply_text(
+        "⏳ در حال تهیه بکاپ کامل (ربات + سرورها/نودها)..."
+    )
+
+    now = utcnow()
+    slot_key = "manual:" + now.strftime("%Y%m%dT%H%M%S%fZ")
+    claimed = claim_auto_backup_slot(
+        business.conn,
+        tenant_id=int(spec.tenant_id),
+        slot_key=slot_key,
+    )
+    if not claimed:
+        await message.reply_text(
+            "❌ ساخت بکاپ شروع نشد؛ لطفاً دوباره تلاش کنید.",
+            reply_markup=admin_main_keyboard(),
+        )
+        return
+
+    panel_backups: list[dict[str, Any]] = []
+    panel_errors: list[str] = []
+    artifact = None
+    try:
+        for server in business.list_servers():
+            server_id = int(server.get("id") or 0)
+            label = str(
+                server.get("label") or f"سرور #{server_id}"
+            ).strip()
+            provider = str(server.get("panel_kind") or "").strip().lower()
+            secret = ""
+            try:
+                resolved, target, secret = business.prepare_server_backup(
+                    actor,
+                    server_id=server_id,
+                )
+                data = await asyncio.to_thread(
+                    business.panel_adapter.server_backup,
+                    target=target,
+                    secret=secret,
+                )
+                panel_backups.append(
+                    {
+                        "server_id": server_id,
+                        "server_label": label,
+                        "provider": provider,
+                        "filename": str(data.get("filename") or ""),
+                        "content": bytes(data.get("content") or b""),
+                        "source_url": str(data.get("source_url") or ""),
+                    }
+                )
+            except (TenantBusinessError, PanelError, ValueError) as exc:
+                panel_errors.append(
+                    f"{label} (#{server_id}): {connection_error(exc)}"
+                )
+            except Exception as exc:
+                panel_errors.append(
+                    f"{label} (#{server_id}): {type(exc).__name__}"
+                )
+            finally:
+                secret = ""
+
+        artifact = create_tenant_full_backup(
+            business.conn,
+            tenant_id=int(spec.tenant_id),
+            panel_backups=panel_backups,
+            panel_errors=panel_errors,
+            app_version=_application_version(),
+        )
+        document = BytesIO(artifact.data)
+        document.name = artifact.filename
+        chat_id = (
+            int(update.effective_chat.id)
+            if update.effective_chat is not None
+            else actor
+        )
+        await context.bot.send_document(
+            chat_id=chat_id,
+            document=document,
+            filename=artifact.filename,
+            caption=(
+                "📬 فایل بکاپ کامل آماده شد\n"
+                "🤖 بکاپ Tenant: ✅\n"
+                f"🖥️ بکاپ سرورها/نودها: {artifact.panel_backups_count} مورد\n"
+                f"🗂 جداول: {artifact.table_count}\n"
+                f"📊 رکوردها: {artifact.row_count}\n"
+                f"⚠️ خطاها: {len(artifact.panel_errors)} مورد\n"
+                f"📦 نسخه: {_application_version()}"
+            ),
+        )
+        finish_auto_backup_slot(
+            business.conn,
+            tenant_id=int(spec.tenant_id),
+            slot_key=slot_key,
+            success=True,
+            file_size=len(artifact.data),
+            sha256=artifact.sha256,
+        )
+        state = state_store.load(actor)
+        state_store.save(
+            actor,
+            {
+                **state,
+                "screen": "backup_complete",
+                "last_manual_backup": slot_key,
+            },
+        )
+    except Exception as exc:
+        try:
+            finish_auto_backup_slot(
+                business.conn,
+                tenant_id=int(spec.tenant_id),
+                slot_key=slot_key,
+                success=False,
+                error=type(exc).__name__,
+            )
+        except Exception:
+            pass
+        await message.reply_text(
+            "❌ ساخت یا ارسال بکاپ کامل ناموفق بود. "
+            f"خطا: {connection_error(exc)}",
+            reply_markup=admin_main_keyboard(),
+        )
+        return
+
+    if panel_errors:
+        preview = "\n".join(panel_errors[:10])
+        more = (
+            f"\n... و {len(panel_errors) - 10} خطای دیگر"
+            if len(panel_errors) > 10
+            else ""
+        )
+        await context.bot.send_message(
+            chat_id=(
+                int(update.effective_chat.id)
+                if update.effective_chat is not None
+                else actor
+            ),
+            text=(
+                "⚠️ فایل بکاپ Tenant ساخته و ارسال شد، اما بکاپ بعضی پنل‌ها "
+                "دریافت نشد:\n"
+                + preview
+                + more
+            ),
+        )
+
+
 async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     spec, _, _, business = _services(context)
     set_button_settings(business.runtime_userbot_settings())
@@ -2338,10 +2519,7 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 return
 
             if text == BTN_BACKUP:
-                await update.effective_message.reply_text(
-                    "📫 بکاپ Tenant هنوز به‌صورت مستقل و امن منتقل نشده است. "
-                    "بکاپ سراسری Master به ادمین Tenant نمایش داده نمی‌شود."
-                )
+                await send_admin_full_backup(update, context)
                 return
 
         from TenantRuntime.AdminBot import userbot_management
