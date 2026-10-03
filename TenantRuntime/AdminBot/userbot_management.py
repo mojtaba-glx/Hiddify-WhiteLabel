@@ -1048,6 +1048,70 @@ async def _send_tickets(update: Update, business: Any, actor: int, status: str |
     await _edit_or_send(update, f"📑 تیکت‌ها\nتعداد: {len(items)}", InlineKeyboardMarkup(rows))
 
 
+async def _send_ticket_admin_detail(
+    update: Update,
+    business: Any,
+    actor: int,
+    *,
+    ticket_id: int,
+    list_status: str,
+    page: int,
+) -> None:
+    item = business.ticket_admin(actor, ticket_id=int(ticket_id))
+    messages = business.ticket_messages_admin(actor, ticket_id=int(ticket_id))
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(
+            "👤 پروفایل کاربر",
+            callback_data=f"userbot:user:{int(item['customer_id'])}",
+        )]
+    ]
+    media_buttons = [
+        InlineKeyboardButton(
+            f"🖼 تصویر پیام #{int(message['id'])}",
+            callback_data=(
+                f"userbot:ticket:media:{int(ticket_id)}:"
+                f"{int(message['id'])}:{list_status}:{int(page)}"
+            ),
+        )
+        for message in messages
+        if message.get("has_media")
+    ]
+    for index in range(0, len(media_buttons), 2):
+        rows.append(media_buttons[index:index+2])
+    if str(item.get("status") or "") != "closed":
+        rows.append([InlineKeyboardButton(
+            "📩پاسخ",
+            callback_data=(
+                f"userbot:ticket:reply:{int(ticket_id)}:"
+                f"{list_status}:{int(page)}"
+            ),
+        )])
+        rows.append([InlineKeyboardButton(
+            "📪 بستن تیکت",
+            callback_data=(
+                f"userbot:ticket:status:{int(ticket_id)}:closed:"
+                f"{list_status}:{int(page)}"
+            ),
+        )])
+    else:
+        rows.append([InlineKeyboardButton(
+            "📬 باز کردن تیکت",
+            callback_data=(
+                f"userbot:ticket:status:{int(ticket_id)}:open:"
+                f"{list_status}:{int(page)}"
+            ),
+        )])
+    rows.append([InlineKeyboardButton(
+        "🔙بازگشت",
+        callback_data=f"userbot:tickets:list:{list_status}:{int(page)}",
+    )])
+    await _edit_or_send(
+        update,
+        _ticket_thread_admin_text(item, messages),
+        InlineKeyboardMarkup(rows),
+    )
+
+
 def _sibling_user_bot_token(business: Any) -> str:
     if business.secret_cipher is None:
         raise TenantBusinessError("UserBot encryption is unavailable")
