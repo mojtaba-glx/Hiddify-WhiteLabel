@@ -179,6 +179,28 @@ def _wallet_text(summary: dict) -> str:
 
 
 
+def _coupon_admin_text(item: dict, redemptions: list[dict]) -> str:
+    kind = (
+        f"{int(item.get('value') or 0)}٪"
+        if str(item.get("discount_kind")) == "percent"
+        else f"{int(item.get('value') or 0):,} {item.get('currency') or ''}"
+    )
+    max_uses = int(item.get("max_uses") or 0)
+    per_user = int(item.get("per_customer_limit") or 0)
+    max_discount = int(item.get("max_discount") or 0)
+    return "\n".join([
+        f"🎟 کوپن تخفیف: {item.get('code') or '-'}",
+        f"وضعیت: {item.get('status') or '-'}",
+        f"نوع/مقدار: {kind}",
+        f"حداقل سفارش: {int(item.get('min_amount') or 0):,}",
+        f"سقف تخفیف: {max_discount:,}" if max_discount else "سقف تخفیف: نامحدود",
+        f"مصرف کل: {int(item.get('used_count') or 0)}/{max_uses or '∞'}",
+        f"سقف هر کاربر: {per_user or '∞'}",
+        f"انقضا: {item.get('expires_at') or 'نامحدود'}",
+        f"گزارش redemption: {len(redemptions)}",
+    ])
+
+
 def _growth_text(settings: dict, coupons: list[dict]) -> str:
     return "\n".join([
         "🎯 فروش پیشرفته",
@@ -1016,18 +1038,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ); return
         if data == "biz:coupons":
             items = business.list_coupons_admin(actor)
-            lines = ["🎟 کوپن‌ها"]
+            lines = ["🎟 کوپن‌های تخفیف سفارش"]
             rows = []
             for item in items[:30]:
-                kind = "%" if item["discount_kind"] == "percent" else str(item.get("currency") or "")
+                suffix = "٪" if item["discount_kind"] == "percent" else f" {item.get('currency') or ''}"
                 lines.append(
-                    f"• {item['code']} · {item['value']}{kind} · "
+                    f"• {item['code']} · {item['value']}{suffix} · "
                     f"{item['used_count']}/{item['max_uses'] or '∞'} · {item['status']}"
                 )
                 rows.append([
                     InlineKeyboardButton(
-                        f"{'⛔' if item['status']=='active' else '✅'} {item['code']}",
-                        callback_data=f"biz:couponstatus:{item['id']}:{'off' if item['status']=='active' else 'on'}",
+                        f"{'🟢' if item['status']=='active' else '⚫'} {item['code']}",
+                        callback_data=f"biz:coupon:{item['id']}",
                     )
                 ])
             if not items:
@@ -1051,6 +1073,97 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     [InlineKeyboardButton("↩️ کوپن‌ها", callback_data="biz:coupons")]
                 ]),
             ); return
+        if data.startswith("biz:coupon:"):
+            coupon_id = int(data.rsplit(":", 1)[1])
+            item = business.coupon(coupon_id)
+            redemptions = business.list_coupon_redemptions_admin(
+                actor, coupon_id=coupon_id
+            )
+            await update.callback_query.edit_message_text(
+                _coupon_admin_text(item, redemptions),
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "⏸ غیرفعال" if item["status"]=="active" else "▶️ فعال",
+                        callback_data=f"biz:couponstatus:{coupon_id}:{'off' if item['status']=='active' else 'on'}",
+                    )],
+                    [
+                        InlineKeyboardButton("✏️ کد", callback_data=f"biz:couponedit:{coupon_id}:code"),
+                        InlineKeyboardButton("💸 مقدار تخفیف", callback_data=f"biz:couponedit:{coupon_id}:value"),
+                    ],
+                    [
+                        InlineKeyboardButton("👥 سقف کل", callback_data=f"biz:couponedit:{coupon_id}:max"),
+                        InlineKeyboardButton("👤 سقف هر کاربر", callback_data=f"biz:couponedit:{coupon_id}:peruser"),
+                    ],
+                    [InlineKeyboardButton("🕒 انقضا", callback_data=f"biz:couponedit:{coupon_id}:expiry")],
+                    [InlineKeyboardButton("📜 گزارش مصرف", callback_data=f"biz:couponredemptions:{coupon_id}")],
+                    [InlineKeyboardButton("🗑 حذف", callback_data=f"biz:coupondelete:{coupon_id}")],
+                    [InlineKeyboardButton("↩️ کوپن‌ها", callback_data="biz:coupons")],
+                ]),
+            ); return
+        if data.startswith("biz:couponedit:"):
+            _, _, coupon_id, field = data.split(":", 3)
+            item = business.coupon(int(coupon_id))
+            prompts = {
+                "code": "✏️ کد جدید را وارد کنید:",
+                "value": (
+                    "💸 درصد جدید (1 تا 100) را وارد کنید:"
+                    if item["discount_kind"]=="percent"
+                    else f"💸 مبلغ جدید تخفیف ({item.get('currency') or ''}) را وارد کنید:"
+                ),
+                "max": "👥 سقف کل مصرف را وارد کنید؛ 0 یعنی نامحدود:",
+                "peruser": "👤 سقف مصرف هر کاربر را وارد کنید؛ 0 یعنی نامحدود:",
+                "expiry": "🕒 تاریخ انقضا ISO را وارد کنید؛ 0 یعنی نامحدود:",
+            }
+            if field not in prompts:
+                raise ValueError("invalid coupon edit")
+            context.user_data["biz_flow"] = {
+                "kind": "coupon_edit",
+                "coupon_id": int(coupon_id),
+                "field": field,
+            }
+            await update.callback_query.edit_message_text(
+                prompts[field],
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ کوپن", callback_data=f"biz:coupon:{coupon_id}")]
+                ]),
+            ); return
+        if data.startswith("biz:couponredemptions:"):
+            coupon_id = int(data.rsplit(":",1)[1])
+            item = business.coupon(coupon_id)
+            rows = business.list_coupon_redemptions_admin(
+                actor, coupon_id=coupon_id
+            )
+            body = "\n".join(
+                f"• {x['display_name']} · سفارش #{x['order_id']} · "
+                f"{int(x['discount_amount']):,} · {x['created_at']}"
+                for x in rows[:80]
+            ) or "هنوز مصرفی ثبت نشده است."
+            await update.callback_query.edit_message_text(
+                f"📜 مصرف کوپن {item['code']}\n\n{body}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ کوپن", callback_data=f"biz:coupon:{coupon_id}")]
+                ]),
+            ); return
+        if data.startswith("biz:coupondelete:"):
+            coupon_id=int(data.rsplit(":",1)[1])
+            item=business.coupon(coupon_id)
+            await update.callback_query.edit_message_text(
+                f"❓ حذف کوپن {item['code']}؟\n"
+                "کوپن مصرف‌شده حذف نمی‌شود و باید غیرفعال شود.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ حذف", callback_data=f"biz:coupondeleteok:{coupon_id}")],
+                    [InlineKeyboardButton("❌ لغو", callback_data=f"biz:coupon:{coupon_id}")],
+                ]),
+            ); return
+        if data.startswith("biz:coupondeleteok:"):
+            coupon_id=int(data.rsplit(":",1)[1])
+            business.delete_coupon_admin(actor,coupon_id=coupon_id)
+            await update.callback_query.edit_message_text(
+                "✅ کوپن حذف شد.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ کوپن‌ها", callback_data="biz:coupons")]
+                ]),
+            ); return
         if data.startswith("biz:couponstatus:"):
             _, _, coupon_id, state = data.split(":", 3)
             business.set_coupon_status_admin(
@@ -1058,10 +1171,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 coupon_id=int(coupon_id),
                 enabled=state == "on",
             )
+            item=business.coupon(int(coupon_id))
+            redemptions=business.list_coupon_redemptions_admin(
+                actor,coupon_id=int(coupon_id)
+            )
             await update.callback_query.edit_message_text(
-                "✅ وضعیت کوپن تغییر کرد.",
+                _coupon_admin_text(item,redemptions),
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("↩️ کوپن‌ها", callback_data="biz:coupons")]
+                    [InlineKeyboardButton("↩️ جزئیات کوپن", callback_data=f"biz:coupon:{coupon_id}")],
+                    [InlineKeyboardButton("↩️ کوپن‌ها", callback_data="biz:coupons")],
                 ]),
             ); return
         if data == "biz:wallettopups":
