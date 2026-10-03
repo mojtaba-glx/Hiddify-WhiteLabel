@@ -2178,7 +2178,7 @@ async def handle_callback(
     if data == "userbot:referral:settings":
         settings=business.growth_settings(actor)
         invite_text=str(settings.get("referral_invite_text") or "").strip()
-        preview=(invite_text[:350] + ("…" if len(invite_text)>350 else "")) if invite_text else "پیش‌فرض SellBot"
+        preview=(invite_text[:350] + ("…" if len(invite_text)>350 else "")) if invite_text else "متن‌های دعوت مرحله ۷"
         await _edit_or_send(update,
             "⚙️ تنظیمات رفرال\n"
             f"🧪 پاداش تست: {_bool_icon(settings.get('referral_trial_reward_enabled'))} "
