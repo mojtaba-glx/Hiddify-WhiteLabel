@@ -20,11 +20,14 @@ import base64
 import hashlib
 import io
 import json
+import os
 import sqlite3
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from io import BytesIO
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -103,18 +106,52 @@ class AutoBackupSender:
         raise NotImplementedError
 
 
+def _backup_local_time(now: datetime | None = None) -> datetime:
+    current = now or datetime.now(ZoneInfo(AUTO_BACKUP_TIMEZONE))
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=ZoneInfo(AUTO_BACKUP_TIMEZONE))
+    return current.astimezone(ZoneInfo(AUTO_BACKUP_TIMEZONE))
+
+
+def format_auto_backup_caption(
+    delivery: AutoBackupDelivery,
+    *,
+    now: datetime | None = None,
+) -> str:
+    local = _backup_local_time(now)
+    ok_count = int(getattr(delivery.artifact, "panel_backups_count", 0) or 0)
+    errors = getattr(delivery.artifact, "panel_errors", ()) or ()
+    return (
+        "⏰ بکاپ خودکار کامل\n"
+        f"🕐 زمان: {local.strftime('%H:%M:%S %d-%m-%Y')}\n"
+        "🤖 بکاپ ربات: ✅\n"
+        f"🖥️ بکاپ سرورها/نودها: {ok_count} مورد\n"
+        f"⚠️ خطاها: {len(errors)} مورد"
+    )
+
+
+def format_manual_backup_caption(
+    artifact: TenantFullBackupArtifact,
+    *,
+    now: datetime | None = None,
+) -> str:
+    local = _backup_local_time(now)
+    return (
+        "📬 بکاپ کامل\n"
+        f"🕐 زمان: {local.strftime('%H:%M:%S %d-%m-%Y')}\n"
+        "🤖 بکاپ ربات: ✅\n"
+        f"🖥️ بکاپ سرورها/نودها: {int(artifact.panel_backups_count)} مورد\n"
+        f"⚠️ خطاها: {len(artifact.panel_errors)} مورد"
+    )
+
+
 class TelegramAutoBackupSender(AutoBackupSender):
     """Deliver auto backups with the Tenant's own AdminBot credential."""
 
     async def send(self, delivery: AutoBackupDelivery) -> None:
         from telegram import Bot
 
-        caption = (
-            "⏰ بکاپ خودکار کامل Tenant\n"
-            f"🕐 بازه: {delivery.slot_key}\n"
-            f"🗂 جداول: {delivery.artifact.table_count}\n"
-            f"📊 رکوردها: {delivery.artifact.row_count}"
-        )
+        caption = format_auto_backup_caption(delivery)
         async with Bot(token=delivery.bot_token) as bot:
             primary = BytesIO(delivery.artifact.data)
             primary.name = delivery.artifact.filename
@@ -355,6 +392,137 @@ def _safe_archive_name(value: object, *, default: str) -> str:
     return cleaned or default
 
 
+def _application_version() -> str:
+    try:
+        value = (
+            Path(__file__).resolve().parents[1] / "VERSION"
+        ).read_text(encoding="utf-8").strip()
+    except OSError:
+        value = ""
+    return value or "unknown"
+
+
+def _tenant_sqlite_bytes(
+    conn: sqlite3.Connection,
+    *,
+    tenant_id: int,
+) -> bytes:
+    """Build a standalone SQLite archive containing the complete Tenant data.
+
+    The shared production DB itself is never copied because that would leak
+    other tenants. Runtime bot credentials and backup-run bookkeeping keep
+    their schema but intentionally have no rows in this archive.
+    """
+    tid = int(tenant_id)
+    fd, raw_path = tempfile.mkstemp(
+        prefix=f"whitelabel-tenant-{tid}-",
+        suffix=".db",
+    )
+    os.close(fd)
+    target = sqlite3.connect(raw_path)
+    try:
+        target.execute("PRAGMA foreign_keys=OFF")
+        source_tables = [
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND "
+                "(name='tenants' OR name='schema_migrations' OR name LIKE 'tenant_%') "
+                "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            ).fetchall()
+        ]
+        for table in source_tables:
+            schema = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if schema is None or not str(schema["sql"] or "").strip():
+                continue
+            target.execute(str(schema["sql"]))
+            if table == "tenants":
+                rows = conn.execute(
+                    "SELECT * FROM tenants WHERE id=?",
+                    (tid,),
+                ).fetchall()
+            elif table == "schema_migrations":
+                rows = conn.execute(
+                    "SELECT * FROM schema_migrations ORDER BY version"
+                ).fetchall()
+            elif table in BACKUP_EXCLUDED_TABLES:
+                rows = []
+            else:
+                rows = conn.execute(
+                    f"SELECT * FROM {_qid(table)} WHERE tenant_id=?",
+                    (tid,),
+                ).fetchall()
+            if not rows:
+                continue
+            columns = [str(col["name"]) for col in _table_columns(conn, table)]
+            names = ",".join(_qid(name) for name in columns)
+            marks = ",".join("?" for _ in columns)
+            target.executemany(
+                f"INSERT INTO {_qid(table)} ({names}) VALUES ({marks})",
+                [tuple(row[name] for name in columns) for row in rows],
+            )
+
+        selected = set(source_tables)
+        for row in conn.execute(
+            "SELECT type,name,tbl_name,sql FROM sqlite_master "
+            "WHERE type='index' AND sql IS NOT NULL ORDER BY name"
+        ).fetchall():
+            if str(row["tbl_name"]) not in selected:
+                continue
+            try:
+                target.execute(str(row["sql"]))
+            except sqlite3.DatabaseError:
+                # The data remains complete even if an optional legacy index
+                # references a platform-global object not present in Tenant DB.
+                pass
+
+        target.commit()
+        check = target.execute("PRAGMA quick_check").fetchone()
+        if not check or str(check[0]).strip().lower() != "ok":
+            raise TenantBackupError("tenant SQLite backup integrity check failed")
+    finally:
+        target.close()
+    try:
+        return Path(raw_path).read_bytes()
+    finally:
+        try:
+            os.unlink(raw_path)
+        except OSError:
+            pass
+
+
+def _shared_export_members(snapshot: dict[str, Any]) -> dict[str, bytes]:
+    tables = snapshot.get("tables") if isinstance(snapshot, dict) else {}
+    tables = tables if isinstance(tables, dict) else {}
+    exports: dict[str, bytes] = {
+        "Shared/tenant.json": json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ).encode("utf-8"),
+    }
+    mapping = {
+        "tenant_servers": "Shared/servers.json",
+        "tenant_nodes": "Shared/nodes.json",
+        "tenant_sale_plans": "Shared/plans.json",
+        "tenant_userbot_settings": "Shared/userbot_settings.json",
+    }
+    for table, arcname in mapping.items():
+        rows = tables.get(table)
+        if isinstance(rows, list):
+            exports[arcname] = json.dumps(
+                rows,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ).encode("utf-8")
+    return exports
+
+
 def create_tenant_full_backup(
     conn: sqlite3.Connection,
     *,
@@ -363,24 +531,75 @@ def create_tenant_full_backup(
     panel_errors: list[str] | None = None,
     app_version: str = "",
 ) -> TenantFullBackupArtifact:
-    """Combine the safe Tenant backup with panel DB/config backups.
+    """Create a SellBot-style full Tenant archive without cross-tenant leakage.
 
-    tenant.json + manifest.json stay at ZIP root so the existing Tenant restore
-    path can consume a full backup without restoring panel files automatically.
+    Root restore members are preserved for compatibility.  The archive also
+    contains a standalone Tenant SQLite database, Shared JSON exports and one
+    folder per panel under PanelBackups using the exact stored server label.
     """
-    tenant_artifact = create_tenant_backup(
-        conn,
-        tenant_id=int(tenant_id),
-    )
+    snapshot = build_tenant_snapshot(conn, tenant_id=int(tenant_id))
+    tenant_artifact = encode_tenant_backup(snapshot)
     backups = list(panel_backups or [])
     errors = tuple(str(x or "")[:1000] for x in (panel_errors or []))
+    tenant_db = _tenant_sqlite_bytes(conn, tenant_id=int(tenant_id))
 
     with zipfile.ZipFile(io.BytesIO(tenant_artifact.data), mode="r") as src:
         tenant_payload = src.read("tenant.json")
         tenant_manifest = src.read("manifest.json")
 
+    local = _backup_local_time()
+    stamp = local.strftime("%d-%m-%Y_%H-%M-%S")
+    bot_manifest_name = f"Backup_Bot_{stamp}.json"
+    all_manifest_name = f"Backup_All_{stamp}.json"
     full_manifest_items: list[dict[str, Any]] = []
     used_names: set[str] = set()
+    shared_members = _shared_export_members(snapshot)
+
+    bot_files: list[dict[str, Any]] = [
+        {
+            "path": "tenant_bot.db",
+            "size": len(tenant_db),
+            "sha256": hashlib.sha256(tenant_db).hexdigest(),
+        },
+        {
+            "path": "tenant.json",
+            "size": len(tenant_payload),
+            "sha256": hashlib.sha256(tenant_payload).hexdigest(),
+        },
+        {
+            "path": "manifest.json",
+            "size": len(tenant_manifest),
+            "sha256": hashlib.sha256(tenant_manifest).hexdigest(),
+        },
+    ]
+    for name, raw in sorted(shared_members.items()):
+        bot_files.append(
+            {
+                "path": name,
+                "size": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        )
+
+    bot_manifest = {
+        "created_at": local.strftime("%Y-%m-%d %H:%M:%S"),
+        "backup_type": "bot",
+        "tenant_id": int(tenant_id),
+        "files_count": len(bot_files),
+        "files": bot_files,
+        "security": {
+            "tenant_scoped": True,
+            "live_tenant_bot_credentials_included": False,
+            "platform_master_key_included": False,
+        },
+    }
+    bot_manifest_raw = json.dumps(
+        bot_manifest,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    ).encode("utf-8")
+
     out = io.BytesIO()
     with zipfile.ZipFile(
         out,
@@ -389,9 +608,15 @@ def create_tenant_full_backup(
         compresslevel=6,
         allowZip64=True,
     ) as zf:
+        # Restore-compatible root files.
         zf.writestr("tenant.json", tenant_payload)
         zf.writestr("manifest.json", tenant_manifest)
-        used_names.update({"tenant.json", "manifest.json", "full_manifest.json"})
+
+        # Human-browsable bot backup, mirroring the proven SellBot layout.
+        zf.writestr("tenant_bot.db", tenant_db)
+        for name, raw in sorted(shared_members.items()):
+            zf.writestr(name, raw)
+        zf.writestr(bot_manifest_name, bot_manifest_raw)
 
         for item in backups:
             content = item.get("content")
@@ -436,8 +661,10 @@ def create_tenant_full_backup(
             "format": BACKUP_FORMAT,
             "backup_type": "full",
             "tenant_id": int(tenant_id),
-            "created_at": iso_utc(utcnow()),
-            "app_version": str(app_version or ""),
+            "created_at": local.strftime("%Y-%m-%d %H:%M:%S"),
+            "app_version": str(app_version or _application_version()),
+            "bot_backup_manifest": bot_manifest_name,
+            "tenant_database": "tenant_bot.db",
             "tenant_backup_sha256": tenant_artifact.sha256,
             "table_count": tenant_artifact.table_count,
             "row_count": tenant_artifact.row_count,
@@ -452,7 +679,14 @@ def create_tenant_full_backup(
                 "stored_panel_secrets_remain_encrypted": True,
             },
         }
-        zf.writestr("full_manifest.json", _json_bytes(full_manifest))
+        full_manifest_raw = json.dumps(
+            full_manifest,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ).encode("utf-8")
+        zf.writestr("full_manifest.json", full_manifest_raw)
+        zf.writestr(all_manifest_name, full_manifest_raw)
 
     data = out.getvalue()
     if len(data) > MAX_BACKUP_BYTES:
@@ -461,11 +695,13 @@ def create_tenant_full_backup(
         bad = check.testzip()
         if bad:
             raise TenantBackupError("full backup zip CRC check failed")
+        db_raw = check.read("tenant_bot.db")
+        if db_raw != tenant_db:
+            raise TenantBackupError("tenant SQLite backup checksum mismatch")
 
-    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     return TenantFullBackupArtifact(
         tenant_id=int(tenant_id),
-        filename=f"Backup_All_Tenant_{int(tenant_id)}_{stamp}.zip",
+        filename=f"Backup_All_{stamp}.zip",
         data=data,
         sha256=hashlib.sha256(data).hexdigest(),
         table_count=tenant_artifact.table_count,
@@ -488,11 +724,22 @@ def _decode_zip(data: bytes) -> dict[str, Any]:
             if not required.issubset(names):
                 raise TenantBackupError("invalid backup zip layout")
             extras = names - required
-            if any(
-                name != "full_manifest.json"
-                and not name.startswith("PanelBackups/")
-                for name in extras
-            ):
+            def _allowed_extra(name: str) -> bool:
+                return (
+                    name == "full_manifest.json"
+                    or name == "tenant_bot.db"
+                    or name.startswith("Shared/")
+                    or name.startswith("PanelBackups/")
+                    or (
+                        name.startswith("Backup_Bot_")
+                        and name.endswith(".json")
+                    )
+                    or (
+                        name.startswith("Backup_All_")
+                        and name.endswith(".json")
+                    )
+                )
+            if any(not _allowed_extra(name) for name in extras):
                 raise TenantBackupError("invalid backup zip layout")
             if any(
                 ".." in str(name).split("/")
@@ -881,12 +1128,10 @@ def prepare_auto_backup_delivery(
     cipher: TokenCipher,
     settings: dict[str, Any],
     now: datetime | None = None,
+    business: Any | None = None,
+    app_version: str = "",
 ) -> AutoBackupDelivery | None:
-    """Claim one six-hour slot and build the exact artifact once.
-
-    Returns None when disabled/already completed/currently claimed. Creation or
-    credential errors mark the slot failed so a later lifecycle pass may retry.
-    """
+    """Claim one six-hour slot and build one complete Tenant + panel archive."""
     if not bool(settings.get("auto_backup_enabled", True)):
         return None
     token = _active_admin_bot_token(
@@ -904,9 +1149,48 @@ def prepare_auto_backup_delivery(
     ):
         return None
     try:
-        artifact = create_tenant_backup(
+        panel_backups: list[dict[str, Any]] = []
+        panel_errors: list[str] = []
+        if business is not None:
+            for server in business.list_servers():
+                sid = int(server.get("id") or 0)
+                label = str(
+                    server.get("label") or f"سرور #{sid}"
+                ).strip()
+                provider = str(server.get("panel_kind") or "").strip().lower()
+                secret = ""
+                try:
+                    _resolved, target, secret = business.prepare_server_backup(
+                        int(owner_telegram_id),
+                        server_id=sid,
+                    )
+                    data = business.panel_adapter.server_backup(
+                        target=target,
+                        secret=secret,
+                    )
+                    panel_backups.append(
+                        {
+                            "server_id": sid,
+                            "server_label": label,
+                            "provider": provider,
+                            "filename": str(data.get("filename") or ""),
+                            "content": bytes(data.get("content") or b""),
+                            "source_url": str(data.get("source_url") or ""),
+                        }
+                    )
+                except Exception as exc:
+                    panel_errors.append(
+                        f"{label} (#{sid}): {type(exc).__name__}"
+                    )
+                finally:
+                    secret = ""
+
+        artifact = create_tenant_full_backup(
             conn,
             tenant_id=int(tenant_id),
+            panel_backups=panel_backups,
+            panel_errors=panel_errors,
+            app_version=str(app_version or _application_version()),
         )
         target = ""
         if bool(settings.get("system_event_channel_enabled", False)):
