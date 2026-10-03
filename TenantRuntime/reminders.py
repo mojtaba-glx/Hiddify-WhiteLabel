@@ -210,6 +210,41 @@ def enqueue_due_reminders(
     return inserted
 
 
+def reconcile_reminder_queue_settings(
+    conn: sqlite3.Connection,
+    *,
+    tenant_id: int,
+    enabled: bool,
+    days_threshold: int,
+    remaining_gb_threshold: int,
+    now: datetime | None = None,
+) -> int:
+    moment = ensure_utc(now) if now is not None else utcnow()
+    now_iso = iso_utc(moment)
+    if bool(enabled):
+        changed = conn.execute(
+            "UPDATE tenant_subscription_notifications "
+            "SET status='skipped', locked_at=NULL, next_attempt_at=NULL, updated_at=? "
+            "WHERE tenant_id=? AND status IN ('pending','failed','processing') "
+            "AND ((event_type='days' AND stage_value>?) "
+            "OR (event_type='usage' AND stage_value>?))",
+            (
+                now_iso,
+                int(tenant_id),
+                max(1, int(days_threshold)),
+                max(1, int(remaining_gb_threshold)),
+            ),
+        )
+    else:
+        changed = conn.execute(
+            "UPDATE tenant_subscription_notifications "
+            "SET status='skipped', locked_at=NULL, next_attempt_at=NULL, updated_at=? "
+            "WHERE tenant_id=? AND status IN ('pending','failed','processing')",
+            (now_iso, int(tenant_id)),
+        )
+    return max(0, int(changed.rowcount))
+
+
 def _mark_skipped(conn: sqlite3.Connection, key: str, now_iso: str) -> None:
     conn.execute(
         "UPDATE tenant_subscription_notifications "
