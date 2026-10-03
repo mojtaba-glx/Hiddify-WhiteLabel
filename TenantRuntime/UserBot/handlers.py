@@ -115,7 +115,12 @@ def _ticket_thread_text(
         if item.get("has_media"):
             lines.append("🖼 تصویر پیوست دارد")
         lines.append("")
-    return "\n".join(lines).strip()
+    result = "\n".join(lines).strip()
+    if len(result) > 3800:
+        header = "\n".join(lines[:4]).strip()
+        tail_size = max(500, 3800 - len(header) - 16)
+        result = header + "\n\n…\n" + result[-tail_size:]
+    return result
 
 
 def _ticket_detail_markup(
@@ -200,9 +205,10 @@ async def _show_ticket_preview(
         await context.bot.send_photo(
             chat_id=update.effective_chat.id,
             photo=photo_id,
-            caption=text,
-            reply_markup=markup,
+            caption="🖼 پیش‌نمایش تصویر پیوست تیکت",
         )
+        if update.effective_message is not None:
+            await update.effective_message.reply_text(text, reply_markup=markup)
         return
     if update.callback_query is not None:
         try:
