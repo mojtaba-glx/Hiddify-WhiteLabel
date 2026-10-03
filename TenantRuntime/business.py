@@ -4641,10 +4641,24 @@ class TenantBusinessService:
         target = self._panel_target(server)
         if str(target.kind or "").lower() != "hiddify":
             raise TenantBusinessError("panel user page is unavailable")
+
         base = str(target.endpoint or "").strip().rstrip("/")
+        parsed = urlsplit(base)
+        if (
+            str(parsed.scheme or "").lower() not in ("http", "https")
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise TenantBusinessError("panel user page is unavailable")
+
         path = str(target.user_path or "user").strip().strip("/") or "user"
+        if any(part in ("", ".", "..") for part in path.split("/")):
+            raise TenantBusinessError("panel user page is unavailable")
         ref = quote(str(subscription["external_ref"]), safe="-._~")
-        if not base or not ref:
+        if not ref:
             raise TenantBusinessError("panel user page is unavailable")
         return f"{base}/{path}/{ref}"
 
@@ -5576,11 +5590,23 @@ class TenantBusinessService:
             (self.tenant_id,),
         ).fetchall()
         result = dict(USERBOT_SETTING_DEFAULTS)
+        stored_keys: set[str] = set()
         for row in rows:
             try:
-                result[str(row["key"])] = json.loads(str(row["value"]))
+                key = str(row["key"])
+                result[key] = json.loads(str(row["value"]))
+                stored_keys.add(key)
             except Exception:
                 continue
+
+        # Pre-v0.15 WhiteLabel used one ambiguous show_smart_link switch.
+        # Preserve an explicitly stored tenant choice until the tenant saves
+        # the new independent show_multi_server setting.
+        if (
+            "show_smart_link" in stored_keys
+            and "show_multi_server" not in stored_keys
+        ):
+            result["show_multi_server"] = bool(result.get("show_smart_link"))
         return result
 
     def userbot_settings_admin(self, actor_id: int) -> dict[str, Any]:
