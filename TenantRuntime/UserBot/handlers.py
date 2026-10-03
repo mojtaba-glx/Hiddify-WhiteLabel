@@ -73,12 +73,20 @@ def _ticket_panel_body(
     settings: dict[str, Any],
     items: list[dict[str, Any]],
 ) -> str:
-    del items
-    return _setting_text(
+    intro = _setting_text(
         settings,
         "ticket_panel_text",
         "📩 برای ارتباط با پشتیبانی، پیام خود را ارسال کنید.",
     )
+    history = (
+        "\n".join(
+            f"• #{x['id']} · {x['subject']} · {x['status']}"
+            f"{' · پاسخ داده شد' if x.get('admin_reply') else ''}"
+            for x in items[:15]
+        )
+        or ""
+    )
+    return f"{intro}\n\n{history}".strip()
 
 
 def _ticket_status_label(status: object) -> str:
@@ -1632,7 +1640,7 @@ async def _handle_main_reply_action(
 
     if text == BTN_SUPPORT:
         items = business.list_tickets(actor)
-        body = _ticket_panel_body(settings, items)
+        body = _ticket_panel_body(settings, [])
         await update.effective_message.reply_text(
             body,
             reply_markup=InlineKeyboardMarkup([
@@ -3022,7 +3030,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data == "shop:support":
             items = business.list_tickets(actor)
             await update.callback_query.edit_message_text(
-                _ticket_panel_body(settings, items),
+                _ticket_panel_body(settings, []),
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("❗️سوالات متداول", callback_data="shop:faq")],
                     [InlineKeyboardButton("📬تیکت‌های من", callback_data="shop:tickets")],
