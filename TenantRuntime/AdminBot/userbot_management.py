@@ -3136,7 +3136,8 @@ async def handle_text(
             ); return True
         if kind=="gift_add_code":
             code=text.strip().upper()
-            if not code or len(code)>48: raise ValueError("gift code")
+            if not re.fullmatch(r"[A-Z0-9_-]{4,48}",code):
+                raise ValueError("gift code")
             flow["code"]=code; flow["kind"]="gift_add_amount"
             await update.effective_message.reply_text("💰 مبلغ هدیه را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
         if kind=="gift_add_amount":
@@ -3153,24 +3154,60 @@ async def handle_text(
             uses=int(text)
             if uses<=0: raise ValueError("gift uses")
             flow["max_uses"]=uses; flow["kind"]="gift_add_expiry"
-            await update.effective_message.reply_text("⏰ تاریخ انقضا ISO را وارد کنید یا 0 برای نامحدود:",reply_markup=userbot_cancel_keyboard()); return True
+            await update.effective_message.reply_text(
+                "🕒 مدت انقضا را به ساعت وارد کنید؛ 0 یعنی نامحدود:",
+                reply_markup=userbot_cancel_keyboard(),
+            ); return True
         if kind=="gift_add_expiry":
-            expiry="" if text.strip() in {"0","-","—"} else text.strip()
-            business.add_gift_voucher_admin(
+            hours=int(text.replace(",",""))
+            if hours<0: raise ValueError("gift expiry")
+            item=business.add_gift_voucher_admin(
                 actor,code=str(flow["code"]),amount=int(flow["amount"]),
                 currency=str(flow["currency"]),max_uses=int(flow["max_uses"]),
-                expires_at=expiry,
             )
+            if hours>0:
+                item=business.set_gift_voucher_expiry_hours_admin(
+                    actor,voucher_id=int(item["id"]),hours=hours
+                )
             context.user_data.pop(FLOW_KEY,None)
-            await update.effective_message.reply_text("✅ کد هدیه ساخته شد.",reply_markup=admin_main_keyboard()); return True
+            await update.effective_message.reply_text("✅ کد هدیه ساخته شد.",reply_markup=admin_main_keyboard())
+            await _send_coupon_detail(update,business,actor,int(item["id"])); return True
+        if kind=="gift_edit_code":
+            cid=int(flow["voucher_id"])
+            code=text.strip().upper()
+            item=business.rename_gift_voucher_admin(actor,voucher_id=cid,code=code)
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text("✅ کد هدیه ویرایش شد.",reply_markup=admin_main_keyboard())
+            await _send_coupon_detail(update,business,actor,int(item["id"])); return True
+        if kind=="gift_edit_amount":
+            cid=int(flow["voucher_id"])
+            amount=int(text.replace(",",""))
+            item=business.set_gift_voucher_amount_admin(actor,voucher_id=cid,amount=amount)
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text("✅ مبلغ هدیه ویرایش شد.",reply_markup=admin_main_keyboard())
+            await _send_coupon_detail(update,business,actor,int(item["id"])); return True
+        if kind=="gift_edit_limit":
+            cid=int(flow["voucher_id"])
+            limit=int(text.replace(",",""))
+            item=business.set_gift_voucher_max_uses_admin(actor,voucher_id=cid,max_uses=limit)
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text("✅ سقف مصرف ویرایش شد.",reply_markup=admin_main_keyboard())
+            await _send_coupon_detail(update,business,actor,int(item["id"])); return True
+        if kind=="gift_edit_expiry":
+            cid=int(flow["voucher_id"])
+            hours=int(text.replace(",",""))
+            item=business.set_gift_voucher_expiry_hours_admin(actor,voucher_id=cid,hours=hours)
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text("✅ انقضای هدیه ویرایش شد.",reply_markup=admin_main_keyboard())
+            await _send_coupon_detail(update,business,actor,int(item["id"])); return True
         if kind=="gift_bulk_prefix":
             prefix=text.strip().upper()
-            if not prefix or len(prefix)>20: raise ValueError("gift prefix")
+            if not re.fullmatch(r"[A-Z0-9_-]{2,24}",prefix): raise ValueError("gift prefix")
             flow["prefix"]=prefix; flow["kind"]="gift_bulk_count"
-            await update.effective_message.reply_text("🔢 تعداد کدها را وارد کنید (1 تا 100):",reply_markup=userbot_cancel_keyboard()); return True
+            await update.effective_message.reply_text("🔢 تعداد کدها را وارد کنید (1 تا 200):",reply_markup=userbot_cancel_keyboard()); return True
         if kind=="gift_bulk_count":
             count=int(text)
-            if not 1<=count<=100: raise ValueError("gift count")
+            if not 1<=count<=200: raise ValueError("gift count")
             flow["count"]=count; flow["kind"]="gift_bulk_amount"
             await update.effective_message.reply_text("💰 مبلغ هر کد هدیه را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
         if kind=="gift_bulk_amount":
@@ -3181,20 +3218,46 @@ async def handle_text(
         if kind=="gift_bulk_currency":
             currency=text.strip().upper()
             if not 3<=len(currency)<=8: raise ValueError("gift currency")
-            stamp=str(int(utcnow().timestamp()))[-6:]
-            codes=[]
-            for i in range(int(flow["count"])):
-                code=f"{flow['prefix']}-{stamp}-{i+1:02d}"
-                business.add_gift_voucher_admin(
-                    actor,code=code,amount=int(flow["amount"]),
-                    currency=currency,max_uses=1,
-                )
-                codes.append(code)
-            context.user_data.pop(FLOW_KEY,None)
+            flow["currency"]=currency; flow["kind"]="gift_bulk_expiry"
             await update.effective_message.reply_text(
-                "✅ کدهای یک‌بارمصرف ساخته شدند:\n"+"\n".join(codes),
-                reply_markup=admin_main_keyboard(),
+                "🕒 انقضای همه کدها را به ساعت وارد کنید؛ 0 یعنی نامحدود:",
+                reply_markup=userbot_cancel_keyboard(),
             ); return True
+        if kind=="gift_bulk_expiry":
+            hours=int(text.replace(",",""))
+            if hours<0: raise ValueError("gift expiry")
+            items=business.create_gift_vouchers_bulk_admin(
+                actor,
+                prefix=str(flow["prefix"]),
+                count=int(flow["count"]),
+                amount=int(flow["amount"]),
+                currency=str(flow["currency"]),
+                expiry_hours=hours,
+            )
+            username_row=BotRepository(business.conn).get_by_tenant_role(business.tenant_id,"user") or {}
+            username=str(username_row.get("telegram_username") or "").strip().lstrip("@")
+            lines=[
+                "✅ کدهای یک‌بارمصرف ساخته شدند.",
+                f"🧩 تعداد: {len(items)}",
+                f"💰 مبلغ هر کد: {int(flow['amount']):,} {flow['currency']}",
+                f"🕒 انقضا: {'نامحدود' if hours==0 else f'{hours} ساعت'}",
+                "",
+            ]
+            for item in items:
+                code=str(item["code"])
+                lines.append(
+                    f"{code} | https://t.me/{username}?start=gift_{code}"
+                    if username else code
+                )
+            context.user_data.pop(FLOW_KEY,None)
+            output="\n".join(lines)
+            for pos in range(0,len(output),3500):
+                await update.effective_message.reply_text(
+                    output[pos:pos+3500],
+                    disable_web_page_preview=True,
+                    reply_markup=admin_main_keyboard() if pos==0 else None,
+                )
+            return True
         if kind=="referral_edit":
             value=int(text.replace(",","")); field=str(flow["field"]); kwargs={}
             if field=="trial": kwargs["referral_trial_reward"]=value
