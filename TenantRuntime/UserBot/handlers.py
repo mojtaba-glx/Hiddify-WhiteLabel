@@ -489,14 +489,41 @@ def _subscription_metrics(
     }
 
 
-def _subscription_menu_text(item: dict[str, Any] | None = None) -> str:
-    if item is None:
-        return "📊 وضعیت اشتراک\n\nیکی از گزینه‌های زیر را انتخاب کنید:"
-    return (
-        "📊 وضعیت اشتراک\n\n"
-        f"{_subscription_name(item)}\n\n"
-        "یکی از گزینه‌های زیر را انتخاب کنید:"
-    )
+def _subscription_detail_text(
+    item: dict[str, Any],
+    settings: dict[str, Any],
+) -> str:
+    metrics = _subscription_metrics(item, settings)
+    if metrics["unlimited_volume"]:
+        usage_line = f"{metrics['usage_gb']:.1f} از نامحدود"
+    elif metrics["limit_gb"] > 0:
+        usage_line = (
+            f"{metrics['usage_gb']:.1f} از "
+            f"{metrics['limit_gb']:.1f} گیگ"
+        )
+    else:
+        usage_line = f"{metrics['usage_gb']:.1f} گیگ"
+
+    if metrics["unlimited_time"]:
+        days_text = "نامحدود"
+    elif metrics["days_left"] is None:
+        days_text = "نامشخص"
+    else:
+        days_text = f"{int(metrics['days_left'])} روز"
+
+    lines = ["📄اطلاعات اشتراک شما", ""]
+    if bool(settings.get("show_username", True)):
+        lines.append(
+            f"👤نام: {escape(_subscription_name(item))}"
+        )
+    lines.extend([
+        f"📡سرور: {escape(str(item.get('server_label') or 'نامشخص'))}",
+        f"📊میزان استفاده: {usage_line}",
+        f"⏳زمان باقی مانده: {days_text}",
+        f"💰قیمت اشتراک: {_subscription_price(item)}",
+        f"🔑شناسه: <code>{int(item['id'])}</code>",
+    ])
+    return "\n".join(lines)
 
 
 def _subscription_name(item: dict[str, Any]) -> str:
@@ -1821,7 +1848,7 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             first, *rest = direct_items
             await _edit_subscription(
                 update.callback_query,
-                _subscription_menu_text(first if multiple else None),
+                _subscription_detail_text(first, settings),
                 reply_markup=InlineKeyboardMarkup(
                     _subscription_status_rows(
                         business, user_id, first, settings
@@ -1830,7 +1857,7 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             for item in rest:
                 await update.callback_query.message.reply_text(
-                    _subscription_menu_text(item),
+                    _subscription_detail_text(item, settings),
                     reply_markup=InlineKeyboardMarkup(
                         _subscription_status_rows(
                             business, user_id, item, settings
@@ -2625,7 +2652,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             else:
                 await update.callback_query.answer()
             markup = InlineKeyboardMarkup(_subscription_status_rows(business, actor, item, settings))
-            text = notice + _subscription_menu_text()
+            text = notice + _subscription_detail_text(item, settings)
             if action == "substatus":
                 # For the >3-services path, keep the simple SellBot list intact
                 # and send the selected service menu as a new message.
@@ -3361,7 +3388,7 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 context.user_data.pop("biz_flow", None)
                 settings = business.runtime_userbot_settings()
                 await update.effective_message.reply_text(
-                    "✅ نام اشتراک تغییر کرد.\n\n" + _subscription_menu_text(),
+                    "✅ نام اشتراک تغییر کرد.\n\n" + _subscription_detail_text(item, settings),
                     reply_markup=InlineKeyboardMarkup(
                         _subscription_status_rows(business, actor, item, settings)
                     ),
