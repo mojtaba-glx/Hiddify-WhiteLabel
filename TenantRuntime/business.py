@@ -7793,29 +7793,246 @@ class TenantBusinessService:
             raise TenantBusinessError("order not found")
         return dict(row)
 
-    def create_ticket(self, actor_id: int, *, subject: str, body: str) -> dict[str, Any]:
-        customer = self._customer(actor_id); now = iso_utc(utcnow())
-        with transaction(self.conn):
-            cursor = self.conn.execute("INSERT INTO tenant_tickets (tenant_id, customer_id, subject, body, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'open', ?, ?)", (self.tenant_id, int(customer["id"]), _text(subject, 100), _text(body, 2000), now, now))
-        return {"id": int(cursor.lastrowid or 0), "status": "open"}
+    @staticmethod
+    def _ticket_message_view(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        item = dict(row)
+        item["has_media"] = item.get("media") is not None
+        item.pop("media", None)
+        return item
 
-    def list_tickets_admin(self, actor_id: int) -> list[dict[str, Any]]:
-        self._admin(actor_id)
-        rows = self.conn.execute(
-            "SELECT t.*, c.display_name, c.telegram_user_id, c.username "
+    def _ticket_owned(self, actor_id: int, ticket_id: int) -> dict[str, Any]:
+        customer = self._customer(actor_id, active=False)
+        row = self.conn.execute(
+            "SELECT t.*, c.display_name, c.username, c.telegram_user_id "
             "FROM tenant_tickets t "
             "JOIN tenant_customers c ON c.id=t.customer_id AND c.tenant_id=t.tenant_id "
-            "WHERE t.tenant_id=? ORDER BY "
-            "CASE t.status WHEN 'open' THEN 0 WHEN 'answered' THEN 1 ELSE 2 END, "
-            "t.id DESC",
-            (self.tenant_id,),
+            "WHERE t.tenant_id=? AND t.id=? AND t.customer_id=?",
+            (self.tenant_id, int(ticket_id), int(customer["id"])),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("ticket not found")
+        return dict(row)
+
+    def _add_ticket_message_tx(
+        self,
+        *,
+        ticket_id: int,
+        sender_type: str,
+        sender_name: str,
+        message_text: str = "",
+        media: bytes | None = None,
+        media_mime: str = "",
+        created_at: str | None = None,
+    ) -> int:
+        kind = str(sender_type or "").strip().lower()
+        if kind not in {"user", "admin"}:
+            raise ValueError("invalid ticket sender")
+        text = _text(message_text, 4000, required=False)
+        payload = bytes(media or b"")
+        if not text and not payload:
+            raise ValueError("ticket message is empty")
+        if len(payload) > 8 * 1024 * 1024:
+            raise ValueError("ticket media is too large")
+        mime = _text(media_mime, 80, required=False)
+        now = created_at or iso_utc(utcnow())
+        cursor = self.conn.execute(
+            "INSERT INTO tenant_ticket_messages "
+            "(tenant_id,ticket_id,sender_type,sender_name,message_text,"
+            "media_mime,media,created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                self.tenant_id,
+                int(ticket_id),
+                kind,
+                _text(sender_name, 120, required=False),
+                text,
+                mime,
+                sqlite3.Binary(payload) if payload else None,
+                now,
+            ),
+        )
+        return int(cursor.lastrowid or 0)
+
+    def create_ticket(
+        self,
+        actor_id: int,
+        *,
+        subject: str,
+        body: str,
+        media: bytes | None = None,
+        media_mime: str = "",
+    ) -> dict[str, Any]:
+        customer = self._customer(actor_id)
+        clean_subject = _text(subject, 100)
+        clean_body = _text(body, 4000)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            cursor = self.conn.execute(
+                "INSERT INTO tenant_tickets "
+                "(tenant_id,customer_id,subject,body,status,created_at,updated_at) "
+                "VALUES (?,?,?,?, 'open', ?, ?)",
+                (
+                    self.tenant_id,
+                    int(customer["id"]),
+                    clean_subject,
+                    clean_body,
+                    now,
+                    now,
+                ),
+            )
+            ticket_id = int(cursor.lastrowid or 0)
+            self._add_ticket_message_tx(
+                ticket_id=ticket_id,
+                sender_type="user",
+                sender_name=str(customer.get("display_name") or customer.get("username") or actor_id),
+                message_text=clean_body,
+                media=media,
+                media_mime=media_mime,
+                created_at=now,
+            )
+        return self._ticket_owned(actor_id, ticket_id)
+
+    def ticket(self, actor_id: int, *, ticket_id: int) -> dict[str, Any]:
+        return self._ticket_owned(actor_id, int(ticket_id))
+
+    def list_tickets(self, actor_id: int) -> list[dict[str, Any]]:
+        customer = self._customer(actor_id, active=False)
+        rows = self.conn.execute(
+            "SELECT t.*, "
+            "(SELECT COUNT(*) FROM tenant_ticket_messages m "
+            " WHERE m.tenant_id=t.tenant_id AND m.ticket_id=t.id) AS message_count "
+            "FROM tenant_tickets t WHERE t.tenant_id=? AND t.customer_id=? "
+            "ORDER BY t.updated_at DESC, t.id DESC LIMIT 100",
+            (self.tenant_id, int(customer["id"])),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def ticket_messages(self, actor_id: int, *, ticket_id: int) -> list[dict[str, Any]]:
+        self._ticket_owned(actor_id, int(ticket_id))
+        rows = self.conn.execute(
+            "SELECT * FROM tenant_ticket_messages "
+            "WHERE tenant_id=? AND ticket_id=? ORDER BY id ASC",
+            (self.tenant_id, int(ticket_id)),
+        ).fetchall()
+        return [self._ticket_message_view(row) for row in rows]
+
+    def ticket_message_media(
+        self,
+        actor_id: int,
+        *,
+        ticket_id: int,
+        message_id: int,
+    ) -> dict[str, Any] | None:
+        self._ticket_owned(actor_id, int(ticket_id))
+        row = self.conn.execute(
+            "SELECT media_mime, media FROM tenant_ticket_messages "
+            "WHERE tenant_id=? AND ticket_id=? AND id=?",
+            (self.tenant_id, int(ticket_id), int(message_id)),
+        ).fetchone()
+        if row is None or row["media"] is None:
+            return None
+        return {
+            "media_mime": str(row["media_mime"] or "image/jpeg"),
+            "media": bytes(row["media"]),
+        }
+
+    def reply_ticket(
+        self,
+        actor_id: int,
+        *,
+        ticket_id: int,
+        reply: str,
+        media: bytes | None = None,
+        media_mime: str = "",
+    ) -> dict[str, Any]:
+        customer = self._customer(actor_id, active=False)
+        ticket = self._ticket_owned(actor_id, int(ticket_id))
+        if str(ticket.get("status") or "") == "closed":
+            raise TenantBusinessError("ticket is closed")
+        text = _text(reply, 4000)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            self._add_ticket_message_tx(
+                ticket_id=int(ticket_id),
+                sender_type="user",
+                sender_name=str(customer.get("display_name") or customer.get("username") or actor_id),
+                message_text=text,
+                media=media,
+                media_mime=media_mime,
+                created_at=now,
+            )
+            self.conn.execute(
+                "UPDATE tenant_tickets SET status='open', updated_at=? "
+                "WHERE tenant_id=? AND id=?",
+                (now, self.tenant_id, int(ticket_id)),
+            )
+        return self._ticket_owned(actor_id, int(ticket_id))
+
+    def close_ticket(
+        self, actor_id: int, *, ticket_id: int
+    ) -> dict[str, Any]:
+        self._ticket_owned(actor_id, int(ticket_id))
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_tickets SET status='closed', updated_at=? "
+                "WHERE tenant_id=? AND id=? AND status IN ('open','answered')",
+                (now, self.tenant_id, int(ticket_id)),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("ticket cannot be closed")
+        return self._ticket_owned(actor_id, int(ticket_id))
+
+    def reopen_ticket(
+        self, actor_id: int, *, ticket_id: int
+    ) -> dict[str, Any]:
+        self._ticket_owned(actor_id, int(ticket_id))
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_tickets SET status='open', updated_at=? "
+                "WHERE tenant_id=? AND id=? AND status='closed'",
+                (now, self.tenant_id, int(ticket_id)),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("ticket cannot be reopened")
+        return self._ticket_owned(actor_id, int(ticket_id))
+
+    def list_tickets_admin(
+        self,
+        actor_id: int,
+        *,
+        status: str | None = None,
+        customer_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        sql = (
+            "SELECT t.*, c.display_name, c.telegram_user_id, c.username, "
+            "(SELECT COUNT(*) FROM tenant_ticket_messages m "
+            " WHERE m.tenant_id=t.tenant_id AND m.ticket_id=t.id) AS message_count "
+            "FROM tenant_tickets t "
+            "JOIN tenant_customers c ON c.id=t.customer_id AND c.tenant_id=t.tenant_id "
+            "WHERE t.tenant_id=?"
+        )
+        args: list[Any] = [self.tenant_id]
+        if status is not None:
+            clean = str(status or "").strip().lower()
+            mapping = {"pending": "open", "open": "answered", "closed": "closed"}
+            if clean not in mapping:
+                raise ValueError("invalid ticket status")
+            sql += " AND t.status=?"
+            args.append(mapping[clean])
+        if customer_id is not None:
+            sql += " AND t.customer_id=?"
+            args.append(int(customer_id))
+        sql += " ORDER BY t.updated_at DESC, t.id DESC"
+        return [dict(row) for row in self.conn.execute(sql, tuple(args)).fetchall()]
 
     def ticket_admin(self, actor_id: int, *, ticket_id: int) -> dict[str, Any]:
         self._admin(actor_id)
         row = self.conn.execute(
-            "SELECT t.*, c.display_name, c.telegram_user_id, c.username "
+            "SELECT t.*, c.display_name, c.telegram_user_id, c.username, "
+            "(SELECT COUNT(*) FROM tenant_ticket_messages m "
+            " WHERE m.tenant_id=t.tenant_id AND m.ticket_id=t.id) AS message_count "
             "FROM tenant_tickets t "
             "JOIN tenant_customers c ON c.id=t.customer_id AND c.tenant_id=t.tenant_id "
             "WHERE t.id=? AND t.tenant_id=?",
@@ -7825,17 +8042,63 @@ class TenantBusinessService:
             raise TenantBusinessError("ticket not found")
         return dict(row)
 
+    def ticket_messages_admin(
+        self, actor_id: int, *, ticket_id: int
+    ) -> list[dict[str, Any]]:
+        self.ticket_admin(actor_id, ticket_id=int(ticket_id))
+        rows = self.conn.execute(
+            "SELECT * FROM tenant_ticket_messages "
+            "WHERE tenant_id=? AND ticket_id=? ORDER BY id ASC",
+            (self.tenant_id, int(ticket_id)),
+        ).fetchall()
+        return [self._ticket_message_view(row) for row in rows]
+
+    def ticket_message_media_admin(
+        self,
+        actor_id: int,
+        *,
+        ticket_id: int,
+        message_id: int,
+    ) -> dict[str, Any] | None:
+        self.ticket_admin(actor_id, ticket_id=int(ticket_id))
+        row = self.conn.execute(
+            "SELECT media_mime, media FROM tenant_ticket_messages "
+            "WHERE tenant_id=? AND ticket_id=? AND id=?",
+            (self.tenant_id, int(ticket_id), int(message_id)),
+        ).fetchone()
+        if row is None or row["media"] is None:
+            return None
+        return {
+            "media_mime": str(row["media_mime"] or "image/jpeg"),
+            "media": bytes(row["media"]),
+        }
+
     def reply_ticket_admin(
         self,
         actor_id: int,
         *,
         ticket_id: int,
         reply: str,
+        media: bytes | None = None,
+        media_mime: str = "",
+        admin_name: str = "پشتیبانی",
     ) -> dict[str, Any]:
         self._admin(actor_id)
-        message = _text(reply, 3000)
+        ticket = self.ticket_admin(actor_id, ticket_id=int(ticket_id))
+        if str(ticket.get("status") or "") == "closed":
+            raise TenantBusinessError("ticket is closed")
+        message = _text(reply, 4000)
         now = iso_utc(utcnow())
         with transaction(self.conn):
+            self._add_ticket_message_tx(
+                ticket_id=int(ticket_id),
+                sender_type="admin",
+                sender_name=_text(admin_name, 120, required=False) or "پشتیبانی",
+                message_text=message,
+                media=media,
+                media_mime=media_mime,
+                created_at=now,
+            )
             changed = self.conn.execute(
                 "UPDATE tenant_tickets SET admin_reply=?, status='answered', updated_at=? "
                 "WHERE id=? AND tenant_id=? AND status IN ('open','answered')",
@@ -7845,32 +8108,39 @@ class TenantBusinessService:
                 raise TenantBusinessError("ticket cannot be answered")
         return self.ticket_admin(actor_id, ticket_id=int(ticket_id))
 
+    def set_ticket_status_admin(
+        self,
+        actor_id: int,
+        *,
+        ticket_id: int,
+        status: str,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        clean = str(status or "").strip().lower()
+        if clean not in {"open", "closed"}:
+            raise ValueError("invalid ticket status")
+        self.ticket_admin(actor_id, ticket_id=int(ticket_id))
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_tickets SET status=?, updated_at=? "
+                "WHERE id=? AND tenant_id=?",
+                (clean, now, int(ticket_id), self.tenant_id),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("ticket state changed")
+        return self.ticket_admin(actor_id, ticket_id=int(ticket_id))
+
     def close_ticket_admin(
         self,
         actor_id: int,
         *,
         ticket_id: int,
     ) -> dict[str, Any]:
-        self._admin(actor_id)
-        now = iso_utc(utcnow())
-        with transaction(self.conn):
-            changed = self.conn.execute(
-                "UPDATE tenant_tickets SET status='closed', updated_at=? "
-                "WHERE id=? AND tenant_id=? AND status IN ('open','answered')",
-                (now, int(ticket_id), self.tenant_id),
-            )
-            if changed.rowcount != 1:
-                raise TenantBusinessError("ticket cannot be closed")
-        return self.ticket_admin(actor_id, ticket_id=int(ticket_id))
+        return self.set_ticket_status_admin(
+            actor_id, ticket_id=int(ticket_id), status="closed"
+        )
 
-    def list_tickets(self, actor_id: int) -> list[dict[str, Any]]:
-        customer = self._customer(actor_id, active=False)
-        rows = self.conn.execute(
-            "SELECT * FROM tenant_tickets "
-            "WHERE tenant_id=? AND customer_id=? ORDER BY id DESC LIMIT 20",
-            (self.tenant_id, int(customer["id"])),
-        ).fetchall()
-        return [dict(row) for row in rows]
 
     def create_smart_link(self, actor_id: int, *, label: str, target: str) -> dict[str, Any]:
         self._admin(actor_id); now = iso_utc(utcnow()); code = secrets.token_urlsafe(7)

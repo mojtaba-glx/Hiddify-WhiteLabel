@@ -16,6 +16,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from telegram import (
+    Bot,
     InlineKeyboardButton as TelegramInlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
@@ -32,9 +33,11 @@ from telegram.ext import (
     filters,
 )
 
+from Database.repositories import BotRepository
 from Gateway.catalog import RuntimeBotSpec
 from TenantRuntime.business import DEFAULT_REFERRAL_INVITE_TEXT, TenantBusinessError
 from TenantRuntime.button_styles import keyboard_button as KeyboardButton
+from Shared.crypto import fingerprint_token
 from Shared.timeutils import format_tehran, parse_utc, utcnow
 from TenantRuntime.common import _deny_update, _services, runtime_access_gate, runtime_error
 
@@ -81,9 +84,193 @@ def _ticket_panel_body(
             f"{' · پاسخ داده شد' if x.get('admin_reply') else ''}"
             for x in items[:15]
         )
-        or "تیکتی ندارید."
+        or ""
     )
     return f"{intro}\n\n{history}".strip()
+
+
+def _ticket_status_label(status: object) -> str:
+    return {
+        "open": "📨 در انتظار پاسخ",
+        "answered": "📬 باز / پاسخ‌داده",
+        "closed": "📩 بسته",
+    }.get(str(status or ""), str(status or "-"))
+
+
+def _ticket_thread_text(
+    ticket: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> str:
+    lines = [
+        f"🎫 تیکت #{int(ticket['id'])}",
+        f"وضعیت: {_ticket_status_label(ticket.get('status'))}",
+        f"موضوع: {ticket.get('subject') or '-'}",
+        "",
+    ]
+    if not messages:
+        lines.append("هنوز پیامی ثبت نشده است.")
+    for item in messages[-30:]:
+        who = "👤 شما" if item.get("sender_type") == "user" else "🛟 پشتیبانی"
+        lines.append(f"{who}:")
+        body = str(item.get("message_text") or "").strip()
+        if body:
+            lines.append(body)
+        if item.get("has_media"):
+            lines.append("🖼 تصویر پیوست دارد")
+        lines.append("")
+    result = "\n".join(lines).strip()
+    if len(result) > 3800:
+        header = "\n".join(lines[:4]).strip()
+        tail_size = max(500, 3800 - len(header) - 16)
+        result = header + "\n\n…\n" + result[-tail_size:]
+    return result
+
+
+def _ticket_detail_markup(
+    ticket: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> InlineKeyboardMarkup:
+    ticket_id = int(ticket["id"])
+    rows: list[list[TelegramInlineKeyboardButton]] = []
+    media_buttons = [
+        InlineKeyboardButton(
+            f"🖼 تصویر پیام #{int(item['id'])}",
+            callback_data=f"shop:ticketmedia:{ticket_id}:{int(item['id'])}",
+        )
+        for item in messages
+        if item.get("has_media")
+    ]
+    for i in range(0, len(media_buttons), 2):
+        rows.append(media_buttons[i:i+2])
+    if str(ticket.get("status") or "") != "closed":
+        rows.append([
+            InlineKeyboardButton(
+                "📩 پاسخ",
+                callback_data=f"shop:ticketreply:{ticket_id}",
+            ),
+            InlineKeyboardButton(
+                "🚫 بستن تیکت",
+                callback_data=f"shop:ticketclose:{ticket_id}",
+            ),
+        ])
+    rows.extend([
+        [InlineKeyboardButton("📬 تیکت‌های من", callback_data="shop:tickets")],
+        [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _ticket_confirm_markup(mode: str) -> InlineKeyboardMarkup:
+    clean = "reply" if mode == "reply" else "new"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ارسال", callback_data=f"shop:ticketflow:{clean}:send"),
+            InlineKeyboardButton("✏️ویرایش", callback_data=f"shop:ticketflow:{clean}:edit"),
+        ],
+        [InlineKeyboardButton("❌لغو", callback_data=f"shop:ticketflow:{clean}:cancel")],
+    ])
+
+
+def _ticket_skip_markup(mode: str) -> InlineKeyboardMarkup:
+    clean = "reply" if mode == "reply" else "new"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("▶️رد کردن", callback_data=f"shop:ticketflow:{clean}:skip")],
+        [InlineKeyboardButton("❌لغو", callback_data=f"shop:ticketflow:{clean}:cancel")],
+    ])
+
+
+def _ticket_preview_text(flow: dict[str, Any], *, mode: str) -> str:
+    if mode == "reply":
+        return (
+            "👁 پیش‌نمایش پاسخ تیکت\n\n"
+            f"{str(flow.get('reply_text') or '').strip()}\n\n"
+            f"🖼 تصویر: {'دارد' if flow.get('photo_file_id') else 'ندارد'}"
+        )
+    return (
+        "👁 پیش‌نمایش تیکت\n\n"
+        f"موضوع: {str(flow.get('subject') or '').strip()}\n\n"
+        f"{str(flow.get('body') or '').strip()}\n\n"
+        f"🖼 تصویر: {'دارد' if flow.get('photo_file_id') else 'ندارد'}"
+    )
+
+
+async def _show_ticket_preview(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    flow: dict[str, Any],
+    *,
+    mode: str,
+) -> None:
+    text = _ticket_preview_text(flow, mode=mode)
+    markup = _ticket_confirm_markup(mode)
+    photo_id = str(flow.get("photo_file_id") or "").strip()
+    if photo_id and update.effective_chat is not None:
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=photo_id,
+            caption="🖼 پیش‌نمایش تصویر پیوست تیکت",
+        )
+        if update.effective_message is not None:
+            await update.effective_message.reply_text(text, reply_markup=markup)
+        return
+    if update.callback_query is not None:
+        try:
+            await update.callback_query.edit_message_text(text, reply_markup=markup)
+            return
+        except Exception:
+            pass
+    if update.effective_message is not None:
+        await update.effective_message.reply_text(text, reply_markup=markup)
+
+
+async def _ticket_media_bytes(
+    context: ContextTypes.DEFAULT_TYPE,
+    file_id: str,
+) -> bytes:
+    if not str(file_id or "").strip():
+        return b""
+    tg_file = await context.bot.get_file(str(file_id))
+    return bytes(await tg_file.download_as_bytearray())
+
+
+def _sibling_admin_bot_token(business: Any) -> str:
+    if business.secret_cipher is None:
+        raise TenantBusinessError("AdminBot encryption is unavailable")
+    row = BotRepository(business.conn).get_by_tenant_role(
+        business.tenant_id, "admin"
+    )
+    if row is None or row.get("status") != "active":
+        raise TenantBusinessError("AdminBot is not active")
+    plain = business.secret_cipher.decrypt(str(row["encrypted_token"]))
+    if fingerprint_token(plain) != str(row["token_fingerprint"]):
+        raise TenantBusinessError("AdminBot credential integrity failed")
+    return plain
+
+
+async def _notify_admin_ticket(
+    business: Any,
+    *,
+    ticket: dict[str, Any],
+    event: str,
+) -> None:
+    token = ""
+    try:
+        token = _sibling_admin_bot_token(business)
+        title = "🆕 تیکت جدید" if event == "new" else "💬 پاسخ جدید تیکت"
+        async with Bot(token=token) as bot:
+            await bot.send_message(
+                chat_id=int(business.owner_telegram_id),
+                text=(
+                    f"{title}\n"
+                    f"🎫 #{int(ticket['id'])}\n"
+                    f"👤 {ticket.get('display_name') or ticket.get('username') or ticket.get('telegram_user_id') or '-'}\n"
+                    f"موضوع: {ticket.get('subject') or '-'}"
+                ),
+            )
+    except Exception:
+        return
+    finally:
+        token = ""
 
 
 def _referral_content(
@@ -1453,21 +1640,14 @@ async def _handle_main_reply_action(
 
     if text == BTN_SUPPORT:
         items = business.list_tickets(actor)
-        body = _ticket_panel_body(settings, items)
-        rows = [
-            [InlineKeyboardButton(
-                f"🎫 #{x['id']} · {x['subject']}"[:60],
-                callback_data=f"shop:ticket:{x['id']}",
-            )]
-            for x in items[:15]
-        ]
-        rows.append([InlineKeyboardButton(
-            "➕ تیکت جدید",
-            callback_data="shop:newticket",
-        )])
+        body = _ticket_panel_body(settings, [])
         await update.effective_message.reply_text(
             body,
-            reply_markup=InlineKeyboardMarkup(rows),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❗️سوالات متداول", callback_data="shop:faq")],
+                [InlineKeyboardButton("📬تیکت‌های من", callback_data="shop:tickets")],
+                [InlineKeyboardButton("📩ایجاد تیکت", callback_data="shop:newticket")],
+            ]),
         )
         return True
 
@@ -2847,53 +3027,219 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     back_label="↩️ اشتراک‌های من",
                 ),
             ); return
-        if data == "shop:tickets":
+        if data == "shop:support":
             items = business.list_tickets(actor)
-            text = _ticket_panel_body(settings, items)
-            rows = [
-                [InlineKeyboardButton(
-                    f"🎫 #{x['id']} · {x['subject']}"[:60],
-                    callback_data=f"shop:ticket:{x['id']}",
-                )]
-                for x in items[:15]
-            ]
-            rows.extend([
-                [InlineKeyboardButton("➕ تیکت جدید", callback_data="shop:newticket")],
-                [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
-            ])
             await update.callback_query.edit_message_text(
-                text, reply_markup=InlineKeyboardMarkup(rows)
-            ); return
-        if data == "shop:newticket":
-            context.user_data["biz_flow"] = {"kind": "ticket"}
-            await update.callback_query.edit_message_text(
-                "موضوع | متن تیکت را ارسال کنید.",
+                _ticket_panel_body(settings, []),
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("↩️ تیکت‌های من", callback_data="shop:tickets")]
-                ]),
-            ); return
-        if data.startswith("shop:ticket:"):
-            ticket_id = int(data.rsplit(":", 1)[1])
-            ticket = next(
-                (
-                    x for x in business.list_tickets(actor)
-                    if int(x["id"]) == ticket_id
-                ),
-                None,
-            )
-            if ticket is None:
-                raise TenantBusinessError("ticket not found")
-            await update.callback_query.edit_message_text(
-                f"🎫 تیکت #{ticket_id}\n"
-                f"وضعیت: {ticket['status']}\n"
-                f"موضوع: {ticket['subject']}\n\n"
-                f"پیام شما:\n{ticket['body']}\n\n"
-                f"پاسخ پشتیبانی:\n{ticket.get('admin_reply') or 'هنوز پاسخی ثبت نشده است.'}",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("↩️ تیکت‌های من", callback_data="shop:tickets")],
+                    [InlineKeyboardButton("❗️سوالات متداول", callback_data="shop:faq")],
+                    [InlineKeyboardButton("📬تیکت‌های من", callback_data="shop:tickets")],
+                    [InlineKeyboardButton("📩ایجاد تیکت", callback_data="shop:newticket")],
                     [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
                 ]),
-            ); return
+            )
+            return
+        if data == "shop:tickets" or data.startswith("shop:tickets:"):
+            items = business.list_tickets(actor)
+            try:
+                page = max(1, int(data.split(":")[2])) if data.startswith("shop:tickets:") else 1
+            except (ValueError, IndexError):
+                page = 1
+            page_size = 15
+            pages = max(1, (len(items) + page_size - 1) // page_size)
+            page = min(page, pages)
+            selected = items[(page - 1) * page_size:page * page_size]
+            rows: list[list[TelegramInlineKeyboardButton]] = []
+            current: list[TelegramInlineKeyboardButton] = []
+            for item in selected:
+                current.append(InlineKeyboardButton(
+                    f"#{int(item['id'])}",
+                    callback_data=f"shop:ticket:{int(item['id'])}",
+                ))
+                if len(current) == 3:
+                    rows.append(current)
+                    current = []
+            if current:
+                rows.append(current)
+            if not selected:
+                rows.append([InlineKeyboardButton("تیکتی ثبت نشده است", callback_data="noop")])
+            nav: list[TelegramInlineKeyboardButton] = []
+            if page > 1:
+                nav.append(InlineKeyboardButton("◀️", callback_data=f"shop:tickets:{page-1}"))
+            nav.append(InlineKeyboardButton(f"{page}/{pages}", callback_data="noop"))
+            if page < pages:
+                nav.append(InlineKeyboardButton("▶️", callback_data=f"shop:tickets:{page+1}"))
+            rows.append(nav)
+            rows.extend([
+                [InlineKeyboardButton("📩ایجاد تیکت", callback_data="shop:newticket")],
+                [InlineKeyboardButton("🔙 پنل پشتیبانی", callback_data="shop:support")],
+            ])
+            await update.callback_query.edit_message_text(
+                f"📬 تیکت‌های من\n◈ تعداد: {len(items)}",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+        if data == "shop:newticket":
+            context.user_data["biz_flow"] = {
+                "kind": "ticket_new_title",
+                "subject": "",
+                "body": "",
+                "photo_file_id": "",
+            }
+            await update.callback_query.edit_message_text(
+                "✍️ لطفا موضوع درخواست خود را ارسال نمایید:",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌لغو", callback_data="shop:ticketflow:new:cancel")
+                ]]),
+            )
+            return
+        if data.startswith("shop:ticketflow:"):
+            parts = data.split(":")
+            mode = parts[2] if len(parts) > 2 else ""
+            action = parts[3] if len(parts) > 3 else ""
+            if mode not in {"new", "reply"}:
+                raise TenantBusinessError("invalid ticket flow")
+            flow = context.user_data.get("biz_flow")
+            if not isinstance(flow, dict):
+                raise TenantBusinessError("ticket flow is not active")
+            if action == "cancel":
+                context.user_data.pop("biz_flow", None)
+                await update.callback_query.edit_message_text(
+                    "❌ عملیات تیکت لغو شد.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 پنل پشتیبانی", callback_data="shop:support")
+                    ]]),
+                )
+                return
+            if action == "edit":
+                if mode == "new":
+                    flow.update(
+                        kind="ticket_new_title",
+                        subject="",
+                        body="",
+                        photo_file_id="",
+                    )
+                    prompt = "✍️ لطفا موضوع درخواست خود را ارسال نمایید:"
+                else:
+                    ticket_id = int(flow.get("ticket_id") or 0)
+                    flow.update(
+                        kind="ticket_reply_text",
+                        ticket_id=ticket_id,
+                        reply_text="",
+                        photo_file_id="",
+                    )
+                    prompt = "✍️ لطفا پاسخ خود را به صورت کامل ارسال نمایید:"
+                await update.effective_message.reply_text(
+                    prompt,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "❌لغو",
+                            callback_data=f"shop:ticketflow:{mode}:cancel",
+                        )
+                    ]]),
+                )
+                return
+            if action == "skip":
+                expected = "ticket_new_photo" if mode == "new" else "ticket_reply_photo"
+                if flow.get("kind") != expected:
+                    raise TenantBusinessError("ticket photo step is not active")
+                flow["photo_file_id"] = ""
+                flow["kind"] = "ticket_new_confirm" if mode == "new" else "ticket_reply_confirm"
+                await _show_ticket_preview(update, context, flow, mode=mode)
+                return
+            if action == "send":
+                expected = "ticket_new_confirm" if mode == "new" else "ticket_reply_confirm"
+                if flow.get("kind") != expected:
+                    raise TenantBusinessError("ticket confirmation is not active")
+                media = b""
+                file_id = str(flow.get("photo_file_id") or "").strip()
+                if file_id:
+                    media = await _ticket_media_bytes(context, file_id)
+                if mode == "new":
+                    ticket = business.create_ticket(
+                        actor,
+                        subject=str(flow.get("subject") or ""),
+                        body=str(flow.get("body") or ""),
+                        media=media or None,
+                        media_mime="image/jpeg" if media else "",
+                    )
+                    success = "✅ تیکت شما با موفقیت ثبت شد.\nبه زودی پاسخ داده می‌شود."
+                    event = "new"
+                else:
+                    ticket_id = int(flow.get("ticket_id") or 0)
+                    ticket = business.reply_ticket(
+                        actor,
+                        ticket_id=ticket_id,
+                        reply=str(flow.get("reply_text") or ""),
+                        media=media or None,
+                        media_mime="image/jpeg" if media else "",
+                    )
+                    success = "✅ پاسخ شما ثبت شد."
+                    event = "reply"
+                context.user_data.pop("biz_flow", None)
+                await _notify_admin_ticket(business, ticket=ticket, event=event)
+                messages = business.ticket_messages(actor, ticket_id=int(ticket["id"]))
+                await update.effective_message.reply_text(
+                    success + "\n\n" + _ticket_thread_text(ticket, messages),
+                    reply_markup=_ticket_detail_markup(ticket, messages),
+                )
+                return
+            raise TenantBusinessError("invalid ticket action")
+        if data.startswith("shop:ticketreply:"):
+            ticket_id = int(data.rsplit(":", 1)[1])
+            ticket = business.ticket(actor, ticket_id=ticket_id)
+            if str(ticket.get("status") or "") == "closed":
+                raise TenantBusinessError("ticket is closed")
+            context.user_data["biz_flow"] = {
+                "kind": "ticket_reply_text",
+                "ticket_id": ticket_id,
+                "reply_text": "",
+                "photo_file_id": "",
+            }
+            await update.callback_query.edit_message_text(
+                "✍️ لطفا پاسخ خود را به صورت کامل ارسال نمایید:",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌لغو", callback_data="shop:ticketflow:reply:cancel")
+                ]]),
+            )
+            return
+        if data.startswith("shop:ticketclose:"):
+            ticket_id = int(data.rsplit(":", 1)[1])
+            ticket = business.close_ticket(actor, ticket_id=ticket_id)
+            messages = business.ticket_messages(actor, ticket_id=ticket_id)
+            await update.callback_query.edit_message_text(
+                _ticket_thread_text(ticket, messages),
+                reply_markup=_ticket_detail_markup(ticket, messages),
+            )
+            return
+        if data.startswith("shop:ticketmedia:"):
+            parts = data.split(":")
+            ticket_id = int(parts[2])
+            message_id = int(parts[3])
+            media = business.ticket_message_media(
+                actor,
+                ticket_id=ticket_id,
+                message_id=message_id,
+            )
+            if media is None:
+                raise TenantBusinessError("ticket media not found")
+            stream = BytesIO(bytes(media["media"]))
+            stream.name = "ticket-image.jpg"
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=stream,
+                caption=f"🖼 تصویر پیام #{message_id} · تیکت #{ticket_id}",
+            )
+            return
+        if data.startswith("shop:ticket:"):
+            ticket_id = int(data.rsplit(":", 1)[1])
+            ticket = business.ticket(actor, ticket_id=ticket_id)
+            messages = business.ticket_messages(actor, ticket_id=ticket_id)
+            await update.callback_query.edit_message_text(
+                _ticket_thread_text(ticket, messages),
+                reply_markup=_ticket_detail_markup(ticket, messages),
+            )
+            return
         if data == "shop:guide":
             guide = str(settings.get("guide_text") or "").strip()
             rows = [
@@ -3009,6 +3355,66 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 await update.effective_message.reply_text("✅ نام اشتراک تغییر کرد.\n\n" + _subscription_detail_text(item, settings),
                     parse_mode="HTML", reply_markup=InlineKeyboardMarkup(_subscription_status_rows(business, actor, item, settings)))
                 return
+            if kind == "ticket_new_title":
+                if not text:
+                    raise ValueError("ticket subject")
+                flow["subject"] = text
+                flow["kind"] = "ticket_new_body"
+                await update.effective_message.reply_text(
+                    "✍️ لطفا سوال خود را به صورت کامل ارسال نمایید:",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("❌لغو", callback_data="shop:ticketflow:new:cancel")
+                    ]]),
+                )
+                return
+            if kind == "ticket_new_body":
+                if not text:
+                    raise ValueError("ticket body")
+                flow["body"] = text
+                flow["kind"] = "ticket_new_photo"
+                await update.effective_message.reply_text(
+                    "🖼 لطفا اسکرین‌شات خود را ارسال کنید یا روی دکمه «▶️رد کردن» کلیک کنید.",
+                    reply_markup=_ticket_skip_markup("new"),
+                )
+                return
+            if kind == "ticket_new_photo":
+                await update.effective_message.reply_text(
+                    "❌ لطفا عکس ارسال کنید یا روی دکمه «▶️رد کردن» بزنید.",
+                    reply_markup=_ticket_skip_markup("new"),
+                )
+                return
+            if kind == "ticket_new_confirm":
+                await update.effective_message.reply_text(
+                    "برای ارسال تیکت از دکمه‌های «✅ارسال» یا «✏️ویرایش» استفاده کنید.",
+                    reply_markup=_ticket_confirm_markup("new"),
+                )
+                return
+            if kind == "ticket_reply_text":
+                ticket_id = int(flow.get("ticket_id") or 0)
+                ticket = business.ticket(actor, ticket_id=ticket_id)
+                if str(ticket.get("status") or "") == "closed":
+                    raise TenantBusinessError("ticket is closed")
+                if not text:
+                    raise ValueError("ticket reply")
+                flow["reply_text"] = text
+                flow["kind"] = "ticket_reply_photo"
+                await update.effective_message.reply_text(
+                    "🖼 لطفا اسکرین‌شات خود را ارسال کنید یا روی دکمه «▶️رد کردن» کلیک کنید.",
+                    reply_markup=_ticket_skip_markup("reply"),
+                )
+                return
+            if kind == "ticket_reply_photo":
+                await update.effective_message.reply_text(
+                    "❌ لطفا عکس ارسال کنید یا روی دکمه «▶️رد کردن» بزنید.",
+                    reply_markup=_ticket_skip_markup("reply"),
+                )
+                return
+            if kind == "ticket_reply_confirm":
+                await update.effective_message.reply_text(
+                    "برای ارسال پاسخ از دکمه‌های «✅ارسال» یا «✏️ویرایش» استفاده کنید.",
+                    reply_markup=_ticket_confirm_markup("reply"),
+                )
+                return
             if kind == "wallet_topup_create":
                 if len(fields) != 2:
                     raise ValueError("invalid wallet topup")
@@ -3088,8 +3494,6 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     method_id=int(flow["method_id"]),
                     reference=text,
                 )
-            elif kind == "ticket" and len(fields) == 2:
-                business.create_ticket(actor, subject=fields[0], body=fields[1])
             else:
                 raise ValueError("invalid input")
             context.user_data.pop("biz_flow", None)
@@ -3107,7 +3511,7 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Accept a photo only while this user has an owned receipt flow."""
+    """Accept photos for payment receipts and active ticket compose/reply flows."""
     if update.effective_message is None or not update.effective_message.photo:
         return
     spec, _, _, business = _services(context)
@@ -3116,10 +3520,29 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     actor = int(update.effective_user.id) if update.effective_user else 0
     if not await _force_join_allowed(update, context, business):
         return
-    if spec.role != "user" or not isinstance(flow, dict) or flow.get("kind") not in ("receipt", "wallet_receipt"):
-        await update.effective_message.reply_text("از منوی ربات استفاده کنید.", reply_markup=_main_keyboard(spec, business)); return
+    if spec.role != "user" or not isinstance(flow, dict):
+        await update.effective_message.reply_text(
+            "از منوی ربات استفاده کنید.",
+            reply_markup=_main_keyboard(spec, business),
+        )
+        return
+
+    kind = str(flow.get("kind") or "")
+    if kind in {"ticket_new_photo", "ticket_reply_photo"}:
+        flow["photo_file_id"] = str(update.effective_message.photo[-1].file_id)
+        mode = "new" if kind == "ticket_new_photo" else "reply"
+        flow["kind"] = "ticket_new_confirm" if mode == "new" else "ticket_reply_confirm"
+        await _show_ticket_preview(update, context, flow, mode=mode)
+        return
+
+    if kind not in ("receipt", "wallet_receipt"):
+        await update.effective_message.reply_text(
+            "از منوی ربات استفاده کنید.",
+            reply_markup=_main_keyboard(spec, business),
+        )
+        return
     try:
-        if flow.get("kind") == "wallet_receipt":
+        if kind == "wallet_receipt":
             receipt = business.submit_wallet_topup_receipt(
                 actor,
                 topup_id=int(flow["topup_id"]),

@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.40.0 — Tenant tickets and support parity
+
+- Rebuilt Tenant support tickets around a threaded message model while preserving and backfilling legacy ticket body/admin replies.
+- Added SellBot-style UserBot ticket creation: subject, full message, optional screenshot, preview, edit, send and cancel.
+- Added UserBot ticket list/detail, threaded replies, optional reply screenshots, attachment viewing and user-side close flow.
+- Added AdminBot pending/open/closed ticket buckets, threaded detail view, text/photo reply preview, edit, send, close and reopen controls.
+- Stored ticket images as Tenant-scoped media so separate AdminBot/UserBot tokens can review and deliver attachments reliably.
+- Kept `ticket_panel_text` as the real support-panel text source and restored SellBot-style FAQ / my tickets / create ticket navigation.
+- Added migration `0028_ticket_phase12` and regression coverage for message/media lifecycle, status transitions, tenant isolation and UI wiring.
+
 ## v0.32.0 — Complete customer subscription status
 
 - Added a paginated subscription selector and separate live status details with service names, recorded purchase/renewal prices, remaining quota/time and last connection.

@@ -941,8 +941,74 @@ def _ticket_bucket(status: str) -> set[str]:
     if status == "pending":
         return {"open"}
     if status == "open":
-        return {"open", "answered"}
+        return {"answered"}
     return {"closed"}
+
+
+def _ticket_status_label(status: object) -> str:
+    return {
+        "open": "📨 در انتظار",
+        "answered": "📬 باز / پاسخ‌داده",
+        "closed": "📩 بسته",
+    }.get(str(status or ""), str(status or "-"))
+
+
+def _ticket_thread_admin_text(
+    ticket: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> str:
+    lines = [
+        f"🎫 تیکت #{int(ticket['id'])}",
+        f"👤 {ticket.get('display_name') or '-'}",
+        f"🔹 @{str(ticket.get('username') or '-').lstrip('@')}",
+        f"🔸 Telegram ID: {ticket.get('telegram_user_id') or '-'}",
+        f"وضعیت: {_ticket_status_label(ticket.get('status'))}",
+        f"موضوع: {ticket.get('subject') or '-'}",
+        "",
+    ]
+    for item in messages[-40:]:
+        who = "👤 کاربر" if item.get("sender_type") == "user" else "🛟 پشتیبانی"
+        sender = str(item.get("sender_name") or "").strip()
+        lines.append(f"{who}{' · ' + sender if sender else ''}:")
+        body = str(item.get("message_text") or "").strip()
+        if body:
+            lines.append(body)
+        if item.get("has_media"):
+            lines.append("🖼 تصویر پیوست دارد")
+        lines.append("")
+    if not messages:
+        lines.append("پیامی ثبت نشده است.")
+    result = "\n".join(lines).strip()
+    if len(result) > 3800:
+        header = "\n".join(lines[:7]).strip()
+        tail_size = max(500, 3800 - len(header) - 16)
+        result = header + "\n\n…\n" + result[-tail_size:]
+    return result
+
+
+def ticket_reply_skip_cancel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏩رد کردن", callback_data="userbot:ticketreply:skip")],
+        [InlineKeyboardButton("❌لغو", callback_data="userbot:ticketreply:cancel")],
+    ])
+
+
+def ticket_reply_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ارسال", callback_data="userbot:ticketreply:send"),
+            InlineKeyboardButton("✏️ویرایش", callback_data="userbot:ticketreply:edit"),
+        ],
+        [InlineKeyboardButton("❌لغو", callback_data="userbot:ticketreply:cancel")],
+    ])
+
+
+def _ticket_reply_preview_text(flow: dict[str, Any]) -> str:
+    return (
+        "👁 پیش‌نمایش پاسخ تیکت\n\n"
+        f"{str(flow.get('reply_text') or '').strip()}\n\n"
+        f"🖼 تصویر: {'دارد' if flow.get('photo_file_id') else 'ندارد'}"
+    )
 
 
 async def _send_tickets(update: Update, business: Any, actor: int, status: str | None = None, page: int = 1, customer_id: int = 0) -> None:
@@ -987,6 +1053,70 @@ async def _send_tickets(update: Update, business: Any, actor: int, status: str |
     await _edit_or_send(update, f"📑 تیکت‌ها\nتعداد: {len(items)}", InlineKeyboardMarkup(rows))
 
 
+async def _send_ticket_admin_detail(
+    update: Update,
+    business: Any,
+    actor: int,
+    *,
+    ticket_id: int,
+    list_status: str,
+    page: int,
+) -> None:
+    item = business.ticket_admin(actor, ticket_id=int(ticket_id))
+    messages = business.ticket_messages_admin(actor, ticket_id=int(ticket_id))
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(
+            "👤 پروفایل کاربر",
+            callback_data=f"userbot:user:{int(item['customer_id'])}",
+        )]
+    ]
+    media_buttons = [
+        InlineKeyboardButton(
+            f"🖼 تصویر پیام #{int(message['id'])}",
+            callback_data=(
+                f"userbot:ticket:media:{int(ticket_id)}:"
+                f"{int(message['id'])}:{list_status}:{int(page)}"
+            ),
+        )
+        for message in messages
+        if message.get("has_media")
+    ]
+    for index in range(0, len(media_buttons), 2):
+        rows.append(media_buttons[index:index+2])
+    if str(item.get("status") or "") != "closed":
+        rows.append([InlineKeyboardButton(
+            "📩پاسخ",
+            callback_data=(
+                f"userbot:ticket:reply:{int(ticket_id)}:"
+                f"{list_status}:{int(page)}"
+            ),
+        )])
+        rows.append([InlineKeyboardButton(
+            "📪 بستن تیکت",
+            callback_data=(
+                f"userbot:ticket:status:{int(ticket_id)}:closed:"
+                f"{list_status}:{int(page)}"
+            ),
+        )])
+    else:
+        rows.append([InlineKeyboardButton(
+            "📬 باز کردن تیکت",
+            callback_data=(
+                f"userbot:ticket:status:{int(ticket_id)}:open:"
+                f"{list_status}:{int(page)}"
+            ),
+        )])
+    rows.append([InlineKeyboardButton(
+        "🔙بازگشت",
+        callback_data=f"userbot:tickets:list:{list_status}:{int(page)}",
+    )])
+    await _edit_or_send(
+        update,
+        _ticket_thread_admin_text(item, messages),
+        InlineKeyboardMarkup(rows),
+    )
+
+
 def _sibling_user_bot_token(business: Any) -> str:
     if business.secret_cipher is None:
         raise TenantBusinessError("UserBot encryption is unavailable")
@@ -999,11 +1129,26 @@ def _sibling_user_bot_token(business: Any) -> str:
     return plain
 
 
-async def _send_via_userbot(business: Any, chat_id: int | str, *, text: str) -> None:
+async def _send_via_userbot(
+    business: Any,
+    chat_id: int | str,
+    *,
+    text: str,
+    photo_bytes: bytes | None = None,
+) -> None:
     token = _sibling_user_bot_token(business)
     try:
         async with Bot(token=token) as bot:
             await bot.send_message(chat_id=chat_id, text=text)
+            payload = bytes(photo_bytes or b"")
+            if payload:
+                stream = BytesIO(payload)
+                stream.name = "ticket-reply.jpg"
+                await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=stream,
+                    caption="🖼 تصویر پاسخ پشتیبانی",
+                )
     finally:
         token = ""
 
@@ -2351,24 +2496,138 @@ async def handle_callback(
     if data == "userbot:tickets_menu":
         await _send_tickets(update,business,actor); return True
     if data.startswith("userbot:tickets:list:"):
-        parts=data.split(":"); await _send_tickets(update,business,actor,status=parts[3],page=int(parts[4])); return True
+        parts=data.split(":")
+        await _send_tickets(
+            update,business,actor,
+            status=parts[3],
+            page=int(parts[4]) if len(parts)>4 else 1,
+        )
+        return True
     if data.startswith("userbot:ticket:detail:"):
-        parts=data.split(":"); tid=int(parts[3]); status=parts[4]; page=int(parts[5]); item=business.ticket_admin(actor,ticket_id=tid)
-        rows=[
-            [InlineKeyboardButton("👤 پروفایل کاربر",callback_data=f"userbot:user:{int(item['customer_id'])}")],
-            [InlineKeyboardButton("📩پاسخ",callback_data=f"userbot:ticket:reply:{tid}:{status}:{page}")],
-        ]
-        if item["status"]!="closed": rows.append([InlineKeyboardButton("📪 بستن تیکت",callback_data=f"userbot:ticket:close:{tid}:{status}:{page}")])
-        rows.append([InlineKeyboardButton("🔙بازگشت",callback_data=f"userbot:tickets:list:{status}:{page}")])
-        await _edit_or_send(update,
-            f"🎫 تیکت #{tid}\n👤 {item['display_name']}\nوضعیت: {item['status']}\nموضوع: {item['subject']}\n\n{item['body']}\n\nپاسخ:\n{item.get('admin_reply') or '—'}",
-            InlineKeyboardMarkup(rows)
-        ); return True
+        parts=data.split(":")
+        await _send_ticket_admin_detail(
+            update,business,actor,
+            ticket_id=int(parts[3]),
+            list_status=parts[4],
+            page=int(parts[5]),
+        )
+        return True
+    if data.startswith("userbot:ticket:media:"):
+        parts=data.split(":")
+        tid=int(parts[3]); mid=int(parts[4])
+        media=business.ticket_message_media_admin(
+            actor,ticket_id=tid,message_id=mid
+        )
+        if media is None:
+            raise TenantBusinessError("ticket media not found")
+        stream=BytesIO(bytes(media["media"]))
+        stream.name="ticket-image.jpg"
+        await context.bot.send_photo(
+            chat_id=query.message.chat_id,
+            photo=stream,
+            caption=f"🖼 تصویر پیام #{mid} · تیکت #{tid}",
+        )
+        return True
     if data.startswith("userbot:ticket:reply:"):
-        parts=data.split(":"); context.user_data[FLOW_KEY]={"kind":"ticket_reply","ticket_id":int(parts[3]),"status":parts[4],"page":int(parts[5])}
-        await query.message.reply_text("📩 پاسخ تیکت را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
-    if data.startswith("userbot:ticket:close:"):
-        parts=data.split(":"); business.close_ticket_admin(actor,ticket_id=int(parts[3])); await _send_tickets(update,business,actor,status=parts[4],page=int(parts[5])); return True
+        parts=data.split(":")
+        tid=int(parts[3]); status=parts[4]; page=int(parts[5])
+        item=business.ticket_admin(actor,ticket_id=tid)
+        if str(item.get("status") or "")=="closed":
+            raise TenantBusinessError("ticket is closed")
+        context.user_data[FLOW_KEY]={
+            "kind":"ticket_reply",
+            "ticket_id":tid,
+            "status":status,
+            "page":page,
+            "step":"wait_text",
+            "reply_text":"",
+            "photo_file_id":"",
+        }
+        await query.message.reply_text(
+            "✍️ لطفا پاسخ خود را به صورت کامل ارسال نمایید",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+    if data.startswith("userbot:ticket:status:"):
+        parts=data.split(":")
+        tid=int(parts[3]); target=parts[4]; status=parts[5]; page=int(parts[6])
+        business.set_ticket_status_admin(
+            actor,ticket_id=tid,status=target
+        )
+        await _send_ticket_admin_detail(
+            update,business,actor,
+            ticket_id=tid,list_status=status,page=page,
+        )
+        return True
+    if data.startswith("userbot:ticketreply:"):
+        action=data.rsplit(":",1)[1]
+        flow=context.user_data.get(FLOW_KEY)
+        if not isinstance(flow,dict) or flow.get("kind")!="ticket_reply":
+            raise TenantBusinessError("ticket reply flow is not active")
+        tid=int(flow["ticket_id"])
+        status=str(flow["status"])
+        page=int(flow["page"])
+        if action=="cancel":
+            context.user_data.pop(FLOW_KEY,None)
+            await _send_ticket_admin_detail(
+                update,business,actor,
+                ticket_id=tid,list_status=status,page=page,
+            )
+            return True
+        if action=="edit":
+            flow["step"]="wait_text"
+            flow["reply_text"]=""
+            flow["photo_file_id"]=""
+            await query.message.reply_text(
+                "✍️ لطفا پاسخ خود را به صورت کامل ارسال نمایید",
+                reply_markup=userbot_cancel_keyboard(),
+            )
+            return True
+        if action=="skip":
+            if flow.get("step")!="wait_photo":
+                raise TenantBusinessError("ticket photo step is not active")
+            flow["photo_file_id"]=""
+            flow["step"]="wait_confirm"
+            await query.message.reply_text(
+                _ticket_reply_preview_text(flow),
+                reply_markup=ticket_reply_confirm_keyboard(),
+            )
+            return True
+        if action=="send":
+            if flow.get("step")!="wait_confirm":
+                raise TenantBusinessError("ticket confirmation is not active")
+            reply_text=str(flow.get("reply_text") or "").strip()
+            if not reply_text:
+                raise ValueError("empty ticket reply")
+            photo_bytes=b""
+            file_id=str(flow.get("photo_file_id") or "").strip()
+            if file_id:
+                media_stream=await _download_admin_file(context,file_id)
+                photo_bytes=media_stream.getvalue()
+            item=business.reply_ticket_admin(
+                actor,
+                ticket_id=tid,
+                reply=reply_text,
+                media=photo_bytes or None,
+                media_mime="image/jpeg" if photo_bytes else "",
+                admin_name=str(query.from_user.full_name or query.from_user.username or "پشتیبانی"),
+            )
+            try:
+                await _send_via_userbot(
+                    business,
+                    int(item["telegram_user_id"]),
+                    text=f"📩 پاسخ تیکت #{tid}\n\n{reply_text}",
+                    photo_bytes=photo_bytes or None,
+                )
+            except Exception:
+                pass
+            context.user_data.pop(FLOW_KEY,None)
+            await _send_ticket_admin_detail(
+                update,business,actor,
+                ticket_id=tid,list_status=status,page=page,
+            )
+            return True
+        raise TenantBusinessError("invalid ticket reply action")
 
     if data == "userbot:broadcast_menu":
         await _edit_or_send(update,
@@ -3608,10 +3867,35 @@ async def handle_text(
                 reply_markup=admin_main_keyboard(),
             ); return True
         if kind=="ticket_reply":
-            item=business.reply_ticket_admin(actor,ticket_id=int(flow["ticket_id"]),reply=text)
-            try: await _send_via_userbot(business,int(item["telegram_user_id"]),text=f"📩 پاسخ تیکت #{item['id']}\n\n{text}")
-            except Exception: pass
-            context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ پاسخ ثبت شد.",reply_markup=admin_main_keyboard()); return True
+            step=str(flow.get("step") or "wait_text")
+            if step=="wait_text":
+                if not text:
+                    raise ValueError("empty ticket reply")
+                flow["reply_text"]=text
+                flow["step"]="wait_photo"
+                await update.effective_message.reply_text(
+                    "🖼️ لطفا عکس پاسخ را ارسال کنید یا روی دکمه [⏩رد کردن] کلیک کنید:",
+                    reply_markup=ticket_reply_skip_cancel_keyboard(),
+                )
+                return True
+            if step=="wait_photo":
+                await update.effective_message.reply_text(
+                    "❌ لطفا عکس ارسال کنید یا روی دکمه [⏩رد کردن] بزنید.",
+                    reply_markup=ticket_reply_skip_cancel_keyboard(),
+                )
+                return True
+            if step=="wait_confirm":
+                await update.effective_message.reply_text(
+                    "برای ارسال پاسخ از دکمه‌های «✅ارسال» یا «✏️ویرایش» استفاده کنید.",
+                    reply_markup=ticket_reply_confirm_keyboard(),
+                )
+                return True
+            flow["step"]="wait_text"
+            await update.effective_message.reply_text(
+                "📩 متن پاسخ تیکت را ارسال کنید:",
+                reply_markup=userbot_cancel_keyboard(),
+            )
+            return True
         if kind=="broadcast":
             step=str(flow.get("step") or "wait_text")
             if step=="wait_text":
@@ -3904,6 +4188,38 @@ async def handle_media(
         await _settings_section(update, business, actor, "invite_texts")
         return True
 
+    if kind=="ticket_reply" and str(flow.get("step") or "")=="wait_photo":
+        file_id=""
+        if getattr(message,"photo",None):
+            file_id=str(message.photo[-1].file_id)
+        else:
+            document=getattr(message,"document",None)
+            mime=str(getattr(document,"mime_type","") or "").lower()
+            if document is not None and mime.startswith("image/"):
+                file_id=str(document.file_id)
+        if not file_id:
+            await message.reply_text(
+                "❌ فقط عکس ارسال کنید یا «⏩رد کردن» را بزنید.",
+                reply_markup=ticket_reply_skip_cancel_keyboard(),
+            )
+            return True
+        flow["photo_file_id"]=file_id
+        flow["step"]="wait_confirm"
+        preview=_ticket_reply_preview_text(flow)
+        try:
+            await context.bot.send_photo(
+                chat_id=message.chat_id,
+                photo=file_id,
+                caption="🖼 پیش‌نمایش تصویر پاسخ تیکت",
+            )
+        except Exception:
+            pass
+        await message.reply_text(
+            preview,
+            reply_markup=ticket_reply_confirm_keyboard(),
+        )
+        return True
+
     if kind=="broadcast" and str(flow.get("step") or "")=="wait_photo":
         file_id=""
         if getattr(message,"photo",None):
@@ -3967,6 +4283,10 @@ async def handle_document(
                 and str(flow.get("step") or "") == "wait_photo"
             )
             or flow.get("kind") == "invite_banner_photo"
+            or (
+                flow.get("kind") == "ticket_reply"
+                and str(flow.get("step") or "") == "wait_photo"
+            )
         )
     ):
         return await handle_media(
