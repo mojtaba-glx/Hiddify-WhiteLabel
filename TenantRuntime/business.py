@@ -3707,6 +3707,7 @@ class TenantBusinessService:
         smart_url = self._smart_url(
             subscription_id=int(subscription_id),
             label=str(plan.get("name") or ""),
+            base64_output=False,
         )
         return {
             "id": int(subscription_id),
@@ -3719,7 +3720,8 @@ class TenantBusinessService:
             "external_ref": external_ref,
             "smart_code": str(link["code"]),
             "node_report": nodes,
-            "subscription_url": smart_url or str(result.subscription_url or ""),
+            "subscription_url": str(result.subscription_url or ""),
+            "smart_subscription_url": smart_url,
         }
     def _mark_subscription_node_runtime_failure(
         self,
@@ -4417,10 +4419,11 @@ class TenantBusinessService:
                 "renew_time_mode": clean_time_mode,
                 "reset_usage": reset_usage,
                 "node_errors": secondary_errors,
-                "subscription_url": self._smart_url(
-                    subscription_id=int(subscription_id)
-                )
-                or str(user.subscription_url or ""),
+                "subscription_url": str(user.subscription_url or ""),
+                "smart_subscription_url": self._smart_url(
+                    subscription_id=int(subscription_id),
+                    base64_output=False,
+                ),
             }
         )
         return result
@@ -4599,7 +4602,9 @@ class TenantBusinessService:
             raise TenantBusinessError("subscription configs are unavailable")
         return results
 
-    def subscription_link(self, actor_id: int, *, subscription_id: int) -> str:
+    def _customer_subscription_for_link(
+        self, actor_id: int, *, subscription_id: int
+    ) -> dict[str, Any]:
         customer = self._customer(actor_id)
         row = self.conn.execute(
             "SELECT * FROM tenant_subscriptions "
@@ -4615,9 +4620,30 @@ class TenantBusinessService:
             raise TenantBusinessError("subscription is not active")
         if subscription["server_id"] is None or not subscription["external_ref"]:
             raise TenantBusinessError("subscription is not provisioned")
-        smart_url = self._smart_url(subscription_id=int(subscription_id))
-        if smart_url:
-            return smart_url
+        return subscription
+
+    def panel_user_page_link(
+        self, actor_id: int, *, subscription_id: int
+    ) -> str:
+        subscription = self._customer_subscription_for_link(
+            actor_id, subscription_id=int(subscription_id)
+        )
+        server = self.server(int(subscription["server_id"]))
+        target = self._panel_target(server)
+        if str(target.kind or "").lower() != "hiddify":
+            raise TenantBusinessError("panel user page is unavailable")
+        base = str(target.endpoint or "").strip().rstrip("/")
+        path = str(target.user_path or "user").strip().strip("/") or "user"
+        ref = quote(str(subscription["external_ref"]), safe="-._~")
+        if not base or not ref:
+            raise TenantBusinessError("panel user page is unavailable")
+        return f"{base}/{path}/{ref}"
+
+    def subscription_link(self, actor_id: int, *, subscription_id: int) -> str:
+        """Return the panel/native Subscription URL only; never Smart Link."""
+        subscription = self._customer_subscription_for_link(
+            actor_id, subscription_id=int(subscription_id)
+        )
         server = self.server(int(subscription["server_id"]))
         try:
             return self.panel_adapter.subscription_link(
@@ -4628,6 +4654,42 @@ class TenantBusinessService:
             raise TenantBusinessError(
                 "subscription link is unavailable"
             ) from exc
+
+    def automatic_subscription_link(
+        self, actor_id: int, *, subscription_id: int
+    ) -> str:
+        """Hiddify automatic subscription URL, separate from ordinary sub."""
+        base = self.panel_user_page_link(
+            actor_id, subscription_id=int(subscription_id)
+        )
+        return f"{base.rstrip('/')}/sub/?asn=unknown"
+
+    def subscription_link_b64(
+        self, actor_id: int, *, subscription_id: int
+    ) -> str:
+        link = self.subscription_link(
+            actor_id, subscription_id=int(subscription_id)
+        )
+        separator = "&" if "?" in link else "?"
+        return f"{link}{separator}base64=1"
+
+    def smart_subscription_link(
+        self,
+        actor_id: int,
+        *,
+        subscription_id: int,
+        base64_output: bool = False,
+    ) -> str:
+        self._customer_subscription_for_link(
+            actor_id, subscription_id=int(subscription_id)
+        )
+        link = self._smart_url(
+            subscription_id=int(subscription_id),
+            base64_output=bool(base64_output),
+        )
+        if not link:
+            raise TenantBusinessError("smart subscription link is unavailable")
+        return link
     @staticmethod
     def _report_period(
         days: int,
@@ -4839,14 +4901,12 @@ class TenantBusinessService:
     def admin_subscription_link(
         self, actor_id: int, *, subscription_id: int
     ) -> str:
+        """Admin view of the panel/native Subscription URL, never Smart Link."""
         subscription = self.subscription_admin(
             actor_id, subscription_id=int(subscription_id)
         )
         if subscription["server_id"] is None or not subscription["external_ref"]:
             raise TenantBusinessError("subscription is not provisioned")
-        smart_url = self._smart_url(subscription_id=int(subscription_id))
-        if smart_url:
-            return smart_url
         server = self.server(int(subscription["server_id"]))
         try:
             return self.panel_adapter.subscription_link(
@@ -4855,6 +4915,22 @@ class TenantBusinessService:
             )
         except PanelError as exc:
             raise TenantBusinessError("subscription link is unavailable") from exc
+
+    def admin_smart_subscription_link(
+        self,
+        actor_id: int,
+        *,
+        subscription_id: int,
+        base64_output: bool = False,
+    ) -> str:
+        self.subscription_admin(actor_id, subscription_id=int(subscription_id))
+        link = self._smart_url(
+            subscription_id=int(subscription_id),
+            base64_output=bool(base64_output),
+        )
+        if not link:
+            raise TenantBusinessError("smart subscription link is unavailable")
+        return link
 
     def cleanup_unstarted_subscription_admin(
         self, actor_id: int, *, subscription_id: int
