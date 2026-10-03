@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from Shared.timeutils import iso_utc
+from TenantRuntime.AdminBot import handlers as admin_handlers
 from TenantRuntime.business import TenantBusinessError, TenantBusinessService
 from TenantRuntime.panels import (
     PanelTarget,
@@ -547,3 +548,158 @@ def test_admin_smart_search_accepts_uuid_inside_config_link(
         f"vless://{uuid}@example.com:443?security=tls#test",
     )
     assert [int(item["id"]) for item in results] == [sid]
+
+
+def test_admin_search_uses_real_panel_inventory_and_sellbot_service_code(
+    conn, factories, cipher
+) -> None:
+    _tenant, service, _panel, _plan, _method = _service(
+        conn, factories, cipher
+    )
+    server_id = int(service.list_servers()[0]["id"])
+    future = iso_utc(datetime.now(timezone.utc) + timedelta(days=10))
+    panel_uuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    cursor = conn.execute(
+        "INSERT INTO tenant_panel_users "
+        "(tenant_id,server_id,external_ref,name,comment,usage_bytes,traffic_bytes,"
+        "expires_at,active,state,extra_json,last_synced_at) "
+        "VALUES (?,?,?,?,?,?,?,?,1,'active',?,?)",
+        (
+            service.tenant_id,
+            server_id,
+            panel_uuid,
+            "vpn-0506795",
+            f"uuid:{panel_uuid}|admin:1|code:0506795",
+            1024,
+            10 * 1024**3,
+            future,
+            '{"legacy_service_id":71,"legacy_admin_inventory":true}',
+            iso_utc(datetime.now(timezone.utc)),
+        ),
+    )
+    panel_user_id = int(cursor.lastrowid)
+
+    by_name = service.search_panel_users_admin(7001, "vpn-050")
+    by_code = service.search_panel_users_admin(7001, "0506795")
+    by_legacy_id = service.search_panel_users_admin(7001, "71")
+    by_link = service.search_panel_users_admin(
+        7001, f"vless://{panel_uuid}@example.com:443#test"
+    )
+    assert [int(x["id"]) for x in by_name] == [panel_user_id]
+    assert [int(x["id"]) for x in by_code] == [panel_user_id]
+    assert [int(x["id"]) for x in by_legacy_id] == [panel_user_id]
+    assert [int(x["id"]) for x in by_link] == [panel_user_id]
+    assert by_code[0]["service_code"] == "0506795"
+    assert int(by_code[0]["legacy_service_id"]) == 71
+
+    merged = admin_handlers._smart_search_items(service, 7001, "vpn-0506795")
+    assert len(merged) == 1
+    assert merged[0]["_result_type"] == "panel"
+    text, keyboard = admin_handlers._search_results_view(merged)
+    assert "1" in text
+    callback = keyboard.inline_keyboard[0][0].callback_data
+    assert callback == f"search:panel:{server_id}:{panel_user_id}"
+
+    tracking = admin_handlers._tracking_items(service, 7001, "0506795")
+    assert len(tracking) == 1
+    assert tracking[0]["_result_type"] == "panel"
+    assert int(tracking[0]["id"]) == panel_user_id
+
+
+def test_admin_search_finds_customer_name_through_linked_panel_user(
+    conn, factories, cipher
+) -> None:
+    _tenant, service, _panel, plan, method = _service(
+        conn, factories, cipher
+    )
+    _order, reviewed = _approve_purchase(
+        service,
+        customer=7101,
+        plan_id=int(plan["id"]),
+        method_id=int(method["id"]),
+        reference="panel-customer-search",
+    )
+    activated = service.fulfill_paid_order(
+        7001, order_id=int(reviewed["order_id"])
+    )
+    server_id = int(activated["server_id"])
+    external_ref = str(activated["external_ref"])
+    cursor = conn.execute(
+        "INSERT INTO tenant_panel_users "
+        "(tenant_id,server_id,external_ref,name,comment,usage_bytes,traffic_bytes,"
+        "expires_at,active,state,extra_json,last_synced_at) "
+        "VALUES (?,?,?,?,?,?,?,?,1,'active','{}',?)",
+        (
+            service.tenant_id,
+            server_id,
+            external_ref,
+            "panel-random-name",
+            "code:7654321",
+            0,
+            int(activated["traffic_bytes"]),
+            str(activated["expires_at"]),
+            iso_utc(datetime.now(timezone.utc)),
+        ),
+    )
+    panel_user_id = int(cursor.lastrowid)
+
+    rows = service.search_panel_users_admin(7001, "Ali Report")
+    assert [int(x["id"]) for x in rows] == [panel_user_id]
+    assert int(rows[0]["subscription_id"]) == int(activated["id"])
+    assert rows[0]["customer_display_name"] == "Ali Report"
+
+
+def test_expired_lists_use_effective_time_and_volume_not_only_db_status(
+    conn, factories, cipher
+) -> None:
+    _tenant, service, _panel, plan, method = _service(
+        conn, factories, cipher
+    )
+    _order, reviewed = _approve_purchase(
+        service,
+        customer=7101,
+        plan_id=int(plan["id"]),
+        method_id=int(method["id"]),
+        reference="effective-expired",
+    )
+    activated = service.fulfill_paid_order(
+        7001, order_id=int(reviewed["order_id"])
+    )
+    subscription_id = int(activated["id"])
+    yesterday = iso_utc(datetime.now(timezone.utc) - timedelta(days=1))
+    conn.execute(
+        "UPDATE tenant_subscriptions SET status='active', expires_at=? WHERE id=?",
+        (yesterday, subscription_id),
+    )
+
+    expired_subscriptions = service.list_subscriptions_tracking_admin(
+        7001, status="expired"
+    )
+    assert [int(x["id"]) for x in expired_subscriptions] == [subscription_id]
+    assert expired_subscriptions[0]["status"] == "expired"
+
+    server_id = int(activated["server_id"])
+    conn.execute(
+        "INSERT INTO tenant_panel_users "
+        "(tenant_id,server_id,external_ref,name,comment,usage_bytes,traffic_bytes,"
+        "expires_at,active,state,extra_json,last_synced_at) "
+        "VALUES (?,?,?,?,?,?,?,?,1,'active','{}',?)",
+        (
+            service.tenant_id,
+            server_id,
+            "expired-panel-user",
+            "expired-panel-user",
+            "",
+            5 * 1024**3,
+            5 * 1024**3,
+            iso_utc(datetime.now(timezone.utc) + timedelta(days=30)),
+            iso_utc(datetime.now(timezone.utc)),
+        ),
+    )
+    expired_panel = service.search_panel_users_admin(
+        7001, "", status="expired"
+    )
+    assert any(
+        str(x["external_ref"]) == "expired-panel-user"
+        for x in expired_panel
+    )

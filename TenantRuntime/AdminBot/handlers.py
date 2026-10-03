@@ -32,6 +32,7 @@ from telegram.ext import (
 from Gateway.catalog import RuntimeBotSpec
 from Shared.timeutils import parse_utc, utcnow
 from TenantRuntime.business import TenantBusinessError
+from TenantRuntime.server_admin import ServerAdminService, user_status
 from TenantRuntime.backup import (
     TenantBackupError,
     claim_auto_backup_slot,
@@ -262,6 +263,135 @@ def _search_status_emoji(status: str) -> str:
     return "🟡"
 
 
+def _panel_search_item(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["_result_type"] = "panel"
+    item["display_name"] = str(
+        item.get("name")
+        or item.get("customer_display_name")
+        or item.get("external_ref")
+        or "کاربر"
+    )
+    return item
+
+
+def _smart_search_items(
+    business: Any, actor: int, query: str
+) -> list[dict[str, Any]]:
+    """Merge SellBot-style panel inventory with native UserBot subscriptions."""
+    panel_rows = business.search_panel_users_admin(actor, query)
+    results = [_panel_search_item(row) for row in panel_rows]
+    linked_subscriptions = {
+        int(row["subscription_id"])
+        for row in panel_rows
+        if row.get("subscription_id")
+    }
+    seen_subscriptions = set(linked_subscriptions)
+    for row in business.search_subscriptions_admin(actor, query):
+        sid = int(row["id"])
+        if sid in seen_subscriptions:
+            continue
+        item = dict(row)
+        item["_result_type"] = "subscription"
+        results.append(item)
+        seen_subscriptions.add(sid)
+    return results
+
+
+async def _refresh_search_inventory(business: Any, actor: int) -> None:
+    """Best-effort live refresh like SellBot; cached inventory remains fallback."""
+    service = ServerAdminService(business)
+    tasks = []
+    for server in business.list_servers():
+        provider = str(server.get("panel_kind") or "").strip().lower()
+        if str(server.get("status") or "active").lower() != "active":
+            continue
+        if provider not in {"hiddify", "xui", "xnet"}:
+            continue
+        tasks.append(service.refresh_users(actor, int(server["id"])))
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _panel_search_detail_view(
+    business: Any, actor: int, server_id: int, panel_user_id: int
+) -> tuple[str, InlineKeyboardMarkup]:
+    service = ServerAdminService(business)
+    warning = ""
+    try:
+        row = await service.live_user(actor, server_id, panel_user_id)
+    except TenantBusinessError:
+        row = service.user(actor, server_id, panel_user_id)
+        warning = (
+            "⚠️ دریافت اطلاعات زنده ممکن نیست؛ آخرین اطلاعات ذخیره‌شده نمایش داده می‌شود.\n\n"
+        )
+    server = business.server(server_id)
+    usage = int(row.get("usage_bytes") or 0) / (1024 ** 3)
+    limit_bytes = int(row.get("traffic_bytes") or 0)
+    limit = limit_bytes / (1024 ** 3) if limit_bytes else 0
+    status = user_status(row)
+    status_text = {
+        "active": "🟢وضعیت حساب: فعال",
+        "disabled": "⚫وضعیت حساب: غیرفعال",
+        "expired": "🔴وضعیت حساب: منقضی",
+        "pending": "🟡وضعیت حساب: در انتظار",
+    }.get(status, f"وضعیت: {status}")
+    expiry = str(row.get("expires_at") or "نامشخص")
+    if row.get("expires_at"):
+        try:
+            delta = parse_utc(str(row["expires_at"])) - utcnow()
+            days = int(delta.total_seconds() // 86400)
+            expiry = (
+                f"منقضی شده ({abs(days)} روز پیش)"
+                if delta.total_seconds() < 0
+                else f"{max(0, days)} روز دیگر"
+            )
+        except (TypeError, ValueError):
+            pass
+    text = (
+        warning
+        + f"👤 کاربر:  {row.get('name') or 'کاربر'}\n"
+        + "❖⬩╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍⬩❖\n"
+        + f"⬖ سرور:  {server.get('label') or 'ثبت نشده'}\n"
+        + f"📊مصرف: {usage:.2f} از {f'{limit:.2f}' if limit else 'نامحدود'} گیگابایت\n"
+        + f"📆انقضا: {expiry}\n"
+        + f"{status_text}\n"
+        + f"📶آخرین اتصال: {row.get('last_online') or 'ثبت نشده'}\n"
+        + f"📝یادداشت: {row.get('comment') or '—'}\n"
+        + f"🔑 شناسه پنل: {row.get('external_ref')}"
+    )
+    rows = [
+        [InlineKeyboardButton("کانفیگ ها📄", callback_data=f"srv:pconfigs:{server_id}:{panel_user_id}")],
+        [InlineKeyboardButton("ویرایش کاربر✏️", callback_data=f"srv:pedit:{server_id}:{panel_user_id}")],
+        [InlineKeyboardButton("تمدید اشتراک♾️", callback_data=f"srv:prenew:{server_id}:{panel_user_id}")],
+        [InlineKeyboardButton("حذف کاربر🗑️", callback_data=f"srv:pdelete:{server_id}:{panel_user_id}")],
+        [InlineKeyboardButton("بازگشت🔙", callback_data="search:results")],
+    ]
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _tracking_items(
+    business: Any, actor: int, query: str
+) -> list[dict[str, Any]]:
+    items = _smart_search_items(business, actor, query)
+    token = str(query or "").strip().lstrip("#")
+    exact: list[dict[str, Any]] = []
+    for item in items:
+        if item.get("_result_type") == "panel":
+            candidates = (
+                item.get("service_code"),
+                item.get("legacy_service_id"),
+                item.get("external_ref"),
+                item.get("id"),
+                item.get("subscription_id"),
+            )
+        else:
+            candidates = (item.get("id"), item.get("external_ref"))
+        if any(token and token == str(value or "").strip().lstrip("#") for value in candidates):
+            exact.append(item)
+    return exact or items
+
+
 def _search_results_view(
     results: list[dict], *, page: int = 1, title: str = "[📥 نتیجه جستجو]"
 ) -> tuple[str, InlineKeyboardMarkup]:
@@ -284,13 +414,20 @@ def _search_results_view(
         f"🔴 کاربران منقضی: {expired}"
     )
 
-    buttons = [
-        InlineKeyboardButton(
-            f"{str(item.get('display_name') or 'کاربر')[:20]}{_search_status_emoji(str(item.get('status') or ''))}",
-            callback_data=f"search:sel:{int(item['id'])}",
+    buttons = []
+    for item in selected:
+        if str(item.get("_result_type") or "subscription") == "panel":
+            callback = (
+                f"search:panel:{int(item['server_id'])}:{int(item['id'])}"
+            )
+        else:
+            callback = f"search:sel:{int(item['id'])}"
+        buttons.append(
+            InlineKeyboardButton(
+                f"{str(item.get('display_name') or 'کاربر')[:20]}{_search_status_emoji(str(item.get('status') or ''))}",
+                callback_data=callback,
+            )
         )
-        for item in selected
-    ]
     rows = [
         list(reversed(buttons[i:i + 3]))
         for i in range(0, len(buttons), 3)
@@ -997,15 +1134,26 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     )
                 return
             if action in ("expired", "expired_profiles"):
-                items = business.list_subscriptions_tracking_admin(
-                    actor, status="expired"
-                )
+                if action == "expired":
+                    # SellBot's legacy expired-user list is panel based, not
+                    # subscription-table based. Refresh all reachable panels
+                    # first and fall back to the last safe inventory snapshot.
+                    await _refresh_search_inventory(business, actor)
+                    items = [
+                        _panel_search_item(row)
+                        for row in business.search_panel_users_admin(
+                            actor, "", status="expired"
+                        )
+                    ]
+                    title = "[⚠️لیست کاربران منقضی شده]"
+                else:
+                    # The profile-oriented list remains a UserBot subscription
+                    # view, but effective expiry also considers time/traffic.
+                    items = business.list_subscriptions_tracking_admin(
+                        actor, status="expired"
+                    )
+                    title = "♻️ اشتراک‌های منقضی‌شده"
                 context.user_data["smart_search_results"] = items
-                title = (
-                    "[⚠️لیست کاربران منقضی شده]"
-                    if action == "expired"
-                    else "♻️ اشتراک‌های منقضی‌شده"
-                )
                 context.user_data["search_results_title"] = title
                 text, kb = _search_results_view(items, title=title)
                 await update.callback_query.edit_message_text(text, reply_markup=kb)
@@ -1074,6 +1222,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
                 context.user_data["search_results_title"] = title
                 text, kb = _search_results_view(items, title=title)
+                await update.callback_query.edit_message_text(text, reply_markup=kb)
+                return
+            if action == "panel" and len(parts) == 4:
+                text, kb = await _panel_search_detail_view(
+                    business, actor, int(parts[2]), int(parts[3])
+                )
                 await update.callback_query.edit_message_text(text, reply_markup=kb)
                 return
             if action == "sel" and len(parts) == 3:
@@ -2541,17 +2695,8 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 )
                 return
             if kind == "search_tracking":
-                items = business.search_subscriptions_admin(actor, text)
-                exact = None
-                plain = text.strip().lstrip("#")
-                if plain.isdigit():
-                    exact = next(
-                        (x for x in items if int(x["id"]) == int(plain)),
-                        None,
-                    )
-                if exact is None and len(items) == 1:
-                    exact = items[0]
-                if exact is None:
+                items = _tracking_items(business, actor, text)
+                if len(items) != 1:
                     await update.effective_message.reply_text(
                         "❌اشتراکی با این شناسه یافت نشد"
                         if not items
@@ -2559,10 +2704,19 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         reply_markup=_server_cancel_keyboard(),
                     )
                     return
+                exact = items[0]
                 context.user_data.pop("biz_flow", None)
-                detail, kb = _subscription_detail_view(
-                    business, actor, int(exact["id"])
-                )
+                if exact.get("_result_type") == "panel":
+                    detail, kb = await _panel_search_detail_view(
+                        business,
+                        actor,
+                        int(exact["server_id"]),
+                        int(exact["id"]),
+                    )
+                else:
+                    detail, kb = _subscription_detail_view(
+                        business, actor, int(exact["id"])
+                    )
                 await update.effective_message.reply_text(
                     "✅اشتراک یافت شد", reply_markup=admin_main_keyboard()
                 )
@@ -2571,7 +2725,7 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 )
                 return
             if kind == "search_smart":
-                items = business.search_subscriptions_admin(actor, text)
+                items = _smart_search_items(business, actor, text)
                 context.user_data.pop("biz_flow", None)
                 if not items:
                     context.user_data.pop("smart_search_results", None)
