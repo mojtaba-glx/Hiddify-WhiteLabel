@@ -7703,52 +7703,178 @@ class TenantBusinessService:
         assert row is not None
         return dict(row)
 
+    def _broadcast_users_snapshot_admin(
+        self, actor_id: int
+    ) -> list[dict[str, Any]]:
+        """SellBot-compatible, tenant-scoped broadcast segmentation snapshot."""
+        self._admin(actor_id)
+        rows = self.conn.execute(
+            "SELECT c.id, c.telegram_user_id, c.display_name, "
+            "(SELECT COUNT(*) FROM tenant_orders o "
+            " WHERE o.tenant_id=c.tenant_id AND o.customer_id=c.id) AS orders_count, "
+            "(SELECT COUNT(*) FROM tenant_subscriptions s "
+            " WHERE s.tenant_id=c.tenant_id AND s.customer_id=c.id) AS services_count, "
+            "(SELECT MAX(s.expires_at) FROM tenant_subscriptions s "
+            " WHERE s.tenant_id=c.tenant_id AND s.customer_id=c.id) AS max_expires_at "
+            "FROM tenant_customers c "
+            "WHERE c.tenant_id=? AND c.telegram_user_id IS NOT NULL "
+            "ORDER BY c.id DESC",
+            (self.tenant_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _broadcast_row_matches(
+        row: dict[str, Any], segment: str, *, now: datetime
+    ) -> bool:
+        normalized = str(segment or "all").strip().lower()
+        allowed = {
+            "all", "expired_all", "no_order",
+            "expired_1w", "expired_2w", "expired_4w", "expired_8w",
+        }
+        if normalized not in allowed:
+            raise ValueError("invalid broadcast segment")
+        if normalized == "all":
+            return True
+        if normalized == "no_order":
+            return int(row.get("orders_count") or 0) <= 0
+
+        if int(row.get("services_count") or 0) <= 0:
+            return False
+        raw_expiry = str(row.get("max_expires_at") or "").strip()
+        if not raw_expiry:
+            return False
+        try:
+            expiry = parse_utc(raw_expiry)
+        except Exception:
+            return False
+
+        if normalized == "expired_all":
+            return expiry <= now
+        thresholds = {
+            "expired_1w": 7,
+            "expired_2w": 14,
+            "expired_4w": 28,
+            "expired_8w": 56,
+        }
+        return expiry <= now - timedelta(days=thresholds[normalized])
+
     def broadcast_targets_admin(
         self, actor_id: int, *, segment: str
     ) -> list[dict[str, Any]]:
-        self._admin(actor_id)
         normalized = str(segment or "").strip().lower()
-        if normalized not in (
-            "all",
-            "expired_all",
-            "no_order",
-            "expired_1w",
-            "expired_2w",
-            "expired_4w",
-            "expired_8w",
-        ):
+        # Validate before querying so copied/forged callbacks fail fast.
+        if normalized not in {
+            "all", "expired_all", "no_order",
+            "expired_1w", "expired_2w", "expired_4w", "expired_8w",
+        }:
             raise ValueError("invalid broadcast segment")
-        sql = "SELECT DISTINCT c.id, c.telegram_user_id, c.display_name FROM tenant_customers c WHERE c.tenant_id=?"
-        args: list[Any] = [self.tenant_id]
-        if normalized == "no_order":
-            sql += (
-                " AND NOT EXISTS (SELECT 1 FROM tenant_orders o "
-                "WHERE o.tenant_id=c.tenant_id AND o.customer_id=c.id)"
+        now = utcnow()
+        rows = self._broadcast_users_snapshot_admin(actor_id)
+        seen: set[int] = set()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            if not self._broadcast_row_matches(row, normalized, now=now):
+                continue
+            telegram_id = int(row.get("telegram_user_id") or 0)
+            if telegram_id <= 0 or telegram_id in seen:
+                continue
+            seen.add(telegram_id)
+            result.append(row)
+        return result
+
+    def broadcast_stats_admin(self, actor_id: int) -> dict[str, int]:
+        rows = self._broadcast_users_snapshot_admin(actor_id)
+        now = utcnow()
+
+        def count(segment: str) -> int:
+            return sum(
+                1
+                for row in rows
+                if self._broadcast_row_matches(row, segment, now=now)
             )
-        elif normalized.startswith("expired"):
-            days_map = {
-                "expired_all": 0,
-                "expired_1w": 7,
-                "expired_2w": 14,
-                "expired_4w": 28,
-                "expired_8w": 56,
-            }
-            days = days_map[normalized]
-            threshold = iso_utc(utcnow() - timedelta(days=days))
-            sql += (
-                " AND EXISTS (SELECT 1 FROM tenant_subscriptions s "
-                "WHERE s.tenant_id=c.tenant_id AND s.customer_id=c.id "
-                "AND s.status='expired'"
-            )
-            if days > 0:
-                sql += " AND s.expires_at<=?"
-                args.append(threshold)
-            sql += ")"
-        sql += " ORDER BY c.id"
-        return [
-            dict(row)
-            for row in self.conn.execute(sql, tuple(args)).fetchall()
-        ]
+
+        return {
+            "total_users": count("all"),
+            "expired_users": count("expired_all"),
+            "no_order_users": count("no_order"),
+            "expired_1w_users": count("expired_1w"),
+            "expired_2w_users": count("expired_2w"),
+            "expired_4w_users": count("expired_4w"),
+            "expired_8w_users": count("expired_8w"),
+        }
+
+    def start_broadcast_run_admin(
+        self,
+        actor_id: int,
+        *,
+        segment: str,
+        message_kind: str,
+        target_count: int,
+        buttons_count: int = 0,
+    ) -> int:
+        self._admin(actor_id)
+        kind = str(message_kind or "").strip().lower()
+        if kind not in {"text", "photo", "video", "document"}:
+            raise ValueError("invalid broadcast message kind")
+        targets = max(0, int(target_count))
+        buttons = max(0, min(int(buttons_count), 8))
+        now = iso_utc(utcnow())
+        cursor = self.conn.execute(
+            "INSERT INTO tenant_broadcast_runs "
+            "(tenant_id, segment, message_kind, target_count, sent_count, "
+            "failed_count, buttons_count, recovered_count, unreachable_count, "
+            "temporary_count, telegram_error_count, other_error_count, created_at) "
+            "VALUES (?, ?, ?, ?, 0, 0, ?, 0, 0, 0, 0, 0, ?)",
+            (
+                self.tenant_id,
+                str(segment),
+                kind,
+                targets,
+                buttons,
+                now,
+            ),
+        )
+        self.conn.commit()
+        return int(cursor.lastrowid or 0)
+
+    def finish_broadcast_run_admin(
+        self,
+        actor_id: int,
+        *,
+        run_id: int,
+        sent: int,
+        failed: int,
+        recovered: int = 0,
+        unreachable: int = 0,
+        temporary: int = 0,
+        telegram_error: int = 0,
+        other: int = 0,
+    ) -> None:
+        self._admin(actor_id)
+        changed = self.conn.execute(
+            "UPDATE tenant_broadcast_runs SET "
+            "sent_count=?, failed_count=?, recovered_count=?, "
+            "unreachable_count=?, temporary_count=?, telegram_error_count=?, "
+            "other_error_count=?, finished_at=? "
+            "WHERE id=? AND tenant_id=?",
+            (
+                max(0, int(sent)),
+                max(0, int(failed)),
+                max(0, int(recovered)),
+                max(0, int(unreachable)),
+                max(0, int(temporary)),
+                max(0, int(telegram_error)),
+                max(0, int(other)),
+                iso_utc(utcnow()),
+                int(run_id),
+                self.tenant_id,
+            ),
+        )
+        self.conn.commit()
+        if changed.rowcount != 1:
+            raise TenantBusinessError("broadcast run not found")
+
 
     def customer_account_summary(
         self,
