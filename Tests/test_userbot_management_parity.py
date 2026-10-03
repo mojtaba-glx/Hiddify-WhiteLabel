@@ -1015,8 +1015,10 @@ def test_broadcast_and_channel_media_flows_are_real() -> None:
     assert "_send_broadcast" in source
     assert "await bot.send_photo" in source
     assert "await bot.send_video" in source
-    assert "userbot:broadcast:preview" in source
-    assert "userbot:broadcast:publish" in source
+    # Active SellBot Admin broadcast deliberately has no preview/publish
+    # draft stage; it sends directly after optional photo/skip.
+    assert 'callback_data="userbot:broadcast:preview"' not in source
+    assert 'callback_data="userbot:broadcast:publish"' not in source
     assert "channelpost:preview" in source
     assert "channelpost:publish" in source
     assert "_download_admin_media" in source
