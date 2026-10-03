@@ -95,6 +95,14 @@ def test_tenant_userbot_settings_roundtrip(conn, factories, cipher) -> None:
     assert defaults["renew_unlimited_time"] is False
     assert defaults["shuffle_server_layout"] is True
     assert defaults["shuffle_config_layout"] is True
+    assert defaults["show_user_page_link"] is True
+    assert defaults["show_username"] is True
+    assert defaults["show_direct_config"] is True
+    assert defaults["show_auto_sub_link"] is False
+    assert defaults["show_sub_link"] is True
+    assert defaults["show_sub_link_b64"] is False
+    assert defaults["show_multi_server"] is False
+    assert defaults["show_multi_server_b64"] is False
     assert defaults["enable_discount_code"] is True
     assert defaults["show_user_status"] is True
     assert defaults["plan_categories_enabled"] is True
@@ -123,6 +131,22 @@ def test_tenant_userbot_settings_roundtrip(conn, factories, cipher) -> None:
         service.set_userbot_setting_admin(
             7001, key="reminder_days", value=31
         )
+
+
+def test_legacy_smart_link_toggle_migrates_until_new_toggle_is_saved(
+    conn, factories, cipher
+) -> None:
+    _tenant, service = _service(conn, factories, cipher)
+    legacy = service.set_userbot_setting_admin(
+        7001, key="show_smart_link", value=True
+    )
+    assert legacy["show_multi_server"] is True
+
+    explicit = service.set_userbot_setting_admin(
+        7001, key="show_multi_server", value=False
+    )
+    assert explicit["show_multi_server"] is False
+    assert service.runtime_userbot_settings()["show_multi_server"] is False
 
 
 def test_user_menu_reacts_to_admin_settings(conn, factories, cipher) -> None:
