@@ -74,6 +74,7 @@ class PanelUserResult:
     subscription_url: str = ""
     name: str = ""
     comment: str = ""
+    online: bool | None = None
 
 
 @dataclass(frozen=True)

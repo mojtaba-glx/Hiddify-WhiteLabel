@@ -156,57 +156,98 @@ async def prompt(update, context, flow, text):
     await update.effective_message.reply_text(text, reply_markup=cancel_keyboard())
 
 
-async def send_list(
-    query, service, actor, sid, *, page=0, status="all", cached=False, search=""
-):
+def list_user_status(row, *, now):
+    """Presentation status only; never change account or quota enforcement."""
+    state = user_status(row)
+    if state == "expired":
+        return "expired"
+    if state != "active":
+        return "disabled"
+    extra = json.loads(row.get("extra_json") or "{}")
+    # X-UI/X-NET report live connections independently from last-seen history.
+    if extra.get("online") is False:
+        return "offline"
+    last_seen = (
+        row.get("last_synced_at")
+        if extra.get("online") is True
+        else row.get("last_online")
+    )
+    try:
+        seconds = (now - parse_utc(last_seen)).total_seconds()
+        if -120 <= seconds <= 90:
+            return "online"
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return "offline"
+
+
+async def send_list(query, service, actor, sid, *, page=0, status="all"):
     warning = ""
-    if not cached:
-        try:
-            await service.refresh_users(actor, sid)
-        except TenantBusinessError:
-            warning = "⚠️ اتصال به پنل برقرار نیست؛ آخرین فهرست ذخیره‌شده نمایش داده می‌شود.\n\n"
-    items = service.users(actor, sid, query=search, status=status)
-    page = max(0, min(int(page), max(0, (len(items) - 1) // 12)))
-    rows = []
-    text = (
-        warning
-        + "[📋 لیست کاربران]\n❕ شما می‌توانید لیست کاربران و اطلاعات آن‌ها را اینجا مشاهده کنید.\n"
-    )
-    text += f"👥 تعداد: {len(items)} · صفحه {page+1}\n"
-    for x in items[page * 12 : (page + 1) * 12]:
-        label = STATUS_LABELS.get(user_status(x), "🟠 در انتظار")
-        text += f"\n• {x['name'][:60]} · {label}"
-        rows.append(
-            button(f"{label.split()[0]} {x['name']}"[:60], f'srv:puser:{sid}:{x["id"]}')
+    try:
+        await service.refresh_users(actor, sid)
+    except TenantBusinessError:
+        warning = (
+            "\n\n⚠️ اتصال به پنل برقرار نیست؛ آخرین فهرست ذخیره‌شده نمایش داده می‌شود."
         )
+    items = [
+        r
+        for r in service.users(actor, sid, status=status)
+        if r.get("state") != "pending"
+    ]
+    # Preserve the panel's order, including when falling back to its last snapshot.
+    items.sort(
+        key=lambda r: (
+            json.loads(r.get("extra_json") or "{}").get("list_position", r["id"]),
+            r["id"],
+        )
+    )
+    frozen_ids = {r["user_id"] for r in service.frozen(actor, sid)}
+    now = utcnow()
+    states = {r["id"]: list_user_status(r, now=now) for r in items}
+    counts = {
+        state: sum(value == state for value in states.values())
+        for state in ("online", "offline", "disabled", "expired")
+    }
+    total = len(items)
+    pages = max(1, (total + 19) // 20)
+    page = max(0, min(int(page), pages - 1))
     if not items:
-        text += "\nکاربری در این بخش یافت نشد."
-    nav = []
-    if page:
-        nav.append(
-            Button("◀️ قبلی", callback_data=f"srv:users:{sid}:{status}:{page-1}")
+        text = "[📋 لیست کاربران]\nهنوز هیچ کاربری برای این سرور ثبت نشده است.\n\n"
+    else:
+        text = (
+            "[📋 لیست کاربران]\n"
+            "❕ شما می‌توانید لیست کاربران و اطلاعات آن‌ها را اینجا مشاهده کنید.\n"
+            f"📄 صفحه: {page+1}/{pages}\n"
         )
-    if (page + 1) * 12 < len(items):
-        nav.append(
-            Button("بعدی ▶️", callback_data=f"srv:users:{sid}:{status}:{page+1}")
-        )
-    if nav:
-        rows.append(nav)
-    rows.extend(
-        [
-            [
-                Button("🟢 فعال", callback_data=f"srv:users:{sid}:active:0"),
-                Button("🔴 منقضی", callback_data=f"srv:users:{sid}:expired:0"),
-            ],
-            [
-                Button("⚫ غیرفعال", callback_data=f"srv:users:{sid}:disabled:0"),
-                Button("👥 همه", callback_data=f"srv:users:{sid}:all:0"),
-            ],
-            button("🔄 بروزرسانی", f"srv:users:{sid}"),
-            button("جستجوی کاربر🔍", f"srv:usersearch:{sid}"),
-            back(sid),
-        ]
+    text += (
+        f"👥 تعداد کاربران: {total}\n"
+        f"🔵 آنلاین: {counts['online']}\n"
+        f"🟡 آفلاین: {counts['offline']}\n"
+        f"⚫ غیرفعال: {counts['disabled']}\n"
+        f"🔴 منقضی شده: {counts['expired']}\n"
+        f"❄️ یخ‌زده (نود قطع): {sum(r['id'] in frozen_ids for r in items)}" + warning
     )
+    icons = {"online": "🔵", "offline": "🟡", "disabled": "⚫", "expired": "🔴"}
+    buttons = []
+    for row in items[page * 20 : (page + 1) * 20]:
+        label = (
+            ("❄️" if row["id"] in frozen_ids else "")
+            + icons[states[row["id"]]]
+            + row["name"]
+        )
+        buttons.append(
+            Button(label, callback_data=f'srv:puser:{sid}:{row["id"]}', style="primary")
+        )
+    rows = [list(reversed(buttons[i : i + 3])) for i in range(0, len(buttons), 3)]
+    if items:
+        nav = []
+        if page:
+            nav.append(Button("➡️", callback_data=f"srv:users:{sid}:{status}:{page-1}"))
+        nav.append(Button(f"{page+1}/{pages}", callback_data="noop"))
+        if page + 1 < pages:
+            nav.append(Button("⬅️", callback_data=f"srv:users:{sid}:{status}:{page+1}"))
+        rows.append(nav)
+    rows.append(button("بازگشت", f"srv:view:{sid}"))
     await edit(query, text, rows)
 
 
@@ -298,6 +339,10 @@ async def plan_list(query, context, service, actor, sid, category=None):
 
 async def handle_callback(update, context, *, business, actor):
     data = str(update.callback_query.data or "")
+    if data == "noop":
+        business._admin(actor)
+        await update.callback_query.answer()
+        return True
     parts = data.split(":")
     if len(parts) < 3 or parts[0] != "srv" or parts[1] not in ROUTES:
         return False
@@ -366,9 +411,7 @@ async def handle_callback(update, context, *, business, actor):
             else "all"
         )
         page = int(parts[4]) if len(parts) > 4 else 0
-        await send_list(
-            query, service, actor, sid, page=page, status=status, cached=len(parts) > 3
-        )
+        await send_list(query, service, actor, sid, page=page, status=status)
     elif action in {"puser", "pedit"}:
         await user_detail(
             query, service, actor, sid, int(parts[3]), editing=action == "pedit"

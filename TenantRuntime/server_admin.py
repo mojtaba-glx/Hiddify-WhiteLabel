@@ -100,13 +100,16 @@ class ServerAdminService:
                 )
         except (ValueError, TypeError):
             pass
+        extra = dict(extra or {})
+        if "online" in data:
+            extra["online"] = data["online"]
         self.conn.execute(
             "INSERT INTO tenant_panel_users (tenant_id,server_id,external_ref,name,comment,usage_bytes,"
             "traffic_bytes,expires_at,last_online,active,state,extra_json,last_synced_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,'active',?,?) ON CONFLICT(tenant_id,server_id,external_ref) "
             "DO UPDATE SET name=excluded.name,comment=excluded.comment,usage_bytes=excluded.usage_bytes,"
             "traffic_bytes=excluded.traffic_bytes,expires_at=excluded.expires_at,last_online=excluded.last_online,"
-            "active=excluded.active,state='active',extra_json=COALESCE(?,extra_json),last_synced_at=excluded.last_synced_at",
+            "active=excluded.active,state='active',extra_json=json_patch(extra_json,?),last_synced_at=excluded.last_synced_at",
             (
                 self.tenant_id,
                 int(sid),
@@ -120,7 +123,7 @@ class ServerAdminService:
                 int(bool(data.get("active"))),
                 json.dumps(extra or {}, ensure_ascii=False),
                 iso_utc(utcnow()),
-                json.dumps(extra) if extra is not None else None,
+                json.dumps(extra),
             ),
         )
 
@@ -146,14 +149,12 @@ class ServerAdminService:
                 "UPDATE tenant_panel_users SET state='deleted' WHERE tenant_id=? AND server_id=? AND state='active'",
                 (self.tenant_id, int(sid)),
             )
-            for row in rows:
+            for position, row in enumerate(rows):
                 self.save_user(
                     sid,
                     row,
-                    extra={
-                        k: row[k] for k in ("duration_days", "start_date") if k in row
-                    }
-                    or None,
+                    extra={"list_position": position}
+                    | {k: row[k] for k in ("duration_days", "start_date") if k in row},
                 )
         return self.users(actor, sid)
 
