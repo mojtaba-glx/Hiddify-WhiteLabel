@@ -6106,6 +6106,136 @@ class TenantBusinessService:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def search_panel_users_admin(
+        self,
+        actor_id: int,
+        query: str = "",
+        *,
+        status: str | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Search the tenant's real panel inventory, matching SellBot smart search.
+
+        This intentionally includes AdminBot-created panel users which do not
+        have a customer/order/subscription row.  Linked UserBot subscriptions
+        are enriched with customer identifiers so the same search also accepts
+        Telegram names/IDs.
+        """
+        self._admin(actor_id)
+        raw = _text(query, 200, required=False)
+        needle = raw.strip().lstrip("@").casefold()
+        uuid_match = re.search(
+            r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+            raw,
+        )
+        uuid_term = uuid_match.group(1).casefold() if uuid_match else ""
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status and normalized_status not in (
+            "active", "disabled", "expired", "pending"
+        ):
+            raise ValueError("invalid panel user status")
+
+        # Local import avoids a module-level circular dependency:
+        # server_admin imports TenantBusinessError from this module.
+        from TenantRuntime.server_admin import user_status
+
+        rows = self.conn.execute(
+            "SELECT u.*, srv.label AS server_label "
+            "FROM tenant_panel_users u "
+            "JOIN tenant_servers srv ON srv.id=u.server_id AND srv.tenant_id=u.tenant_id "
+            "WHERE u.tenant_id=? AND u.state!='deleted' "
+            "ORDER BY u.id DESC LIMIT 2000",
+            (self.tenant_id,),
+        ).fetchall()
+
+        found: list[dict[str, Any]] = []
+        for raw_row in rows:
+            item = dict(raw_row)
+            linked = self.conn.execute(
+                "SELECT s.id AS subscription_id, c.display_name AS customer_display_name, "
+                "c.username AS customer_username, c.telegram_user_id AS customer_telegram_user_id "
+                "FROM tenant_subscriptions s "
+                "JOIN tenant_customers c ON c.id=s.customer_id AND c.tenant_id=s.tenant_id "
+                "LEFT JOIN tenant_subscription_nodes n "
+                "ON n.subscription_id=s.id AND n.tenant_id=s.tenant_id "
+                "WHERE s.tenant_id=? AND ("
+                "(s.server_id=? AND s.external_ref=?) OR "
+                "(n.server_id=? AND n.external_ref=?)) "
+                "ORDER BY s.id DESC LIMIT 1",
+                (
+                    self.tenant_id,
+                    int(item["server_id"]),
+                    str(item["external_ref"]),
+                    int(item["server_id"]),
+                    str(item["external_ref"]),
+                ),
+            ).fetchone()
+            if linked is not None:
+                item.update(dict(linked))
+            else:
+                item.update(
+                    subscription_id=None,
+                    customer_display_name=None,
+                    customer_username=None,
+                    customer_telegram_user_id=None,
+                )
+
+            extra: dict[str, Any] = {}
+            try:
+                parsed = json.loads(item.get("extra_json") or "{}")
+                if isinstance(parsed, dict):
+                    extra = parsed
+            except (TypeError, ValueError, json.JSONDecodeError):
+                extra = {}
+            item["legacy_service_id"] = extra.get("legacy_service_id")
+
+            service_code = ""
+            for part in str(item.get("comment") or "").split("|"):
+                if ":" not in part:
+                    continue
+                key, value = part.split(":", 1)
+                if key.strip().casefold() == "code":
+                    service_code = value.strip()
+                    break
+            item["service_code"] = service_code
+            item["status"] = user_status(item)
+
+            if normalized_status and item["status"] != normalized_status:
+                continue
+
+            if needle:
+                values = (
+                    item.get("name"),
+                    item.get("external_ref"),
+                    item.get("comment"),
+                    item.get("id"),
+                    item.get("server_label"),
+                    item.get("subscription_id"),
+                    item.get("customer_display_name"),
+                    item.get("customer_username"),
+                    item.get("customer_telegram_user_id"),
+                    item.get("service_code"),
+                    item.get("legacy_service_id"),
+                )
+                direct_match = any(
+                    needle in str(value or "").casefold() for value in values
+                )
+                embedded_uuid_match = bool(
+                    uuid_term
+                    and uuid_term == str(item.get("external_ref") or "").casefold()
+                )
+                config_contains_ref = bool(
+                    item.get("external_ref")
+                    and str(item["external_ref"]).casefold() in raw.casefold()
+                )
+                if not (direct_match or embedded_uuid_match or config_contains_ref):
+                    continue
+
+            found.append(item)
+            if len(found) >= max(1, min(int(limit), 500)):
+                break
+        return found
+
     def list_subscriptions_tracking_admin(
         self,
         actor_id: int,
@@ -6124,18 +6254,36 @@ class TenantBusinessService:
             "WHERE s.tenant_id=?"
         )
         args: list[Any] = [self.tenant_id]
+        normalized = None
         if status is not None:
             normalized = str(status).strip().lower()
             if normalized not in ("active", "disabled", "expired", "pending_provisioning"):
                 raise ValueError("invalid subscription status")
-            query += " AND s.status=?"
-            args.append(normalized)
+            if normalized == "expired":
+                # SellBot treats a service as expired when its effective time
+                # or volume is exhausted even if a stale DB status still says
+                # active/disabled. Keep pending provisioning out of this list.
+                query += (
+                    " AND (s.status='expired' OR "
+                    "(s.status IN ('active','disabled') AND ("
+                    "(s.expires_at IS NOT NULL AND s.expires_at<=?) OR "
+                    "(s.traffic_bytes IS NOT NULL AND s.traffic_bytes>0 "
+                    "AND s.usage_bytes>=s.traffic_bytes))))"
+                )
+                args.append(iso_utc(utcnow()))
+            else:
+                query += " AND s.status=?"
+                args.append(normalized)
         query += " ORDER BY s.id DESC LIMIT ?"
         args.append(max(1, min(int(limit), 500)))
-        return [
+        result = [
             dict(row)
             for row in self.conn.execute(query, tuple(args)).fetchall()
         ]
+        if normalized == "expired":
+            for row in result:
+                row["status"] = "expired"
+        return result
 
     def review_old_subscriptions_admin(
         self,
