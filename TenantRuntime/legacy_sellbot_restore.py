@@ -573,6 +573,50 @@ def _map_userbot_settings(
     return rows, growth
 
 
+def _encrypt_legacy_asset(cipher: TokenCipher, raw: bytes) -> bytes:
+    """Encrypt arbitrary backup bytes using bounded generic-secret chunks."""
+    chunks: list[str] = []
+    data = bytes(raw)
+    for offset in range(0, len(data), 2048):
+        encoded = base64.b64encode(data[offset: offset + 2048]).decode("ascii")
+        chunks.append(cipher.encrypt_secret(encoded))
+    payload = {
+        "version": 1,
+        "encoding": "fernet-chunked-b64",
+        "chunks": chunks,
+    }
+    return json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def decrypt_legacy_asset(cipher: TokenCipher, content: bytes) -> bytes:
+    """Future migration seam for preserved SellBot source members."""
+    try:
+        payload = json.loads(bytes(content).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LegacySellBotRestoreError("legacy asset envelope is invalid") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != 1
+        or payload.get("encoding") != "fernet-chunked-b64"
+        or not isinstance(payload.get("chunks"), list)
+    ):
+        raise LegacySellBotRestoreError("legacy asset envelope is unsupported")
+    out = bytearray()
+    for token in payload["chunks"]:
+        try:
+            decoded = cipher.decrypt_secret(str(token))
+            out.extend(base64.b64decode(decoded.encode("ascii"), validate=True))
+        except Exception as exc:
+            raise LegacySellBotRestoreError(
+                "legacy asset decryption failed"
+            ) from exc
+    return bytes(out)
+
+
 def _legacy_asset_kind(path: str) -> str:
     low = path.lower()
     if path.startswith("PanelBackups/"):
@@ -1247,6 +1291,7 @@ def _build_snapshot(
             (oid, meta)
             for oid, meta in order_meta.items()
             if oid not in used_order_ids_for_service
+            and int(meta.get("renew_service_id") or 0) <= 0
             and meta["old_user_id"] == old_user
             and (
                 meta["old_server_id"] == old_server
@@ -1715,7 +1760,8 @@ def _build_snapshot(
                     "kind": _legacy_asset_kind(path),
                     "size": len(raw),
                     "sha256": hashlib.sha256(raw).hexdigest(),
-                    "content": _blob_marker(raw),
+                    "encoding": "fernet-chunked-b64",
+                    "content": _blob_marker(_encrypt_legacy_asset(cipher, raw)),
                     "created_at": now,
                 },
             )
