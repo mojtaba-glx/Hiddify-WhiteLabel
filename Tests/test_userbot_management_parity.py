@@ -922,6 +922,73 @@ def test_broadcast_segments_are_tenant_scoped(conn, factories, cipher) -> None:
     }
 
 
+def test_stage9_marketing_controls_map_to_real_user_actions() -> None:
+    enabled = user_handlers._checkout_markup(
+        55,
+        {"enable_discount_code": True},
+    )
+    disabled = user_handlers._checkout_markup(
+        55,
+        {"enable_discount_code": False},
+    )
+    enabled_callbacks = [
+        button.callback_data
+        for row in enabled.inline_keyboard
+        for button in row
+    ]
+    disabled_callbacks = [
+        button.callback_data
+        for row in disabled.inline_keyboard
+        for button in row
+    ]
+    assert "shop:coupon:55" in enabled_callbacks
+    assert "shop:coupon:55" not in disabled_callbacks
+
+    runtime = open(
+        "TenantRuntime/UserBot/handlers.py",
+        encoding="utf-8",
+    ).read()
+    assert '"🎁 اعمال کد هدیه"' in runtime
+    assert 'callback_data="shop:gift"' in runtime
+    assert 'settings.get("show_gift_button", True)' in runtime
+
+
+def test_stage9_admin_actions_are_wired_and_no_dead_marketing_options() -> None:
+    gifts = open(
+        "TenantRuntime/AdminBot/userbot_management.py",
+        encoding="utf-8",
+    ).read()
+    sales = open(
+        "TenantRuntime/AdminBot/handlers.py",
+        encoding="utf-8",
+    ).read()
+
+    for callback in (
+        "userbot:gifts:coupon:set_code:",
+        "userbot:gifts:coupon:set_amount:",
+        "userbot:gifts:coupon:set_limit:",
+        "userbot:gifts:coupon:set_exp:",
+        "userbot:gifts:auto_off",
+    ):
+        assert callback in gifts
+    assert "gift_bulk_expiry" in gifts
+    assert "GIFT_CAMPAIGN_PRESETS" in gifts
+    assert '"winback"' in gifts
+
+    for callback in (
+        "biz:couponedit:",
+        "biz:couponredemptions:",
+        "biz:coupondelete:",
+    ):
+        assert callback in sales
+    assert 'kind == "coupon_edit"' in sales
+
+    # These SellBot keys have no meaningful customer execution path, so phase
+    # 9 intentionally does not expose them as WhiteLabel admin controls.
+    assert "instant_gift_coupon" not in gifts
+    assert "enable_increase_code" not in gifts
+
+
 def test_admin_forms_use_bottom_cancel_and_not_pipe_for_core_new_flows() -> None:
     source = open(
         "TenantRuntime/AdminBot/userbot_management.py",
