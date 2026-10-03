@@ -3604,19 +3604,123 @@ class TenantBusinessService:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def list_subscriptions(self, actor_id: int) -> list[dict[str, Any]]:
-        customer = self._customer(actor_id)
-        rows = self.conn.execute(
+    def _customer_subscription_rows(
+        self,
+        customer_id: int,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        query = (
             "SELECT s.*, p.name AS plan_name, "
+            "p.traffic_gb AS plan_traffic_gb, "
+            "p.duration_days AS plan_duration_days, "
+            "p.price AS plan_price, p.currency AS plan_currency, "
             "c.username AS customer_username, "
-            "c.display_name AS customer_display_name "
+            "c.display_name AS customer_display_name, "
+            "srv.label AS server_label "
             "FROM tenant_subscriptions s "
-            "JOIN tenant_sale_plans p ON p.id=s.plan_id "
+            "JOIN tenant_sale_plans p ON p.id=s.plan_id AND p.tenant_id=s.tenant_id "
             "JOIN tenant_customers c ON c.id=s.customer_id AND c.tenant_id=s.tenant_id "
-            "WHERE s.tenant_id=? AND s.customer_id=? ORDER BY s.id DESC",
-            (self.tenant_id, int(customer["id"])),
-        ).fetchall()
-        return [dict(row) for row in rows]
+            "LEFT JOIN tenant_servers srv ON srv.id=s.server_id AND srv.tenant_id=s.tenant_id "
+            "WHERE s.tenant_id=? AND s.customer_id=?"
+        )
+        args: list[Any] = [self.tenant_id, int(customer_id)]
+        if status is not None:
+            query += " AND s.status=?"
+            args.append(str(status))
+        query += " ORDER BY s.id DESC LIMIT ?"
+        args.append(max(1, min(int(limit), 500)))
+        return [
+            dict(row)
+            for row in self.conn.execute(query, tuple(args)).fetchall()
+        ]
+
+    def list_subscriptions(
+        self,
+        actor_id: int,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        customer = self._customer(actor_id, active=False)
+        return self._customer_subscription_rows(
+            int(customer["id"]),
+            status=status,
+            limit=limit,
+        )
+
+    def customer_subscription_status(
+        self,
+        actor_id: int,
+        *,
+        subscription_id: int,
+        refresh: bool = True,
+    ) -> dict[str, Any]:
+        customer = self._customer(actor_id, active=False)
+        row = self.conn.execute(
+            "SELECT id, status, server_id, external_ref "
+            "FROM tenant_subscriptions "
+            "WHERE id=? AND tenant_id=? AND customer_id=?",
+            (int(subscription_id), self.tenant_id, int(customer["id"])),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("subscription not found")
+
+        if (
+            bool(refresh)
+            and str(row["status"]) in ("active", "disabled")
+            and row["server_id"] is not None
+            and str(row["external_ref"] or "").strip()
+        ):
+            try:
+                self.sync_subscription_usage(
+                    self.owner_telegram_id,
+                    subscription_id=int(subscription_id),
+                )
+            except TenantBusinessError:
+                # Status pages must remain readable during a temporary panel
+                # outage. The last persisted snapshot is safer than inventing
+                # a new state.
+                pass
+
+        items = self._customer_subscription_rows(
+            int(customer["id"]),
+            limit=500,
+        )
+        for item in items:
+            if int(item["id"]) == int(subscription_id):
+                return item
+        raise TenantBusinessError("subscription not found")
+
+    def refresh_customer_subscription_statuses(
+        self,
+        actor_id: int,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        customer = self._customer(actor_id, active=False)
+        rows = self._customer_subscription_rows(
+            int(customer["id"]),
+            limit=max(1, min(int(limit), 100)),
+        )
+        for item in rows:
+            if (
+                str(item.get("status") or "") in ("active", "disabled")
+                and item.get("server_id") is not None
+                and str(item.get("external_ref") or "").strip()
+            ):
+                try:
+                    self.sync_subscription_usage(
+                        self.owner_telegram_id,
+                        subscription_id=int(item["id"]),
+                    )
+                except TenantBusinessError:
+                    continue
+        return self._customer_subscription_rows(
+            int(customer["id"]),
+            limit=max(1, min(int(limit), 100)),
+        )
 
     def list_subscriptions_admin(self, actor_id: int, *, status: str | None = None) -> list[dict[str, Any]]:
         self._admin(actor_id)
@@ -6108,8 +6212,15 @@ class TenantBusinessService:
             for row in self.conn.execute(sql, tuple(args)).fetchall()
         ]
 
-    def customer_account_summary(self, actor_id: int) -> dict[str, Any]:
+    def customer_account_summary(
+        self,
+        actor_id: int,
+        *,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
         customer = self._customer(actor_id, active=False)
+        if bool(refresh):
+            self.refresh_customer_subscription_statuses(actor_id)
         counts = self.conn.execute(
             "SELECT "
             "SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active, "
@@ -6156,6 +6267,8 @@ class TenantBusinessService:
         customer = self._customer(actor_id, active=False)
         rows = self.conn.execute(
             "SELECT o.*, p.name AS plan_name, "
+            "p.traffic_gb AS plan_traffic_gb, "
+            "p.duration_days AS plan_duration_days, "
             "o.order_kind AS operation "
             "FROM tenant_orders o "
             "JOIN tenant_sale_plans p ON p.id=o.plan_id AND p.tenant_id=o.tenant_id "
@@ -6170,6 +6283,27 @@ class TenantBusinessService:
             ),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def customer_order(
+        self,
+        actor_id: int,
+        *,
+        order_id: int,
+    ) -> dict[str, Any]:
+        customer = self._customer(actor_id, active=False)
+        row = self.conn.execute(
+            "SELECT o.*, p.name AS plan_name, "
+            "p.traffic_gb AS plan_traffic_gb, "
+            "p.duration_days AS plan_duration_days, "
+            "o.order_kind AS operation "
+            "FROM tenant_orders o "
+            "JOIN tenant_sale_plans p ON p.id=o.plan_id AND p.tenant_id=o.tenant_id "
+            "WHERE o.id=? AND o.tenant_id=? AND o.customer_id=?",
+            (int(order_id), self.tenant_id, int(customer["id"])),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("order not found")
+        return dict(row)
 
     def create_ticket(self, actor_id: int, *, subject: str, body: str) -> dict[str, Any]:
         customer = self._customer(actor_id); now = iso_utc(utcnow())
