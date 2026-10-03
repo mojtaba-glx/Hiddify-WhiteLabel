@@ -448,6 +448,84 @@ def _renewable_subscriptions(
     return eligible, blocked
 
 
+def _subscription_link_controls_enabled(settings: dict[str, Any]) -> bool:
+    return any(
+        bool(settings.get(key, default))
+        for key, default in (
+            ("show_direct_config", True),
+            ("show_auto_sub_link", False),
+            ("show_sub_link", True),
+            ("show_sub_link_b64", False),
+            ("show_multi_server", False),
+            ("show_multi_server_b64", False),
+        )
+    )
+
+
+def _subscription_identity_line(
+    item: dict[str, Any],
+    settings: dict[str, Any],
+) -> str:
+    if not bool(settings.get("show_username", True)):
+        return ""
+    username = str(item.get("customer_username") or "").strip().lstrip("@")
+    display_name = str(item.get("customer_display_name") or "").strip()
+    value = f"@{username}" if username else display_name
+    return f"\n  👤 نام: {value}" if value else ""
+
+
+def _subscription_config_menu_rows(
+    business: Any,
+    actor: int,
+    subscription_id: int,
+    settings: dict[str, Any],
+) -> list[list[InlineKeyboardButton]]:
+    rows: list[list[InlineKeyboardButton]] = []
+    if bool(settings.get("show_user_page_link", True)):
+        try:
+            panel_link = business.panel_user_page_link(
+                actor, subscription_id=int(subscription_id)
+            )
+        except TenantBusinessError:
+            panel_link = ""
+        if panel_link:
+            rows.append([InlineKeyboardButton(
+                "🌐 صفحه یوزر هیدیفای",
+                url=panel_link,
+            )])
+    if bool(settings.get("show_direct_config", True)):
+        rows.append([InlineKeyboardButton(
+            "کانفیگ مستقیم",
+            callback_data=f"shop:configs:{int(subscription_id)}",
+        )])
+    if bool(settings.get("show_auto_sub_link", False)):
+        rows.append([InlineKeyboardButton(
+            "اشتراک خودکار",
+            callback_data=f"shop:autosub:{int(subscription_id)}",
+        )])
+    if bool(settings.get("show_sub_link", True)):
+        rows.append([InlineKeyboardButton(
+            "لینک اشتراک",
+            callback_data=f"shop:sublink:{int(subscription_id)}",
+        )])
+    if bool(settings.get("show_sub_link_b64", False)):
+        rows.append([InlineKeyboardButton(
+            "لینک اشتراک b64",
+            callback_data=f"shop:subb64:{int(subscription_id)}",
+        )])
+    if bool(settings.get("show_multi_server", False)):
+        rows.append([InlineKeyboardButton(
+            "🌐 لینک اشتراک هوشمند",
+            callback_data=f"shop:smart:{int(subscription_id)}",
+        )])
+    if bool(settings.get("show_multi_server_b64", False)):
+        rows.append([InlineKeyboardButton(
+            "🌐 لینک اشتراک هوشمند b64",
+            callback_data=f"shop:smartb64:{int(subscription_id)}",
+        )])
+    return rows
+
+
 def _sorted_purchase_plans(
     plans: list[dict[str, Any]],
     settings: dict[str, Any],
@@ -785,39 +863,14 @@ async def _handle_main_reply_action(
         for item in items:
             subscription_id = int(item["id"])
             title = str(item.get("plan_name") or f"اشتراک #{subscription_id}")
-            action_row = []
-            if (
-                bool(settings.get("show_user_page_link", True))
-                and (
-                    bool(settings.get("show_sub_link", True))
-                    or bool(settings.get("show_smart_link", True))
-                )
-            ):
-                try:
-                    link = business.subscription_link(
-                        actor,
-                        subscription_id=subscription_id,
-                    )
-                except TenantBusinessError:
-                    link = ""
-                if link:
-                    action_row.append(
-                        _button(
-                            f"🔗 {title}",
-                            url=link,
-                            settings=settings,
-                        )
-                    )
-            if bool(settings.get("show_direct_config", True)):
-                action_row.append(
-                    _button(
-                        f"📄 کانفیگ #{subscription_id}",
-                        callback_data=f"shop:configs:{subscription_id}",
-                        settings=settings,
-                    )
-                )
-            if action_row:
-                rows.append(action_row)
+            menu_rows = _subscription_config_menu_rows(
+                business, actor, subscription_id, settings
+            )
+            if menu_rows:
+                rows.append([InlineKeyboardButton(
+                    f"📝 {title}",
+                    callback_data=f"shop:configmenu:{subscription_id}",
+                )])
         if not rows:
             rows.append([InlineKeyboardButton(
                 "اشتراک فعالی برای اتصال وجود ندارد",
@@ -829,8 +882,7 @@ async def _handle_main_reply_action(
         )])
         await update.effective_message.reply_text(
             "🔗 اتصال اشتراک\n"
-            "اشتراک موردنظر را انتخاب کنید. برای اتصال مستقیم، لینک یا "
-            "کانفیگ همان سرویس را باز کنید:",
+            "اشتراک موردنظر را انتخاب کنید تا روش‌های فعال اتصال همان سرویس نمایش داده شود:",
             reply_markup=InlineKeyboardMarkup(rows),
             disable_web_page_preview=True,
         )
@@ -1631,59 +1683,28 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             for item in items:
                 subscription_id = int(item["id"])
                 title = str(item.get("plan_name") or f"اشتراک #{subscription_id}")
-                action_row: list[InlineKeyboardButton] = []
-                if (
-                    bool(settings.get("show_user_page_link", True))
-                    and (
-                        bool(settings.get("show_sub_link", True))
-                        or bool(settings.get("show_smart_link", True))
-                    )
+                if _subscription_config_menu_rows(
+                    business, actor, subscription_id, settings
                 ):
-                    try:
-                        link = business.subscription_link(
-                            actor, subscription_id=subscription_id
-                        )
-                    except TenantBusinessError:
-                        link = ""
-                    if link:
-                        action_row.append(
-                            _button(
-                                f"🔗 {title}",
-                                url=link,
-                                settings=settings,
-                            )
-                        )
-                if bool(settings.get("show_direct_config", True)):
-                    action_row.append(
-                        _button(
-                            f"📄 کانفیگ #{subscription_id}",
-                            callback_data=f"shop:configs:{subscription_id}",
-                            settings=settings,
-                        )
-                    )
-                if action_row:
-                    rows.append(action_row)
-
+                    rows.append([InlineKeyboardButton(
+                        f"📝 {title}",
+                        callback_data=f"shop:configmenu:{subscription_id}",
+                    )])
             if not rows:
-                rows.append([
-                    InlineKeyboardButton(
-                        "اشتراک فعالی برای اتصال وجود ندارد",
-                        callback_data="noop",
-                    )
-                ])
-            rows.append([
-                InlineKeyboardButton(
-                    "📦 اشتراک‌های من",
-                    callback_data="shop:subs",
-                )
-            ])
-            rows.append([
-                InlineKeyboardButton("🔙بازگشت", callback_data="runtime:home")
-            ])
+                rows.append([InlineKeyboardButton(
+                    "اشتراک فعالی برای اتصال وجود ندارد",
+                    callback_data="noop",
+                )])
+            rows.append([InlineKeyboardButton(
+                "📦 اشتراک‌های من",
+                callback_data="shop:subs",
+            )])
+            rows.append([InlineKeyboardButton(
+                "🔙بازگشت", callback_data="runtime:home"
+            )])
             await update.callback_query.edit_message_text(
                 "🔗 اتصال اشتراک\n"
-                "اشتراک موردنظر را انتخاب کنید. برای اتصال مستقیم، لینک یا "
-                "کانفیگ همان سرویس را باز کنید:",
+                "اشتراک موردنظر را انتخاب کنید تا روش‌های فعال اتصال همان سرویس نمایش داده شود:",
                 reply_markup=InlineKeyboardMarkup(rows),
                 disable_web_page_preview=True,
             )
