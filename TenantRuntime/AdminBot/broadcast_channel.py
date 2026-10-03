@@ -525,14 +525,15 @@ async def _send_broadcast(
     text = str(draft.get("text") or "")
     _validate_body(kind, text)
     buttons = list(draft.get("buttons") or [])
-    run_id = business.start_broadcast_run_admin(
-        actor,
-        segment=segment,
-        message_kind=kind,
-        target_count=len(targets),
-        buttons_count=len(buttons),
-    )
+
     if not targets:
+        run_id = business.start_broadcast_run_admin(
+            actor,
+            segment=segment,
+            message_kind=kind,
+            target_count=0,
+            buttons_count=len(buttons),
+        )
         business.finish_broadcast_run_admin(
             actor, run_id=run_id, sent=0, failed=0
         )
@@ -547,13 +548,23 @@ async def _send_broadcast(
             context, str(draft.get("file_id") or "")
         )
 
+    # Verify the sibling credential before opening an audit run. A missing or
+    # corrupt UserBot token is a setup error, not a completed delivery run.
+    token = _sibling_user_bot_token(business)
+    run_id = business.start_broadcast_run_admin(
+        actor,
+        segment=segment,
+        message_kind=kind,
+        target_count=len(targets),
+        buttons_count=len(buttons),
+    )
+
     markup = _markup(draft)
     sent = failed = recovered = 0
     unreachable = temporary = telegram_error = other = 0
     reusable_file_id = ""
-    token = ""
+
     try:
-        token = _sibling_user_bot_token(business)
         async with Bot(token=token) as bot:
             for target in targets:
                 chat_id = int(target["telegram_user_id"])
@@ -645,7 +656,26 @@ async def _send_broadcast(
                         telegram_error += 1
                     else:
                         other += 1
+                # Same safe pacing used by SellBot; RetryAfter takes priority.
                 await asyncio.sleep(0.06)
+    except Exception:
+        # Bot initialization/shutdown failures are uncommon, but the audit row
+        # must never remain permanently "running".
+        remaining = max(0, len(targets) - sent - failed)
+        failed += remaining
+        other += remaining
+        business.finish_broadcast_run_admin(
+            actor,
+            run_id=run_id,
+            sent=sent,
+            failed=failed,
+            recovered=recovered,
+            unreachable=unreachable,
+            temporary=temporary,
+            telegram_error=telegram_error,
+            other=other,
+        )
+        raise
     finally:
         token = ""
 
