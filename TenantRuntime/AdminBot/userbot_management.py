@@ -167,18 +167,18 @@ def build_users_search_menu_keyboard() -> InlineKeyboardMarkup:
 
 def build_payments_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⏳ در انتظار بررسی", callback_data="userbot:payments:list:pending")],
+        [InlineKeyboardButton("⏳لیست تراکنشات در انتظار", callback_data="userbot:payments:list:pending")],
         [
-            InlineKeyboardButton("✅ تایید شده", callback_data="userbot:payments:list:approved"),
-            InlineKeyboardButton("🚫 رد شده", callback_data="userbot:payments:list:rejected"),
+            InlineKeyboardButton("✅لیست تراکنشات تایید شده", callback_data="userbot:payments:list:approved"),
+            InlineKeyboardButton("🚫لیست تراکنشات رد شده", callback_data="userbot:payments:list:rejected"),
         ],
         [
-            InlineKeyboardButton("💳 کارت به کارت", callback_data="userbot:payments:list:card"),
-            InlineKeyboardButton("🪙 Crypto", callback_data="userbot:payments:list:crypto"),
+            InlineKeyboardButton("💳لیست تراکنشات کارت به کارت", callback_data="userbot:payments:list:card"),
+            InlineKeyboardButton("🪙لیست تراکنشات Crypto", callback_data="userbot:payments:list:crypto"),
         ],
         [
-            InlineKeyboardButton("➕ شارژ کیف پول", callback_data="userbot:payments:list:wallet_topup"),
-            InlineKeyboardButton("💰 پرداخت کیف پول", callback_data="userbot:payments:list:wallet_order"),
+            InlineKeyboardButton("➕شارژهای کیف پول", callback_data="userbot:payments:list:wallet_topup"),
+            InlineKeyboardButton("💰پرداخت‌های کیف پول", callback_data="userbot:payments:list:wallet_order"),
         ],
         [InlineKeyboardButton("🔍جستجوی تراکنش", callback_data="userbot:payments:search")],
         [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:menu")],
