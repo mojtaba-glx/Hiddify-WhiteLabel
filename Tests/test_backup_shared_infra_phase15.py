@@ -223,7 +223,10 @@ def test_phase15_schema_exists_but_runtime_roles_remain_admin_user_only(
         "Migrations/0031_backup_agency_infra.sql",
         encoding="utf-8",
     ).read()
-    assert "AgentBot/CustomerBot runtime/menu is enabled" not in migration
+    # Schema is allowed to prepare future roles, but runtime dispatch must stay
+    # unchanged until a later phase explicitly enables AgentBot/CustomerBot.
+    assert "ALTER TABLE tenant_bots" not in migration
+    assert "INSERT INTO tenant_bots" not in migration
     dispatcher = open("TenantRuntime/handlers.py", encoding="utf-8").read()
     assert 'spec.role == "admin"' in dispatcher
     assert 'spec.role == "user"' in dispatcher
