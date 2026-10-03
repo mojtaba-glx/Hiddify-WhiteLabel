@@ -638,7 +638,7 @@ def test_broadcast_long_photo_text_is_sent_as_separate_message(
     )
     assert result["sent"] == 1
     assert calls[0][0] == "photo"
-    assert calls[0][1]["caption"] is None
+    assert "caption" not in calls[0][1]
     assert calls[1][0] == "text"
     assert calls[1][1]["text"] == body
 
