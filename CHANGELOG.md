@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.0 — Complete Admin backup
+
+- Completed the Tenant AdminBot `📫 دریافت بکاپ` flow instead of returning the previous placeholder.
+- Kept the existing Tenant Backup/Restore v2 payload restore-compatible while extending manual full backups with per-panel artifacts under `PanelBackups/`.
+- Added real Hiddify v11/v12/v13 backup downloads using the proven backup routes and binary-response validation.
+- Added real X-UI Sanaei/Alireza database downloads through `server/getDb`.
+- Added X-NET backup create/download/best-effort cleanup with persistent-token and JWT-fallback authentication.
+- Kept manual backups strictly Tenant-scoped: other tenants, platform settings, live Tenant AdminBot/UserBot credentials and the platform master key are excluded.
+- Preserved encrypted Tenant panel credentials inside Tenant business data without exposing their decryption key.
+- Added a full-backup manifest with panel counts, checksums, errors and archive paths; partial panel failures no longer prevent delivery of the safe Tenant backup.
+- Manual backup runs are recorded in `tenant_backup_runs`, and delivery success/failure is finalized only after Telegram send completes.
+- Version promoted to `1.1.0`.
+
 ## v1.0.0 — Stable release
 
 - Promoted the completed WhiteLabel implementation to the first Stable release after the Phase 16 final release gate.
