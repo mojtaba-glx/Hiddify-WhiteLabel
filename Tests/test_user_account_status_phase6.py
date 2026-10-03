@@ -167,24 +167,19 @@ def test_account_summary_contains_real_order_counters(
     assert int(order["plan_duration_days"]) == 30
 
 
-def test_show_username_changes_real_profile_and_service_output(
+def test_show_username_changes_profile_after_subscription_detail_removed(
     conn, factories, cipher
 ) -> None:
     service, _panel, actor, subscription_id, _order_id = _service(
         conn, factories, cipher
     )
     summary = service.customer_account_summary(actor)
-    item = service.customer_subscription_status(
-        actor,
-        subscription_id=subscription_id,
-        refresh=False,
-    )
 
     visible = service.runtime_userbot_settings()
     profile_visible = user_handlers._user_account_text(summary, visible)
-    service_visible = user_handlers._subscription_detail_text(item, visible)
+    service_menu = user_handlers._subscription_menu_text()
     assert "@status_user" in profile_visible
-    assert "@status_user" in service_visible
+    assert "@status_user" not in service_menu
 
     service.set_userbot_setting_admin(
         7001, key="show_username", value=False
@@ -193,9 +188,7 @@ def test_show_username_changes_real_profile_and_service_output(
     assert "@status_user" not in user_handlers._user_account_text(
         summary, hidden
     )
-    assert "@status_user" not in user_handlers._subscription_detail_text(
-        item, hidden
-    )
+    assert "@status_user" not in user_handlers._subscription_menu_text()
 
 
 def test_phase6_runtime_has_active_expired_and_service_detail_routes() -> None:
@@ -213,13 +206,19 @@ def test_phase6_runtime_has_active_expired_and_service_detail_routes() -> None:
     ):
         assert callback in source
     for label in (
+        "کانفیگ ها📝",
+        "تمدید اشتراک♾",
+        "تغییر نام اشتراک✏️",
+        "تغییر لینک اشتراک🚨",
+    ):
+        assert label in source
+    for removed in (
         "📊 میزان استفاده",
         "📥 حجم باقی‌مانده",
         "📅 تاریخ انقضا",
         "🕓 آخرین اتصال",
-        "وضعیت کاربر",
     ):
-        assert label in source
+        assert removed not in source
 
 
 def test_show_user_status_is_enforced_beyond_main_keyboard() -> None:
@@ -236,7 +235,7 @@ def test_show_user_status_is_enforced_beyond_main_keyboard() -> None:
     assert "لایسنس:" not in status_source
 
 
-def test_status_helpers_render_friendly_state_and_relative_last_online(
+def test_status_helpers_keep_business_metrics_after_detail_ui_removed(
     conn, factories, cipher
 ) -> None:
     service, _panel, actor, subscription_id, _order_id = _service(
@@ -247,15 +246,15 @@ def test_status_helpers_render_friendly_state_and_relative_last_online(
         subscription_id=subscription_id,
         refresh=False,
     )
-    text = user_handlers._subscription_detail_text(
+    metrics = user_handlers._subscription_metrics(
         item,
         service.runtime_userbot_settings(),
     )
-    assert "🟢 فعال" in text
-    assert "10.00 گیگ" in text
-    assert "گیگ" in text
-    assert "روز" in text
-    assert "پیش" in text
+    assert user_handlers._subscription_status_label(item) == "🟢 فعال"
+    assert metrics["usage_gb"] == 1.0
+    assert metrics["limit_gb"] == 10.0
+    assert metrics["remaining_gb"] == 9.0
+    assert "پیش" in user_handlers._last_online_text(item.get("last_online"))
 
 
 def test_customer_status_and_order_reads_are_owner_scoped(

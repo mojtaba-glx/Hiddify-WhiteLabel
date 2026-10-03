@@ -76,17 +76,21 @@ def attach_rotation(service, panel, *, fail_after=None, reset=False):
     panel.rotate_identity = rotate
 
 
-def test_status_detail_price_snapshot_and_name_escape(conn, factories, cipher):
+def test_status_menu_hides_detail_fields_and_rename_still_works(conn, factories, cipher):
     service, panel, actor, sid, oid = _service(conn, factories, cipher)
-    conn.execute("UPDATE tenant_sale_plans SET price=999999 WHERE tenant_id=?", (service.tenant_id,))
-    conn.execute("UPDATE tenant_orders SET amount=70000 WHERE id=?", (oid,))
-    conn.commit()
     item = service.rename_customer_subscription(actor, subscription_id=sid, name='اشتراک <جدید>')
-    text = handlers._subscription_detail_text(item, {})
-    assert '70,000 ریال' in text and '999,999' not in text
-    assert '&lt;جدید&gt;' in text
-    assert f'<code>{sid}</code>' in text
-    assert service.customer_subscription_status(actor, subscription_id=sid, refresh=False)['service_name'] == 'اشتراک <جدید>'
+    text = handlers._subscription_menu_text()
+    assert text == '📊 وضعیت اشتراک\n\nیکی از گزینه‌های زیر را انتخاب کنید:'
+    for hidden in (
+        '✏️ نام', '👤 کاربر', '📦 پلن', '📡 سرور', '📶 وضعیت',
+        '📊 میزان استفاده', '📥 حجم باقی‌مانده', '📅 تاریخ انقضا',
+        '⏳ زمان باقی‌مانده', '🕓 آخرین اتصال', '💰 قیمت اشتراک',
+        '🔑 شناسه', '🔄 آخرین بروزرسانی',
+    ):
+        assert hidden not in text
+    assert service.customer_subscription_status(
+        actor, subscription_id=sid, refresh=False
+    )['service_name'] == 'اشتراک <جدید>'
     for invalid in ('xx', 'a' * 65, 'نام\nجدید', 'نام\x00جدید'):
         with pytest.raises(ValueError):
             service.rename_customer_subscription(actor, subscription_id=sid, name=invalid)
@@ -175,13 +179,21 @@ def test_customer_buttons_rename_cancel_and_rotation_confirm_once(monkeypatch, c
     async def run():
         await click(update, context, f'shop:substatus:{sid}')
         data = callbacks(message.sent[-1][1]['reply_markup'])
-        for prefix in ('configmenu', 'renew', 'subrename', 'subrotate', 'subrefresh', 'subcopy'):
-            assert f'shop:{prefix}:{sid}' in data
+        assert data == [
+            f'shop:configmenu:{sid}',
+            f'shop:renew:{sid}',
+            f'shop:subrename:{sid}',
+            f'shop:subrotate:{sid}',
+        ]
+        assert message.sent[-1][0] == '📊 وضعیت اشتراک\n\nیکی از گزینه‌های زیر را انتخاب کنید:'
         await click(update, context, f'shop:subrename:{sid}')
         update.callback_query = None
         message.text = 'نام جدید'
         await handlers.unknown_text(update, context)
-        assert 'نام جدید' in message.sent[-1][0]
+        assert message.sent[-1][0].startswith('✅ نام اشتراک تغییر کرد.')
+        assert service.customer_subscription_status(
+            actor, subscription_id=sid, refresh=False
+        )['service_name'] == 'نام جدید'
         await click(update, context, f'shop:subrename:{sid}')
         await click(update, context, f'shop:subrefresh:{sid}')
         assert 'biz_flow' not in context.user_data
@@ -353,7 +365,7 @@ def test_unavailable_panel_marks_cached_status_without_inventing_zero(conn, fact
     panel.usage = offline
     result = service.customer_subscription_status(actor, subscription_id=sid, refresh=True)
     assert result['sync_failed'] and result['usage_bytes'] == 1024**3
-    assert 'ذخیره‌شده' in handlers._subscription_detail_text(result, {})
+    assert handlers._subscription_menu_text().startswith('📊 وضعیت اشتراک')
 
 
 def test_detail_lookup_is_not_limited_to_latest_500_subscriptions(conn, factories, cipher):
