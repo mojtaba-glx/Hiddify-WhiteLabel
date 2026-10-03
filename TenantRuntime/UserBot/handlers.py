@@ -1096,14 +1096,18 @@ async def _handle_main_reply_action(
         return True
 
     if text == BTN_WALLET:
+        rows = [[InlineKeyboardButton(
+            "➕ شارژ کیف پول",
+            callback_data="shop:wallettopup",
+        )]]
+        if bool(settings.get("show_gift_button", True)):
+            rows.append([InlineKeyboardButton(
+                "🎁 اعمال کد هدیه",
+                callback_data="shop:gift",
+            )])
         await update.effective_message.reply_text(
             _wallet_text(business.wallet_summary(actor)),
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "➕ شارژ کیف پول",
-                    callback_data="shop:wallettopup",
-                )],
-            ]),
+            reply_markup=InlineKeyboardMarkup(rows),
         )
         return True
 
@@ -1748,12 +1752,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ]),
             ); return
         if data == "shop:wallet":
+            rows = [[InlineKeyboardButton(
+                "➕ شارژ کیف پول",
+                callback_data="shop:wallettopup",
+            )]]
+            if bool(settings.get("show_gift_button", True)):
+                rows.append([InlineKeyboardButton(
+                    "🎁 اعمال کد هدیه",
+                    callback_data="shop:gift",
+                )])
+            rows.append([InlineKeyboardButton("↩️ منو", callback_data="runtime:home")])
             await update.callback_query.edit_message_text(
                 _wallet_text(business.wallet_summary(actor)),
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("➕ شارژ کیف پول", callback_data="shop:wallettopup")],
-                    [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
-                ]),
+                reply_markup=InlineKeyboardMarkup(rows),
             ); return
         if data == "shop:wallettopup":
             context.user_data["biz_flow"] = {"kind": "wallet_topup_create"}
@@ -1781,6 +1792,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ]),
             ); return
         if data == "shop:gift":
+            if not bool(settings.get("show_gift_button", True)):
+                raise TenantBusinessError("gift is disabled")
             context.user_data["biz_flow"] = {"kind": "gift_redeem"}
             await update.callback_query.edit_message_text(
                 "🎁 کد هدیه را ارسال کنید.",
