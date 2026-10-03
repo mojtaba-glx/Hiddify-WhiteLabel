@@ -3756,22 +3756,54 @@ async def handle_text(
             await update.effective_message.reply_text("✅ تنظیم یادآور ذخیره شد.",reply_markup=admin_main_keyboard()); return True
         if kind=="force_join_channel":
             business.set_userbot_setting_admin(actor,key="force_join_channel",value=text); context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ کانال عضویت اجباری ذخیره شد.",reply_markup=admin_main_keyboard()); return True
+        if kind=="payment_edit":
+            field=str(flow["field"])
+            mid=int(flow["method_id"])
+            kwargs: dict[str, Any] = {}
+            if field == "priority":
+                value=int(text.replace(",",""))
+                if value < 0:
+                    raise ValueError("payment priority")
+                kwargs[field]=value
+            elif field == "currency":
+                value=text.strip().upper()
+                if not 3 <= len(value) <= 8:
+                    raise ValueError("payment currency")
+                kwargs[field]=value
+            elif field == "network":
+                kwargs[field]="" if text in {"0","-","—"} else text
+            elif field == "instructions":
+                kwargs[field]="" if text in {"0","-","—"} else text
+            else:
+                kwargs[field]=text
+            business.update_payment_method_admin(
+                actor, method_id=mid, **kwargs
+            )
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text(
+                "✅ روش پرداخت ویرایش شد.",
+                reply_markup=admin_main_keyboard(),
+            )
+            return True
         if kind=="payment_add_title":
             if not text or len(text)>80: raise ValueError("payment title")
             flow["title"]=text; flow["kind"]="payment_add_currency"
-            await update.effective_message.reply_text("💱 ارز را وارد کنید؛ مثال IRR یا USDT:",reply_markup=userbot_cancel_keyboard()); return True
+            await update.effective_message.reply_text(
+                "💱 ارز را وارد کنید؛ مثال IRR یا USDT:",
+                reply_markup=userbot_cancel_keyboard(),
+            ); return True
         if kind=="payment_add_currency":
             currency=text.strip().upper()
             if not 3<=len(currency)<=8: raise ValueError("payment currency")
             flow["currency"]=currency; flow["kind"]="payment_add_destination"
             await update.effective_message.reply_text(
-                "📍 شماره کارت / آدرس کیف پول را وارد کنید:",
+                "📍 شماره کارت / آدرس کیف پول / مقصد Provider را وارد کنید:",
                 reply_markup=userbot_cancel_keyboard(),
             ); return True
         if kind=="payment_add_destination":
             if not text or len(text)>180: raise ValueError("payment destination")
             flow["destination"]=text
-            if str(flow["payment_kind"])=="crypto":
+            if bool(flow.get("requires_network")):
                 flow["kind"]="payment_add_network"
                 await update.effective_message.reply_text(
                     "🌐 نام شبکه را وارد کنید؛ مثال TRC20:",
@@ -3783,7 +3815,10 @@ async def handle_text(
                 reply_markup=userbot_cancel_keyboard(),
             ); return True
         if kind=="payment_add_network":
-            flow["network"]="" if text in {"0","-","—"} else text
+            network="" if text in {"0","-","—"} else text
+            if bool(flow.get("requires_network")) and not network:
+                raise ValueError("payment network")
+            flow["network"]=network
             flow["kind"]="payment_add_instructions"
             await update.effective_message.reply_text(
                 "📝 توضیحات پرداخت را وارد کنید یا 0 برای بدون توضیح:",
@@ -3792,9 +3827,14 @@ async def handle_text(
         if kind=="payment_add_instructions":
             instructions="" if text in {"0","-","—"} else text
             business.add_payment_method(
-                actor,kind=str(flow["payment_kind"]),title=str(flow["title"]),
-                currency=str(flow["currency"]),destination=str(flow["destination"]),
-                network=str(flow.get("network") or ""),instructions=instructions,
+                actor,
+                provider_key=str(flow["payment_provider"]),
+                kind=str(flow["payment_kind"]),
+                title=str(flow["title"]),
+                currency=str(flow["currency"]),
+                destination=str(flow["destination"]),
+                network=str(flow.get("network") or ""),
+                instructions=instructions,
             )
             context.user_data.pop(FLOW_KEY,None)
             await update.effective_message.reply_text(
