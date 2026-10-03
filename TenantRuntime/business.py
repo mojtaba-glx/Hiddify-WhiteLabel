@@ -2047,6 +2047,190 @@ class TenantBusinessService:
                 raise TenantBusinessError("gift voucher not found")
         return self.gift_voucher_admin(actor_id, voucher_id=int(voucher_id))
 
+    def rename_gift_voucher_admin(
+        self, actor_id: int, *, voucher_id: int, code: str
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        clean_code = str(code or "").strip().upper()
+        if not re.fullmatch(r"[A-Z0-9_-]{4,48}", clean_code):
+            raise ValueError("invalid gift voucher code")
+        duplicate = self.conn.execute(
+            "SELECT 1 FROM tenant_gift_vouchers "
+            "WHERE tenant_id=? AND code=? AND id<>?",
+            (self.tenant_id, clean_code, int(voucher_id)),
+        ).fetchone()
+        if duplicate is not None:
+            raise TenantBusinessError("gift voucher code already exists")
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_gift_vouchers SET code=?, updated_at=? "
+                "WHERE tenant_id=? AND id=?",
+                (
+                    clean_code,
+                    iso_utc(utcnow()),
+                    self.tenant_id,
+                    int(voucher_id),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("gift voucher not found")
+        return self.gift_voucher_admin(actor_id, voucher_id=int(voucher_id))
+
+    def set_gift_voucher_amount_admin(
+        self, actor_id: int, *, voucher_id: int, amount: int
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        value = int(amount)
+        if value <= 0:
+            raise ValueError("invalid gift voucher amount")
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_gift_vouchers SET amount=?, updated_at=? "
+                "WHERE tenant_id=? AND id=?",
+                (
+                    value,
+                    iso_utc(utcnow()),
+                    self.tenant_id,
+                    int(voucher_id),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("gift voucher not found")
+        return self.gift_voucher_admin(actor_id, voucher_id=int(voucher_id))
+
+    def set_gift_voucher_max_uses_admin(
+        self, actor_id: int, *, voucher_id: int, max_uses: int
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        limit = int(max_uses)
+        if limit <= 0:
+            raise ValueError("invalid gift voucher usage limit")
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_gift_vouchers SET max_uses=?, "
+                "status=CASE WHEN used_count>=? THEN 'disabled' ELSE 'active' END, "
+                "updated_at=? WHERE tenant_id=? AND id=?",
+                (
+                    limit,
+                    limit,
+                    iso_utc(utcnow()),
+                    self.tenant_id,
+                    int(voucher_id),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("gift voucher not found")
+        return self.gift_voucher_admin(actor_id, voucher_id=int(voucher_id))
+
+    def set_gift_voucher_expiry_hours_admin(
+        self, actor_id: int, *, voucher_id: int, hours: int
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        duration = int(hours)
+        if duration < 0:
+            raise ValueError("invalid gift voucher expiry")
+        expiry = (
+            None
+            if duration == 0
+            else iso_utc(utcnow() + timedelta(hours=duration))
+        )
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_gift_vouchers SET expires_at=?, "
+                "status=CASE WHEN used_count>=max_uses THEN 'disabled' ELSE 'active' END, "
+                "updated_at=? WHERE tenant_id=? AND id=?",
+                (
+                    expiry,
+                    iso_utc(utcnow()),
+                    self.tenant_id,
+                    int(voucher_id),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("gift voucher not found")
+        return self.gift_voucher_admin(actor_id, voucher_id=int(voucher_id))
+
+    def deactivate_unusable_gift_vouchers_admin(self, actor_id: int) -> int:
+        self._admin(actor_id)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_gift_vouchers SET status='disabled', updated_at=? "
+                "WHERE tenant_id=? AND status='active' "
+                "AND (used_count>=max_uses OR "
+                "(expires_at IS NOT NULL AND expires_at<=?))",
+                (now, self.tenant_id, now),
+            )
+        return max(0, int(changed.rowcount or 0))
+
+    def create_gift_vouchers_bulk_admin(
+        self,
+        actor_id: int,
+        *,
+        prefix: str,
+        count: int,
+        amount: int,
+        currency: str = "IRR",
+        expiry_hours: int = 0,
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        clean_prefix = str(prefix or "").strip().upper()
+        total = int(count)
+        value = int(amount)
+        hours = int(expiry_hours)
+        clean_currency = _text(currency, 8).upper()
+        if (
+            not re.fullmatch(r"[A-Z0-9_-]{2,24}", clean_prefix)
+            or not 1 <= total <= 200
+            or value <= 0
+            or hours < 0
+        ):
+            raise ValueError("invalid bulk gift voucher request")
+        expiry = (
+            None
+            if hours == 0
+            else iso_utc(utcnow() + timedelta(hours=hours))
+        )
+        now = iso_utc(utcnow())
+        created_ids: list[int] = []
+        with transaction(self.conn):
+            for _ in range(total):
+                for _attempt in range(30):
+                    code = f"{clean_prefix}-{secrets.token_hex(4).upper()}"
+                    try:
+                        cursor = self.conn.execute(
+                            "INSERT INTO tenant_gift_vouchers "
+                            "(tenant_id, code, amount, currency, max_uses, used_count, "
+                            "expires_at, status, created_at, updated_at) "
+                            "VALUES (?, ?, ?, ?, 1, 0, ?, 'active', ?, ?)",
+                            (
+                                self.tenant_id,
+                                code,
+                                value,
+                                clean_currency,
+                                expiry,
+                                now,
+                                now,
+                            ),
+                        )
+                    except sqlite3.IntegrityError:
+                        continue
+                    created_ids.append(int(cursor.lastrowid or 0))
+                    break
+                else:
+                    raise TenantBusinessError(
+                        "unique gift voucher code could not be generated"
+                    )
+        if not created_ids:
+            return []
+        placeholders = ",".join("?" for _ in created_ids)
+        rows = self.conn.execute(
+            f"SELECT * FROM tenant_gift_vouchers "
+            f"WHERE tenant_id=? AND id IN ({placeholders}) ORDER BY id",
+            (self.tenant_id, *created_ids),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def delete_gift_voucher_admin(
         self, actor_id: int, *, voucher_id: int
     ) -> None:
