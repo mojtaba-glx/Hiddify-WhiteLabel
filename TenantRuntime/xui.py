@@ -1122,6 +1122,58 @@ class XuiPanelAdapter:
                 raise PanelError("X-UI account state change could not be verified")
             return snapshot
 
+    def validate_identity_rotation(self, *, target: PanelTarget, secret: str,
+                                   external_ref: str) -> None:
+        with self._session(target, secret) as session:
+            pairs = _find_pairs(self._list_inbounds(session), external_ref)
+            if any(str(i.get("protocol") or "").lower() == "wireguard" for i, _ in pairs):
+                raise PanelError("WireGuard credential rotation is unsupported")
+            if self._existing(session, external_ref) is None:
+                raise PanelError("X-UI user was not found")
+
+    def rotate_identity(self, *, target: PanelTarget, secret: str,
+                        external_ref: str, new_ref: str) -> PanelUserResult:
+        with self._session(target, secret) as session:
+            inbounds = self._list_inbounds(session)
+            pairs = _find_pairs(inbounds, external_ref)
+            # A interrupted multi-inbound change resumes remaining old clients.
+            if any(str(i.get("protocol") or "").lower() == "wireguard"
+                   for i, _ in pairs):
+                raise PanelError("WireGuard credential rotation is unsupported")
+            if session.modern_clients:
+                client = self._find_sanaei_client(
+                    self._list_sanaei_clients(session), external_ref)
+                if client is not None:
+                    updated = _sanaei_update_payload(client)
+                    updated.update(uuid=new_ref, id=new_ref, subId=new_ref)
+                    for key in ("password", "auth"):
+                        if client.get(key):
+                            updated[key] = new_ref
+                    session.request("POST",
+                        f"clients/update/{quote(str(client.get('email') or ''), safe='')}",
+                        payload=updated)
+            else:
+                for inbound, client in pairs:
+                    protocol = str(inbound.get("protocol") or "").lower()
+                    route_id = _client_identity(client, protocol)
+                    updated = dict(client)
+                    updated["subId"] = new_ref
+                    for key in ("id", "uuid", "password", "auth"):
+                        if client.get(key):
+                            updated[key] = new_ref
+                    session.request("POST",
+                        f"inbounds/updateClient/{quote(route_id, safe='')}",
+                        payload={"id": _safe_int(inbound.get("id")),
+                                 "settings": json.dumps({"clients": [updated]})})
+            refreshed = self._list_inbounds(session)
+            if _find_pairs(refreshed, external_ref) or (session.modern_clients and
+                self._find_sanaei_client(self._list_sanaei_clients(session), external_ref) is not None):
+                raise PanelError("X-UI old credentials are still present")
+            result = self._existing(session, new_ref)
+            if result is None or result.external_ref != new_ref:
+                raise PanelError("X-UI credential rotation could not be verified")
+            return result
+
     def delete_user(
         self, *, target: PanelTarget, secret: str, external_ref: str
     ) -> None:

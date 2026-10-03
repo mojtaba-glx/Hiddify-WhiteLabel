@@ -495,6 +495,32 @@ class HiddifyPanelAdapter:
         current = self._set_enabled_raw(target, secret, external_ref, bool(enabled))
         return self._snapshot(target, external_ref, current)
 
+    def validate_identity_rotation(self, *, target: PanelTarget, secret: str,
+                                   external_ref: str) -> None:
+        self._get(target, secret, external_ref)
+
+    def rotate_identity(self, *, target: PanelTarget, secret: str,
+                        external_ref: str, new_ref: str) -> PanelUserResult:
+        # Retry the same desired UUID after a lost response, without re-creating
+        # a user or touching usage/quota/expiry fields.
+        try:
+            self._get(target, secret, external_ref)
+        except PanelError:
+            data = self._get(target, secret, new_ref)
+        else:
+            self._patch(target, secret, external_ref, {"uuid": new_ref})
+            data = self._get(target, secret, new_ref)
+        try:
+            self._get(target, secret, external_ref)
+        except PanelError:
+            pass
+        else:
+            raise PanelError("Hiddify old credentials are still present")
+        result = self._snapshot(target, new_ref, data)
+        if result.external_ref != new_ref:
+            raise PanelError("Hiddify credential rotation could not be verified")
+        return result
+
     def delete_user(
         self, *, target: PanelTarget, secret: str, external_ref: str
     ) -> None:
