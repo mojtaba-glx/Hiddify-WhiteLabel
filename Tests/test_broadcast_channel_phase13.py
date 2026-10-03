@@ -513,6 +513,98 @@ def test_channel_publish_failure_keeps_draft_for_retry(
     assert "❌ انتشار ناموفق بود" in message.sent[-1][0]
 
 
+
+def test_channel_cancel_returns_to_channel_manager_and_keeps_draft(
+    conn, factories, cipher
+):
+    service, _panel, _actor, _sid, _ = _service(
+        conn, factories, cipher
+    )
+    owner = service.owner_telegram_id
+    draft = {
+        "kind": "photo",
+        "text": "پست قبلی",
+        "file_id": "photo-id",
+        "buttons": [{
+            "text": "خرید",
+            "url": "https://example.com",
+            "style": "primary",
+        }],
+    }
+    message = FakeMessage(text="❌لغو")
+    update = SimpleNamespace(
+        effective_message=message,
+        callback_query=None,
+    )
+    context = SimpleNamespace(user_data={
+        phase13.CHANNEL_DRAFT_KEY: draft,
+        phase13.FLOW_KEY: {"kind": "channel_edit_text"},
+    })
+
+    handled = asyncio.run(
+        phase13.handle_text(
+            update,
+            context,
+            business=service,
+            actor=owner,
+            admin_main_keyboard=lambda: "ADMIN",
+        )
+    )
+    assert handled
+    assert phase13.FLOW_KEY not in context.user_data
+    assert context.user_data[phase13.CHANNEL_DRAFT_KEY] is draft
+    assert message.sent[0][0] == "❌ لغو شد."
+    assert any(
+        "📢 <b>مدیریت پست کانال</b>" in text
+        for text, _kwargs in message.sent
+    )
+
+
+def test_broadcast_media_caption_can_be_cleared_without_losing_draft(
+    conn, factories, cipher
+):
+    service, _panel, _actor, _sid, _ = _service(
+        conn, factories, cipher
+    )
+    owner = service.owner_telegram_id
+    draft = {
+        "segment": "all",
+        "kind": "photo",
+        "text": "کپشن قبلی",
+        "file_id": "photo-id",
+        "buttons": [{
+            "text": "ورود",
+            "url": "https://example.com",
+            "style": "primary",
+        }],
+    }
+    message = FakeMessage(text="0")
+    update = SimpleNamespace(
+        effective_message=message,
+        callback_query=None,
+    )
+    context = SimpleNamespace(user_data={
+        phase13.BROADCAST_DRAFT_KEY: draft,
+        phase13.FLOW_KEY: {"kind": "broadcast_edit_text"},
+    })
+
+    handled = asyncio.run(
+        phase13.handle_text(
+            update,
+            context,
+            business=service,
+            actor=owner,
+            admin_main_keyboard=lambda: "ADMIN",
+        )
+    )
+    assert handled
+    assert draft["text"] == ""
+    assert draft["kind"] == "photo"
+    assert draft["file_id"] == "photo-id"
+    assert draft["buttons"][0]["text"] == "ورود"
+    assert phase13.FLOW_KEY not in context.user_data
+
+
 def test_userbot_management_routes_all_phase13_input_types() -> None:
     source = open(
         "TenantRuntime/AdminBot/userbot_management.py",
