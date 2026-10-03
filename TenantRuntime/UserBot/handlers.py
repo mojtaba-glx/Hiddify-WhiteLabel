@@ -237,6 +237,39 @@ def _user_account_text(
     return "\n".join(lines)
 
 
+def _order_detail_text(order: dict[str, Any]) -> str:
+    operation = {
+        "purchase": "خرید",
+        "renewal": "تمدید",
+        "trial": "تست رایگان",
+    }.get(str(order.get("operation") or ""), "خرید")
+    amount = int(order.get("amount") or 0)
+    original = int(order.get("original_amount") or amount)
+    discount = int(order.get("discount_amount") or 0)
+    wallet = int(order.get("wallet_amount") or 0)
+    lines = [
+        f"🧾 سفارش #{order.get('id')}",
+        "",
+        f"نوع: {operation}",
+        f"پلن: {order.get('plan_name') or '-'}",
+        f"حجم پلن: {int(order.get('plan_traffic_gb') or 0)} گیگ",
+        f"مدت: {int(order.get('plan_duration_days') or 0)} روز",
+        f"وضعیت: {_order_status_label(order.get('status'))}",
+        f"مبلغ نهایی: {amount:,} {order.get('currency') or ''}",
+    ]
+    if original != amount or discount:
+        lines.append(f"مبلغ اولیه: {original:,} {order.get('currency') or ''}")
+    if discount:
+        lines.append(f"تخفیف: {discount:,} {order.get('currency') or ''}")
+    if wallet:
+        lines.append(f"پرداخت از کیف پول: {wallet:,} {order.get('currency') or ''}")
+    lines.extend([
+        f"ثبت سفارش: {_local_time_text(order.get('created_at'))}",
+        f"زمان پرداخت: {_local_time_text(order.get('paid_at')) if order.get('paid_at') else '-'}",
+    ])
+    return "\n".join(lines)
+
+
 def _wallet_text(summary: dict) -> str:
     accounts = list(summary.get("accounts") or [])
     history = list(summary.get("history") or [])
@@ -1501,51 +1534,85 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     settings = _set_button_settings(business.runtime_userbot_settings())
     try:
         if data == "shop:account":
-            summary = business.customer_account_summary(actor)
+            summary = business.customer_account_summary(actor, refresh=True)
             await update.callback_query.edit_message_text(
                 _user_account_text(summary, settings),
                 reply_markup=InlineKeyboardMarkup([
                     [
-                        InlineKeyboardButton("📦 اشتراک‌های من", callback_data="shop:subs"),
-                        InlineKeyboardButton("🧾 سفارش‌های من", callback_data="shop:orders"),
+                        InlineKeyboardButton(
+                            "🟢 سرویس‌های فعال",
+                            callback_data="shop:subs:active",
+                        ),
+                        InlineKeyboardButton(
+                            "🔴 منقضی‌شده‌ها",
+                            callback_data="shop:subs:expired",
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "📦 همه اشتراک‌ها",
+                            callback_data="shop:subs",
+                        ),
+                        InlineKeyboardButton(
+                            "🧾 سفارش‌های من",
+                            callback_data="shop:orders",
+                        ),
                     ],
                     [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
                 ]),
-            ); return
+            )
+            return
         if data == "shop:orders":
             items = business.list_customer_orders(actor, limit=15)
-            labels = {"purchase": "خرید", "renewal": "تمدید", "trial": "تست رایگان"}
             text = "🧾 سفارش‌های من\n" + (
                 "\n".join(
-                    f"• #{x['id']} · {labels.get(str(x.get('operation')), 'خرید')} · "
-                    f"{x.get('plan_name') or '-'} · {x.get('status')}\n"
-                    f"  {int(x.get('amount') or 0):,} {x.get('currency') or ''}"
-                    f"{' · تخفیف: '+format(int(x.get('discount_amount') or 0), ',') if int(x.get('discount_amount') or 0) else ''}"
-                    f"{' · پرداخت: ' + str(x.get('paid_at')) if x.get('paid_at') else ''}"
+                    f"• #{x['id']} · {x.get('plan_name') or '-'}\n"
+                    f"  {_order_status_label(x.get('status'))} · "
+                    f"{int(x.get('amount') or 0):,} {x.get('currency') or ''}"
                     for x in items
                 )
                 or "سفارشی ندارید."
             )
-            rows = []
-            for x in items:
-                if x["status"] == "paid":
-                    rows.append([InlineKeyboardButton(
-                        f"🔁 تلاش فعال‌سازی سفارش #{x['id']}",
-                        callback_data=f"shop:retryorder:{x['id']}",
-                    )])
-                elif x["status"] == "pending_payment":
-                    rows.append([InlineKeyboardButton(
-                        f"❌ لغو سفارش #{x['id']}",
-                        callback_data=f"shop:cancelorder:{x['id']}",
-                    )])
+            rows = [
+                [InlineKeyboardButton(
+                    f"🧾 جزئیات سفارش #{x['id']}",
+                    callback_data=f"shop:order:{x['id']}",
+                )]
+                for x in items
+            ]
             rows.extend([
-                [InlineKeyboardButton("👤 حساب من", callback_data="shop:account")],
+                [InlineKeyboardButton("👤 پروفایل", callback_data="shop:account")],
                 [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
             ])
             await update.callback_query.edit_message_text(
                 text,
                 reply_markup=InlineKeyboardMarkup(rows),
-            ); return
+            )
+            return
+
+        if data.startswith("shop:order:"):
+            order_id = int(data.rsplit(":", 1)[1])
+            order = business.customer_order(actor, order_id=order_id)
+            rows = []
+            if order["status"] == "paid":
+                rows.append([InlineKeyboardButton(
+                    f"🔁 تلاش فعال‌سازی سفارش #{order_id}",
+                    callback_data=f"shop:retryorder:{order_id}",
+                )])
+            elif order["status"] == "pending_payment":
+                rows.append([InlineKeyboardButton(
+                    f"❌ لغو سفارش #{order_id}",
+                    callback_data=f"shop:cancelorder:{order_id}",
+                )])
+            rows.extend([
+                [InlineKeyboardButton("🔙 سفارش‌های من", callback_data="shop:orders")],
+                [InlineKeyboardButton("🏠 منو", callback_data="runtime:home")],
+            ])
+            await update.callback_query.edit_message_text(
+                _order_detail_text(order),
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
         if data.startswith("shop:retryorder:"):
             order_id = int(data.rsplit(":", 1)[1])
             result = business.retry_own_paid_order(actor, order_id=order_id)
