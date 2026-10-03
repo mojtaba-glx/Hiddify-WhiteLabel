@@ -8,7 +8,7 @@
 - Added AdminBot pending/open/closed ticket buckets, threaded detail view, text/photo reply preview, edit, send, close and reopen controls.
 - Stored ticket images as Tenant-scoped media so separate AdminBot/UserBot tokens can review and deliver attachments reliably.
 - Kept `ticket_panel_text` as the real support-panel text source and restored SellBot-style FAQ / my tickets / create ticket navigation.
-- Added migration `0027_ticket_phase12` and regression coverage for message/media lifecycle, status transitions, tenant isolation and UI wiring.
+- Added migration `0028_ticket_phase12` and regression coverage for message/media lifecycle, status transitions, tenant isolation and UI wiring.
 
 ## v0.30.0 — Tenant payment architecture
 
