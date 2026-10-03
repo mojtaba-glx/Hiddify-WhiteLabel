@@ -104,6 +104,8 @@ class PanelAdapter(Protocol):
     def download_backup(self, *, target: PanelTarget, secret: str): ...
     def inspect_connection(self, *, target: PanelTarget, secret: str) -> dict: ...
 
+    def server_stats(self, *, target: PanelTarget, secret: str) -> dict: ...
+
     def list_users(self, *, target: PanelTarget, secret: str) -> list[dict]: ...
 
     def update_user(self, *, target: PanelTarget, secret: str,
@@ -151,6 +153,10 @@ class UnconfiguredPanelAdapter:
     @staticmethod
     def _fail() -> None:
         raise PanelError("panel adapter is not configured")
+
+    def server_stats(self, *, target: PanelTarget, secret: str) -> dict:
+        del target, secret
+        self._fail()
 
     def provision(
         self, *, target: PanelTarget, secret: str, request: ProvisionRequest
@@ -230,6 +236,15 @@ class RoutedPanelAdapter:
         if not callable(method):
             raise PanelError("panel user inventory is unavailable")
         return method(target=target, secret=secret)
+
+    def server_stats(self, *, target: PanelTarget, secret: str) -> dict:
+        method = getattr(self._adapter(target), "server_stats", None)
+        if not callable(method):
+            raise PanelError("panel server status is unavailable")
+        data = method(target=target, secret=secret)
+        if not isinstance(data, dict):
+            raise PanelError("panel server status is invalid")
+        return data
 
     def download_backup(self, *, target: PanelTarget, secret: str):
         method = getattr(self._adapter(target), "download_backup", None)

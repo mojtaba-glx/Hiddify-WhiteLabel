@@ -763,6 +763,199 @@ class XnetPanelAdapter:
                     session.request("POST", path + "/reset-traffic")
             return self._snapshot(session, external_ref, inbounds=self._inbounds(session))
 
+    def server_stats(self, *, target: PanelTarget, secret: str) -> dict:
+        """SellBot-compatible X-NET system, traffic and presence statistics."""
+        try:
+            users = self.list_users(target=target, secret=secret)
+        except PanelError:
+            users = []
+
+        now = datetime.now(timezone.utc)
+        users_online = 0
+        users_today = 0
+        users_month = 0
+        for user in users:
+            if not isinstance(user, dict):
+                continue
+            online = bool(user.get("online"))
+            if online:
+                users_online += 1
+                users_today += 1
+                users_month += 1
+                continue
+            seen = _parse_dt(user.get("last_online"))
+            if seen is None:
+                continue
+            age = max(0.0, (now - seen).total_seconds())
+            if age <= 86400:
+                users_today += 1
+            if age <= 30 * 86400:
+                users_month += 1
+
+        def _number(value: Any, default: float = 0.0) -> float:
+            try:
+                return float(value if value is not None else default)
+            except (TypeError, ValueError):
+                return float(default)
+
+        metrics: dict[str, Any] = {}
+        traffic: dict[str, Any] = {}
+        analytics: dict[str, Any] = {}
+        realtime_down = 0.0
+        realtime_up = 0.0
+        try:
+            with self._session(target, secret) as session:
+                try:
+                    raw = session.request("GET", "/api/metrics")
+                    metrics = dict(raw) if isinstance(raw, dict) else {}
+                except PanelError:
+                    metrics = {}
+                try:
+                    raw = session.request("GET", "/api/traffic/singbox/summary")
+                    traffic = dict(raw) if isinstance(raw, dict) else {}
+                except PanelError:
+                    traffic = {}
+                try:
+                    start = datetime.fromtimestamp(
+                        now.timestamp() - 30 * 86400,
+                        tz=timezone.utc,
+                    )
+                    raw = session.request(
+                        "GET",
+                        "/api/traffic/singbox/analytics",
+                        params={
+                            "from": start.isoformat().replace("+00:00", "Z"),
+                            "to": now.isoformat().replace("+00:00", "Z"),
+                        },
+                    )
+                    analytics = dict(raw) if isinstance(raw, dict) else {}
+                except PanelError:
+                    analytics = {}
+                try:
+                    tick = session.request("GET", "/api/metrics/tick")
+                    network = (
+                        tick.get("networkTraffic")
+                        if isinstance(tick, dict)
+                        and isinstance(tick.get("networkTraffic"), dict)
+                        else {}
+                    )
+                    realtime_down = max(0.0, _number(network.get("down"), 0.0))
+                    realtime_up = max(0.0, _number(network.get("up"), 0.0))
+                except PanelError:
+                    try:
+                        live = session.request(
+                            "GET", "/api/traffic/singbox/realtime"
+                        )
+                        rows = (
+                            live.get("clients")
+                            if isinstance(live, dict)
+                            and isinstance(live.get("clients"), list)
+                            else []
+                        )
+                        download_rate = 0.0
+                        upload_rate = 0.0
+                        for row in rows:
+                            if not isinstance(row, dict):
+                                continue
+                            download_rate += max(
+                                0.0, _number(row.get("downloadRate"), 0.0)
+                            )
+                            upload_rate += max(
+                                0.0, _number(row.get("uploadRate"), 0.0)
+                            )
+                        realtime_down = download_rate / float(1024 ** 2)
+                        realtime_up = upload_rate / float(1024 ** 2)
+                    except PanelError:
+                        pass
+        except PanelError:
+            pass
+
+        ram = (
+            metrics.get("ramUsage")
+            if isinstance(metrics.get("ramUsage"), dict)
+            else {}
+        )
+        storage = (
+            metrics.get("storageUsage")
+            if isinstance(metrics.get("storageUsage"), dict)
+            else {}
+        )
+        total_upload = max(0, _safe_int(traffic.get("totalUpload"), 0))
+        total_download = max(0, _safe_int(traffic.get("totalDownload"), 0))
+        today_upload = max(0, _safe_int(traffic.get("todayUpload"), 0))
+        today_download = max(0, _safe_int(traffic.get("todayDownload"), 0))
+
+        period_bytes = 0
+        active_period_ids: set[str] = set()
+        consumers = analytics.get("consumers")
+        if isinstance(consumers, list):
+            for row in consumers:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("kind") or "vpn").strip().lower() == "ssh":
+                    continue
+                if "periodTotal" in row:
+                    used = max(0, _safe_int(row.get("periodTotal"), 0))
+                else:
+                    used = max(
+                        0,
+                        _safe_int(row.get("periodUpload"), 0)
+                        + _safe_int(row.get("periodDownload"), 0),
+                    )
+                period_bytes += used
+                if used > 0:
+                    identity = str(
+                        row.get("clientId")
+                        or row.get("client_id")
+                        or row.get("uuid")
+                        or row.get("username")
+                        or ""
+                    ).strip()
+                    if identity:
+                        active_period_ids.add(identity)
+        elif "periodTotal" in analytics:
+            period_bytes = max(0, _safe_int(analytics.get("periodTotal"), 0))
+        elif "periodUpload" in analytics or "periodDownload" in analytics:
+            period_bytes = max(
+                0,
+                _safe_int(analytics.get("periodUpload"), 0)
+                + _safe_int(analytics.get("periodDownload"), 0),
+            )
+
+        if active_period_ids:
+            users_month = max(users_month, len(active_period_ids))
+        metrics_online = _safe_int(
+            metrics.get("onlineUsersCount"),
+            _safe_int(traffic.get("activeClients"), users_online),
+        )
+        users_online = max(users_online, metrics_online)
+        users_today = max(users_today, users_online)
+        users_month = max(users_month, users_online)
+
+        gib = float(1024 ** 3)
+        return {
+            "cpu_percent": _number(metrics.get("cpuUsage"), 0.0),
+            "cpu_cores": max(1, _safe_int(metrics.get("cpuCores"), 1)),
+            "ram_used": _number(ram.get("used"), 0.0),
+            "ram_total": max(1.0, _number(ram.get("total"), 1.0)),
+            "disk_used": _number(storage.get("used"), 0.0),
+            "disk_total": max(1.0, _number(storage.get("total"), 1.0)),
+            "users_total": len(users),
+            "users_online": users_online,
+            "users_today": users_today,
+            "users_month": users_month,
+            "usage_today_gb": (today_upload + today_download) / gib,
+            "usage_30days_gb": (
+                period_bytes / gib
+                if period_bytes > 0
+                else (total_upload + total_download) / gib
+            ),
+            "traffic_dl": total_download / gib,
+            "traffic_ul": total_upload / gib,
+            "now_net_recv_mb": realtime_down,
+            "now_net_sent_mb": realtime_up,
+        }
+
     def inspect_connection(self, *, target: PanelTarget, secret: str) -> dict:
         with self._session(target, secret) as session:
             inbounds = self._inbounds(session)
