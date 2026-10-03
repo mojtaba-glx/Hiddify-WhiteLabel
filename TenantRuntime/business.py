@@ -6240,10 +6240,13 @@ class TenantBusinessService:
                 (self.tenant_id, int(customer["id"])),
             ).fetchall()
         )
-        pending_orders = self.conn.execute(
-            "SELECT COUNT(*) FROM tenant_orders "
-            "WHERE tenant_id=? AND customer_id=? "
-            "AND status IN ('pending_payment','payment_review','paid')",
+        order_counts = self.conn.execute(
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN status IN ('pending_payment','payment_review','paid') "
+            "THEN 1 ELSE 0 END) AS pending, "
+            "SUM(CASE WHEN status='fulfilled' THEN 1 ELSE 0 END) AS fulfilled, "
+            "SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END) AS cancelled "
+            "FROM tenant_orders WHERE tenant_id=? AND customer_id=?",
             (self.tenant_id, int(customer["id"])),
         ).fetchone()
         return {
@@ -6255,7 +6258,10 @@ class TenantBusinessService:
                 "pending": int(counts["pending"] or 0),
             },
             "paid_totals": paid_totals,
-            "pending_orders": int(pending_orders[0] or 0),
+            "pending_orders": int(order_counts["pending"] or 0),
+            "orders_total": int(order_counts["total"] or 0),
+            "fulfilled_orders": int(order_counts["fulfilled"] or 0),
+            "cancelled_orders": int(order_counts["cancelled"] or 0),
         }
 
     def list_customer_orders(
