@@ -364,9 +364,48 @@ stop_services() {
     run_systemctl stop "$MASTER_UNIT" || true
 }
 
+active_runtime_units() {
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        return 0
+    fi
+    systemctl list-units --type=service --state=active --full --no-legend 'hiddify-whitelabel-runtime@*.service' 2>/dev/null | awk '{print $1}' | grep -E '^hiddify-whitelabel-runtime@[0-9]+\.service$' || true
+}
+
 restart_services() {
-    stop_services
-    start_services
+    local unit
+
+    echo "Restarting WhiteLabel bots..."
+    run_systemctl daemon-reload
+
+    echo "  - MasterBot"
+    run_systemctl restart "$MASTER_UNIT"
+
+    while IFS= read -r unit; do
+        [[ -n "$unit" ]] || continue
+        echo "  - $unit"
+        run_systemctl restart "$unit"
+    done < <(
+        {
+            runtime_units
+            active_runtime_units
+        } | sort -u
+    )
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo "DRY-RUN: health check after restart"
+        return 0
+    fi
+
+    sleep 2
+    if health_services; then
+        echo "OK: all WhiteLabel bots restarted successfully."
+        status_services
+        return 0
+    fi
+
+    echo "ERROR: one or more WhiteLabel services failed after restart." >&2
+    status_services
+    return 1
 }
 
 enable_services() {
