@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.30.0 — Tenant payment architecture
+
+- Unified Tenant card-to-card, Crypto, wallet checkout and wallet-topup payment status under one payment history/review model.
+- Added a provider registry boundary so UserBot renders payment methods generically instead of branching on individual providers.
+- Added provider metadata, priority and safe method editing/removal while preserving old payment receipts and installed databases.
+- Added unified AdminBot approve/reject handling for both order receipts and wallet-topup receipts, with review notes and payment audit events.
+- Added UserBot payment-status history for manual receipts and direct wallet payments without changing the persistent main-menu layout.
+- Added migration `0025_payment_phase11` and regression coverage for provider extension, wallet review, payment status and safe method lifecycle.
+
 ## v0.20.0 — Referral parity
 
 - Completed referral management across Tenant AdminBot and UserBot using the proven Hiddify-SellBot behavior.
