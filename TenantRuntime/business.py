@@ -1431,7 +1431,7 @@ class TenantBusinessService:
                 current["referral_invite_text"]
                 if referral_invite_text is None
                 else referral_invite_text
-            ).strip() or DEFAULT_REFERRAL_INVITE_TEXT,
+            ).strip(),
             "trial_enabled": int(
                 bool(current["trial_enabled"])
                 if trial_enabled is None
@@ -6535,10 +6535,15 @@ class TenantBusinessService:
     def referral_rewards_admin(self, actor_id: int) -> list[dict[str, Any]]:
         self._admin(actor_id)
         rows = self.conn.execute(
-            "SELECT rw.id, rw.referral_id, rw.inviter_customer_id, "
-            "rw.invitee_customer_id, rw.reward_type, rw.amount, rw.currency, "
-            "rw.order_id, rw.status, rw.created_at, 'automatic' AS source, "
-            "i.display_name AS inviter_name, e.display_name AS invitee_name "
+            "SELECT * FROM ("
+            "SELECT rw.id AS id, rw.referral_id AS referral_id, "
+            "rw.inviter_customer_id AS inviter_customer_id, "
+            "rw.invitee_customer_id AS invitee_customer_id, "
+            "rw.reward_type AS reward_type, rw.amount AS amount, "
+            "rw.currency AS currency, rw.order_id AS order_id, "
+            "rw.status AS status, rw.created_at AS created_at, "
+            "'automatic' AS source, i.display_name AS inviter_name, "
+            "e.display_name AS invitee_name "
             "FROM tenant_referral_rewards rw "
             "JOIN tenant_customers i ON i.id=rw.inviter_customer_id "
             "AND i.tenant_id=rw.tenant_id "
@@ -6546,14 +6551,18 @@ class TenantBusinessService:
             "AND e.tenant_id=rw.tenant_id "
             "WHERE rw.tenant_id=? "
             "UNION ALL "
-            "SELECT mr.id, NULL AS referral_id, mr.customer_id AS inviter_customer_id, "
-            "0 AS invitee_customer_id, 'manual' AS reward_type, mr.amount, "
-            "mr.currency, NULL AS order_id, 'paid' AS status, mr.created_at, "
-            "'manual' AS source, c.display_name AS inviter_name, NULL AS invitee_name "
+            "SELECT mr.id AS id, NULL AS referral_id, "
+            "mr.customer_id AS inviter_customer_id, "
+            "0 AS invitee_customer_id, 'manual' AS reward_type, "
+            "mr.amount AS amount, mr.currency AS currency, "
+            "NULL AS order_id, 'paid' AS status, mr.created_at AS created_at, "
+            "'manual' AS source, c.display_name AS inviter_name, "
+            "NULL AS invitee_name "
             "FROM tenant_referral_manual_rewards mr "
             "JOIN tenant_customers c ON c.id=mr.customer_id "
             "AND c.tenant_id=mr.tenant_id "
-            "WHERE mr.tenant_id=? ORDER BY created_at DESC, id DESC LIMIT 500",
+            "WHERE mr.tenant_id=?"
+            ") ORDER BY created_at DESC, id DESC LIMIT 500",
             (self.tenant_id, self.tenant_id),
         ).fetchall()
         return [dict(row) for row in rows]
