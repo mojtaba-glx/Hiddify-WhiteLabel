@@ -47,6 +47,38 @@ SEGMENT_LABELS = {
 }
 
 
+GIFT_CAMPAIGN_PRESETS: dict[str, dict[str, Any]] = {
+    "welcome": {
+        "title": "🎁 خوش‌آمدگویی",
+        "prefix": "WELCOME",
+        "amount": 30000,
+        "max_uses": 100,
+        "hours": 168,
+    },
+    "festival": {
+        "title": "🔥 جشنواره فروش",
+        "prefix": "FEST",
+        "amount": 50000,
+        "max_uses": 300,
+        "hours": 48,
+    },
+    "vip": {
+        "title": "💎 مشتری وفادار",
+        "prefix": "VIP",
+        "amount": 100000,
+        "max_uses": 50,
+        "hours": 72,
+    },
+    "winback": {
+        "title": "🕒 بازگشت کاربر",
+        "prefix": "BACK",
+        "amount": 40000,
+        "max_uses": 150,
+        "hours": 120,
+    },
+}
+
+
 def userbot_cancel_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [[KeyboardButton("❌لغو")]],
@@ -757,6 +789,26 @@ async def _send_coupon_detail(update: Update, business: Any, actor: int, coupon_
             "⏸ خاموش کردن کوپن" if item["status"] == "active" else "▶️ روشن کردن کوپن",
             callback_data=f"userbot:gifts:coupon:toggle:{coupon_id}",
         )],
+        [
+            InlineKeyboardButton(
+                "✏️ ویرایش کد",
+                callback_data=f"userbot:gifts:coupon:set_code:{coupon_id}",
+            ),
+            InlineKeyboardButton(
+                "🎁 ویرایش مبلغ",
+                callback_data=f"userbot:gifts:coupon:set_amount:{coupon_id}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "👥 ویرایش سقف مصرف",
+                callback_data=f"userbot:gifts:coupon:set_limit:{coupon_id}",
+            ),
+            InlineKeyboardButton(
+                "🕒 ویرایش انقضا",
+                callback_data=f"userbot:gifts:coupon:set_exp:{coupon_id}",
+            ),
+        ],
         [InlineKeyboardButton("📜 گزارش مصرف این کوپن", callback_data=f"userbot:gifts:redemptions:{coupon_id}")],
         [InlineKeyboardButton("📣 متن تبلیغ همین کوپن", callback_data=f"userbot:gifts:coupon:campaign:{coupon_id}")],
         [InlineKeyboardButton("🗑 حذف کوپن", callback_data=f"userbot:gifts:coupon:delete:{coupon_id}")],
@@ -1960,18 +2012,18 @@ async def handle_callback(
         stats=_gift_stats(business,actor)
         await _edit_or_send(update,
             "🛡 کنترل سوءاستفاده هدایا\n"
-            "◈ هر سفارش فقط یک redemption ثبت می‌کند.\n"
-            "◈ سقف کل مصرف و سقف هر مشتری در دیتابیس enforce می‌شود.\n"
-            "◈ تاریخ شروع/انقضا قبل از اعمال کوپن کنترل می‌شود.\n"
+            "◈ هر کاربر هر کد هدیه را فقط یک‌بار می‌تواند مصرف کند.\n"
+            "◈ سقف کل مصرف هر کد در دیتابیس enforce می‌شود.\n"
+            "◈ انقضا و تکمیل ظرفیت قبل از شارژ کیف پول کنترل می‌شود.\n"
             f"🟢 فعال: {stats['active']} · ⏰ منقضی: {stats['expired']} · 🔒 تکمیل ظرفیت: {stats['full']}",
             InlineKeyboardMarkup([[InlineKeyboardButton("🔙بازگشت",callback_data="userbot:gifts_menu")]])
         ); return True
     if data == "userbot:gifts:help":
         await _edit_or_send(update,
             "📘 راهنمای مدیریت هدایا\n"
-            "1) کوپن درصدی یا مبلغ ثابت بسازید.\n"
-            "2) max uses و محدودیت هر مشتری در سطح دیتابیس کنترل می‌شود.\n"
-            "3) گزارش مصرف نشان می‌دهد چه کسی از کدام کوپن استفاده کرده است.\n"
+            "1) کد هدیه کیف پول با مبلغ، سقف مصرف و انقضا بسازید.\n"
+            "2) هر کاربر هر کد را فقط یک‌بار می‌تواند مصرف کند.\n"
+            "3) گزارش مصرف نشان می‌دهد چه کسی از کدام کد استفاده کرده است.\n"
             "4) برای کمپین عمومی ظرفیت و تاریخ انقضای محدود انتخاب کنید.",
             InlineKeyboardMarkup([[InlineKeyboardButton("🔙بازگشت",callback_data="userbot:gifts_menu")]])
         ); return True
