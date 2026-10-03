@@ -244,6 +244,78 @@ def test_percent_coupon_applies_once_and_rejection_releases_usage(
     assert int(reused["amount"]) == 80000
 
 
+def test_admin_coupon_edits_drive_checkout_limits_and_reports(
+    conn, factories, cipher
+) -> None:
+    _tenant, service, _panel, plan, _method, _user = _setup(
+        conn, factories, cipher
+    )
+    service.register_customer(
+        7202, display_name="Coupon B", username="coupon_b"
+    )
+    service.register_customer(
+        7303, display_name="Coupon C", username="coupon_c"
+    )
+    coupon = service.add_coupon(
+        7001,
+        code="OLD10",
+        discount_kind="percent",
+        value=10,
+        max_uses=0,
+        per_customer_limit=0,
+    )
+    updated = service.update_coupon_admin(
+        7001,
+        coupon_id=int(coupon["id"]),
+        code="SAVE25",
+        value=25,
+        max_uses=2,
+        per_customer_limit=1,
+        expires_at=iso_utc(utcnow() + timedelta(days=2)),
+    )
+    assert updated["code"] == "SAVE25"
+    assert int(updated["value"]) == 25
+    assert int(updated["max_uses"]) == 2
+    assert int(updated["per_customer_limit"]) == 1
+    assert parse_utc(str(updated["expires_at"])) > utcnow()
+
+    order_a = service.create_order(7101, int(plan["id"]))
+    applied_a = service.apply_coupon(
+        7101, order_id=int(order_a["id"]), code="save25"
+    )
+    assert int(applied_a["discount_amount"]) == 25000
+    assert int(applied_a["amount"]) == 75000
+
+    second_a = service.create_order(7101, int(plan["id"]))
+    with pytest.raises(TenantBusinessError):
+        service.apply_coupon(
+            7101, order_id=int(second_a["id"]), code="SAVE25"
+        )
+
+    order_b = service.create_order(7202, int(plan["id"]))
+    service.apply_coupon(7202, order_id=int(order_b["id"]), code="SAVE25")
+    assert len(
+        service.list_coupon_redemptions_admin(
+            7001, coupon_id=int(coupon["id"])
+        )
+    ) == 2
+
+    order_c = service.create_order(7303, int(plan["id"]))
+    with pytest.raises(TenantBusinessError):
+        service.apply_coupon(
+            7303, order_id=int(order_c["id"]), code="SAVE25"
+        )
+
+    cleared = service.update_coupon_admin(
+        7001,
+        coupon_id=int(coupon["id"]),
+        expires_at="0",
+    )
+    assert cleared["expires_at"] is None
+    with pytest.raises(TenantBusinessError):
+        service.delete_coupon_admin(7001, coupon_id=int(coupon["id"]))
+
+
 def test_fixed_coupon_checks_currency_and_limits(
     conn, factories, cipher
 ) -> None:
