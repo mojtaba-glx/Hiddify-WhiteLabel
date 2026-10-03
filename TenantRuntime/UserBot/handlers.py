@@ -2203,16 +2203,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     "📦 همه اشتراک‌ها",
                     callback_data="shop:subs",
                 )],
-                [
-                    InlineKeyboardButton(
-                        "👤 پروفایل",
-                        callback_data="shop:account",
-                    ),
-                    InlineKeyboardButton(
-                        "📊 وضعیت",
-                        callback_data="runtime:status",
-                    ),
-                ],
+            ])
+            navigation_row = [
+                InlineKeyboardButton(
+                    "👤 پروفایل",
+                    callback_data="shop:account",
+                )
+            ]
+            if bool(settings.get("show_user_status", True)):
+                navigation_row.append(InlineKeyboardButton(
+                    "📊 وضعیت",
+                    callback_data="runtime:status",
+                ))
+            rows.extend([
+                navigation_row,
                 [InlineKeyboardButton("🏠 منو", callback_data="runtime:home")],
             ])
             await update.callback_query.edit_message_text(
