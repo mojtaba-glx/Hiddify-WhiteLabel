@@ -3103,53 +3103,199 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     back_label="↩️ اشتراک‌های من",
                 ),
             ); return
-        if data == "shop:tickets":
+        if data == "shop:support":
             items = business.list_tickets(actor)
-            text = _ticket_panel_body(settings, items)
-            rows = [
-                [InlineKeyboardButton(
-                    f"🎫 #{x['id']} · {x['subject']}"[:60],
-                    callback_data=f"shop:ticket:{x['id']}",
-                )]
-                for x in items[:15]
-            ]
-            rows.extend([
-                [InlineKeyboardButton("➕ تیکت جدید", callback_data="shop:newticket")],
-                [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
-            ])
             await update.callback_query.edit_message_text(
-                text, reply_markup=InlineKeyboardMarkup(rows)
-            ); return
-        if data == "shop:newticket":
-            context.user_data["biz_flow"] = {"kind": "ticket"}
-            await update.callback_query.edit_message_text(
-                "موضوع | متن تیکت را ارسال کنید.",
+                _ticket_panel_body(settings, items),
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("↩️ تیکت‌های من", callback_data="shop:tickets")]
-                ]),
-            ); return
-        if data.startswith("shop:ticket:"):
-            ticket_id = int(data.rsplit(":", 1)[1])
-            ticket = next(
-                (
-                    x for x in business.list_tickets(actor)
-                    if int(x["id"]) == ticket_id
-                ),
-                None,
-            )
-            if ticket is None:
-                raise TenantBusinessError("ticket not found")
-            await update.callback_query.edit_message_text(
-                f"🎫 تیکت #{ticket_id}\n"
-                f"وضعیت: {ticket['status']}\n"
-                f"موضوع: {ticket['subject']}\n\n"
-                f"پیام شما:\n{ticket['body']}\n\n"
-                f"پاسخ پشتیبانی:\n{ticket.get('admin_reply') or 'هنوز پاسخی ثبت نشده است.'}",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("↩️ تیکت‌های من", callback_data="shop:tickets")],
+                    [InlineKeyboardButton("❗️سوالات متداول", callback_data="shop:faq")],
+                    [InlineKeyboardButton("📬تیکت‌های من", callback_data="shop:tickets")],
+                    [InlineKeyboardButton("📩ایجاد تیکت", callback_data="shop:newticket")],
                     [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
                 ]),
-            ); return
+            )
+            return
+        if data == "shop:tickets":
+            items = business.list_tickets(actor)
+            rows = [
+                [InlineKeyboardButton(
+                    f"🎫 #{int(x['id'])} · {_ticket_status_label(x.get('status'))} · {x['subject']}"[:64],
+                    callback_data=f"shop:ticket:{int(x['id'])}",
+                )]
+                for x in items[:30]
+            ]
+            if not rows:
+                rows.append([InlineKeyboardButton("تیکتی ثبت نشده است", callback_data="noop")])
+            rows.extend([
+                [InlineKeyboardButton("📩ایجاد تیکت", callback_data="shop:newticket")],
+                [InlineKeyboardButton("🔙 پنل پشتیبانی", callback_data="shop:support")],
+            ])
+            await update.callback_query.edit_message_text(
+                "📬 تیکت‌های من",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+        if data == "shop:newticket":
+            context.user_data["biz_flow"] = {
+                "kind": "ticket_new_title",
+                "subject": "",
+                "body": "",
+                "photo_file_id": "",
+            }
+            await update.callback_query.edit_message_text(
+                "✍️ لطفا موضوع درخواست خود را ارسال نمایید:",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌لغو", callback_data="shop:ticketflow:new:cancel")
+                ]]),
+            )
+            return
+        if data.startswith("shop:ticketflow:"):
+            parts = data.split(":")
+            mode = parts[2] if len(parts) > 2 else ""
+            action = parts[3] if len(parts) > 3 else ""
+            if mode not in {"new", "reply"}:
+                raise TenantBusinessError("invalid ticket flow")
+            flow = context.user_data.get("biz_flow")
+            if not isinstance(flow, dict):
+                raise TenantBusinessError("ticket flow is not active")
+            if action == "cancel":
+                context.user_data.pop("biz_flow", None)
+                await update.callback_query.edit_message_text(
+                    "❌ عملیات تیکت لغو شد.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 پنل پشتیبانی", callback_data="shop:support")
+                    ]]),
+                )
+                return
+            if action == "edit":
+                if mode == "new":
+                    flow.update(
+                        kind="ticket_new_title",
+                        subject="",
+                        body="",
+                        photo_file_id="",
+                    )
+                    prompt = "✍️ لطفا موضوع درخواست خود را ارسال نمایید:"
+                else:
+                    ticket_id = int(flow.get("ticket_id") or 0)
+                    flow.update(
+                        kind="ticket_reply_text",
+                        ticket_id=ticket_id,
+                        reply_text="",
+                        photo_file_id="",
+                    )
+                    prompt = "✍️ لطفا پاسخ خود را به صورت کامل ارسال نمایید:"
+                await update.effective_message.reply_text(
+                    prompt,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "❌لغو",
+                            callback_data=f"shop:ticketflow:{mode}:cancel",
+                        )
+                    ]]),
+                )
+                return
+            if action == "skip":
+                expected = "ticket_new_photo" if mode == "new" else "ticket_reply_photo"
+                if flow.get("kind") != expected:
+                    raise TenantBusinessError("ticket photo step is not active")
+                flow["photo_file_id"] = ""
+                flow["kind"] = "ticket_new_confirm" if mode == "new" else "ticket_reply_confirm"
+                await _show_ticket_preview(update, context, flow, mode=mode)
+                return
+            if action == "send":
+                expected = "ticket_new_confirm" if mode == "new" else "ticket_reply_confirm"
+                if flow.get("kind") != expected:
+                    raise TenantBusinessError("ticket confirmation is not active")
+                media = b""
+                file_id = str(flow.get("photo_file_id") or "").strip()
+                if file_id:
+                    media = await _ticket_media_bytes(context, file_id)
+                if mode == "new":
+                    ticket = business.create_ticket(
+                        actor,
+                        subject=str(flow.get("subject") or ""),
+                        body=str(flow.get("body") or ""),
+                        media=media or None,
+                        media_mime="image/jpeg" if media else "",
+                    )
+                    success = "✅ تیکت شما با موفقیت ثبت شد.\nبه زودی پاسخ داده می‌شود."
+                    event = "new"
+                else:
+                    ticket_id = int(flow.get("ticket_id") or 0)
+                    ticket = business.reply_ticket(
+                        actor,
+                        ticket_id=ticket_id,
+                        reply=str(flow.get("reply_text") or ""),
+                        media=media or None,
+                        media_mime="image/jpeg" if media else "",
+                    )
+                    success = "✅ پاسخ شما ثبت شد."
+                    event = "reply"
+                context.user_data.pop("biz_flow", None)
+                await _notify_admin_ticket(business, ticket=ticket, event=event)
+                messages = business.ticket_messages(actor, ticket_id=int(ticket["id"]))
+                await update.effective_message.reply_text(
+                    success + "\n\n" + _ticket_thread_text(ticket, messages),
+                    reply_markup=_ticket_detail_markup(ticket, messages),
+                )
+                return
+            raise TenantBusinessError("invalid ticket action")
+        if data.startswith("shop:ticketreply:"):
+            ticket_id = int(data.rsplit(":", 1)[1])
+            ticket = business.ticket(actor, ticket_id=ticket_id)
+            if str(ticket.get("status") or "") == "closed":
+                raise TenantBusinessError("ticket is closed")
+            context.user_data["biz_flow"] = {
+                "kind": "ticket_reply_text",
+                "ticket_id": ticket_id,
+                "reply_text": "",
+                "photo_file_id": "",
+            }
+            await update.callback_query.edit_message_text(
+                "✍️ لطفا پاسخ خود را به صورت کامل ارسال نمایید:",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌لغو", callback_data="shop:ticketflow:reply:cancel")
+                ]]),
+            )
+            return
+        if data.startswith("shop:ticketclose:"):
+            ticket_id = int(data.rsplit(":", 1)[1])
+            ticket = business.close_ticket(actor, ticket_id=ticket_id)
+            messages = business.ticket_messages(actor, ticket_id=ticket_id)
+            await update.callback_query.edit_message_text(
+                _ticket_thread_text(ticket, messages),
+                reply_markup=_ticket_detail_markup(ticket, messages),
+            )
+            return
+        if data.startswith("shop:ticketmedia:"):
+            parts = data.split(":")
+            ticket_id = int(parts[2])
+            message_id = int(parts[3])
+            media = business.ticket_message_media(
+                actor,
+                ticket_id=ticket_id,
+                message_id=message_id,
+            )
+            if media is None:
+                raise TenantBusinessError("ticket media not found")
+            stream = BytesIO(bytes(media["media"]))
+            stream.name = "ticket-image.jpg"
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=stream,
+                caption=f"🖼 تصویر پیام #{message_id} · تیکت #{ticket_id}",
+            )
+            return
+        if data.startswith("shop:ticket:"):
+            ticket_id = int(data.rsplit(":", 1)[1])
+            ticket = business.ticket(actor, ticket_id=ticket_id)
+            messages = business.ticket_messages(actor, ticket_id=ticket_id)
+            await update.callback_query.edit_message_text(
+                _ticket_thread_text(ticket, messages),
+                reply_markup=_ticket_detail_markup(ticket, messages),
+            )
+            return
         if data == "shop:guide":
             guide = str(settings.get("guide_text") or "").strip()
             rows = [
