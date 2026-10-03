@@ -526,6 +526,95 @@ def _subscription_config_menu_rows(
     return rows
 
 
+def _delivery_access_text(
+    business: Any,
+    actor: int,
+    result: dict[str, Any],
+    settings: dict[str, Any],
+) -> str:
+    """Render only access methods that are currently enabled by AdminBot."""
+    try:
+        subscription_id = int(
+            result.get("id") or result.get("subscription_id") or 0
+        )
+    except (TypeError, ValueError):
+        subscription_id = 0
+    if subscription_id <= 0:
+        return "برای دریافت اطلاعات اتصال، وارد «📦 اشتراک‌های من» شوید."
+
+    lines: list[str] = []
+    if bool(settings.get("show_user_page_link", True)):
+        try:
+            value = business.panel_user_page_link(
+                actor, subscription_id=subscription_id
+            )
+        except TenantBusinessError:
+            value = ""
+        if value:
+            lines.extend(["🌐 صفحه یوزر هیدیفای:", value])
+
+    if bool(settings.get("show_sub_link", True)):
+        try:
+            value = business.subscription_link(
+                actor, subscription_id=subscription_id
+            )
+        except TenantBusinessError:
+            value = ""
+        if value:
+            lines.extend(["🔗 لینک اشتراک:", value])
+
+    if bool(settings.get("show_auto_sub_link", False)):
+        try:
+            value = business.automatic_subscription_link(
+                actor, subscription_id=subscription_id
+            )
+        except TenantBusinessError:
+            value = ""
+        if value:
+            lines.extend(["🤖 لینک اشتراک خودکار:", value])
+
+    if bool(settings.get("show_sub_link_b64", False)):
+        try:
+            value = business.subscription_link_b64(
+                actor, subscription_id=subscription_id
+            )
+        except TenantBusinessError:
+            value = ""
+        if value:
+            lines.extend(["🔐 لینک اشتراک b64:", value])
+
+    if bool(settings.get("show_multi_server", False)):
+        try:
+            value = business.smart_subscription_link(
+                actor,
+                subscription_id=subscription_id,
+                base64_output=False,
+            )
+        except TenantBusinessError:
+            value = ""
+        if value:
+            lines.extend(["🌐 لینک اشتراک هوشمند:", value])
+
+    if bool(settings.get("show_multi_server_b64", False)):
+        try:
+            value = business.smart_subscription_link(
+                actor,
+                subscription_id=subscription_id,
+                base64_output=True,
+            )
+        except TenantBusinessError:
+            value = ""
+        if value:
+            lines.extend(["🌐 لینک اشتراک هوشمند b64:", value])
+
+    if bool(settings.get("show_direct_config", True)):
+        lines.append("📄 کانفیگ مستقیم: از «📦 اشتراک‌های من» قابل دریافت است.")
+
+    return "\n".join(lines) or (
+        "🔒 نمایش لینک و کانفیگ این اشتراک توسط ادمین غیرفعال است."
+    )
+
+
 def _sorted_purchase_plans(
     plans: list[dict[str, Any]],
     settings: dict[str, Any],
@@ -758,8 +847,8 @@ async def _handle_main_reply_action(
             raise TenantBusinessError("free trial is disabled")
         result = business.claim_free_trial(actor)
         await update.effective_message.reply_text(
-            "✅ تست رایگان فعال شد.\n"
-            f"🔗 {result.get('subscription_url') or '-'}",
+            "✅ تست رایگان فعال شد.\n\n"
+            + _delivery_access_text(business, actor, result, settings),
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(
                     "📦 اشتراک‌های من",
@@ -1209,8 +1298,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             order_id = int(data.rsplit(":", 1)[1])
             result = business.retry_own_paid_order(actor, order_id=order_id)
             await update.callback_query.edit_message_text(
-                f"✅ سفارش #{order_id} انجام شد.\n🔗 {result.get('subscription_url') or '-'}",
+                f"✅ سفارش #{order_id} انجام شد.\n\n"
+                + _delivery_access_text(business, actor, result, settings),
                 reply_markup=_home_inline_markup(settings),
+                disable_web_page_preview=True,
             ); return
         if data.startswith("shop:cancelorder:"):
             order_id = int(data.rsplit(":", 1)[1])
@@ -1309,8 +1400,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 raise TenantBusinessError("free trial is disabled")
             result = business.claim_free_trial(actor)
             await update.callback_query.edit_message_text(
-                "✅ تست رایگان فعال شد.\n"
-                f"🔗 {result.get('subscription_url') or '-'}",
+                "✅ تست رایگان فعال شد.\n\n"
+                + _delivery_access_text(business, actor, result, settings),
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("📦 اشتراک‌های من", callback_data="shop:subs")],
                     [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
@@ -1612,8 +1703,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
             else:
                 text = (
-                    f"✅ سفارش #{order_id} با کیف پول پرداخت و فعال شد.\n"
-                    f"🔗 {result.get('subscription_url') or '-'}"
+                    f"✅ سفارش #{order_id} با کیف پول پرداخت و فعال شد.\n\n"
+                    + _delivery_access_text(business, actor, result, settings)
                 )
             await update.callback_query.edit_message_text(
                 text, reply_markup=_home_inline_markup(settings)
