@@ -37,6 +37,7 @@ from TenantRuntime.backup import (
     claim_auto_backup_slot,
     create_tenant_full_backup,
     finish_auto_backup_slot,
+    format_manual_backup_caption,
 )
 from TenantRuntime.panels import PanelError
 from TenantRuntime.server_connections import (
@@ -2395,15 +2396,7 @@ async def send_admin_full_backup(
             chat_id=chat_id,
             document=document,
             filename=artifact.filename,
-            caption=(
-                "📬 فایل بکاپ کامل آماده شد\n"
-                "🤖 بکاپ Tenant: ✅\n"
-                f"🖥️ بکاپ سرورها/نودها: {artifact.panel_backups_count} مورد\n"
-                f"🗂 جداول: {artifact.table_count}\n"
-                f"📊 رکوردها: {artifact.row_count}\n"
-                f"⚠️ خطاها: {len(artifact.panel_errors)} مورد\n"
-                f"📦 نسخه: {_application_version()}"
-            ),
+            caption=format_manual_backup_caption(artifact),
         )
         finish_auto_backup_slot(
             business.conn,
