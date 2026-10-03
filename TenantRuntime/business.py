@@ -244,6 +244,7 @@ class TenantBusinessService:
         xnet_public_origin: str = "",
         xnet_sub_port: int = 0,
         xnet_sub_path: str = "",
+        xnet_api_url: str = "",
         users_limit: int = 0,
         priority: int = 0,
     ) -> dict[str, Any]:
@@ -334,6 +335,12 @@ class TenantBusinessService:
                     now,
                 ),
             )
+            if xnet_api_url:
+                from TenantRuntime.server_connections import url
+                self.conn.execute(
+                    "UPDATE tenant_servers SET xnet_api_url=? WHERE id=? AND tenant_id=?",
+                    (url(xnet_api_url), int(cursor.lastrowid or 0), self.tenant_id),
+                )
         return self.server(int(cursor.lastrowid or 0))
     @staticmethod
     def _server_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -406,6 +413,7 @@ class TenantBusinessService:
             "xnet_public_origin",
             "xnet_sub_port",
             "xnet_sub_path",
+            "xnet_api_url",
             "users_limit",
             "priority",
             "status",
@@ -420,7 +428,7 @@ class TenantBusinessService:
         for key, value in changes.items():
             if key == "label":
                 normalized[key] = _text(value, 80)
-            elif key in ("endpoint", "xui_public_origin", "xnet_public_origin"):
+            elif key in ("endpoint", "xui_public_origin", "xnet_public_origin", "xnet_api_url"):
                 normalized[key] = _text(value, 250, required=False) or None
             elif key in ("admin_path", "user_path", "xui_inbound_ids", "xui_sub_path", "xnet_sub_path"):
                 normalized[key] = _text(value, 160, required=False) or None
@@ -776,41 +784,13 @@ class TenantBusinessService:
         if not str(server.get("endpoint") or "").strip():
             raise TenantBusinessError("server has no configured panel endpoint")
         flavor = str(server.get("xui_flavor") or "").strip().lower()
-        if flavor == "sanaei":
-            token = str(api_token or "").strip()
-            if not token:
-                raise TenantBusinessError("Sanaei API token is required")
-            material = {
-                "version": 1,
-                "flavor": "sanaei",
-                "api_token": token,
-            }
-        elif flavor == "alireza":
-            user = str(username or "").strip()
-            passwd = str(password or "").strip()
-            if not user or not passwd:
-                raise TenantBusinessError(
-                    "Alireza username and password are required"
-                )
-            material = {
-                "version": 1,
-                "flavor": "alireza",
-                "username": user,
-                "password": passwd,
-                "secret_header": str(secret_header or "").strip(),
-            }
-        else:
-            raise TenantBusinessError("X-UI flavor is not configured")
-        serialized = json.dumps(
-            material, ensure_ascii=True, separators=(",", ":"), sort_keys=True
-        )
-        try:
-            return self._store_panel_secret(
-                server_id=int(server_id), secret=serialized
-            )
-        finally:
-            serialized = ""
-            material.clear()
+        from TenantRuntime.server_connections import credential
+        serialized = credential("xui", flavor=flavor, values={
+            "api_token": api_token, "username": username,
+            "password": password, "secret_header": secret_header,
+        })
+        return self._store_panel_secret(server_id=int(server_id), secret=serialized)
+
     def panel_status(self, server_id: int) -> dict[str, Any]:
         self.server(server_id)
         row = self.conn.execute(
@@ -874,6 +854,7 @@ class TenantBusinessService:
             xnet_public_origin=str(server.get("xnet_public_origin") or "").strip(),
             xnet_sub_port=int(server.get("xnet_sub_port") or 0),
             xnet_sub_path=str(server.get("xnet_sub_path") or "").strip(),
+            xnet_api_url=str(server.get("xnet_api_url") or "").strip(),
         )
     def _panel_material(
         self, server_id: int
@@ -911,6 +892,71 @@ class TenantBusinessService:
             raise TenantBusinessError(
                 "panel credential cannot be decrypted"
             ) from exc
+    def prepare_server_connection(
+        self, actor_id: int, *, settings: dict | None = None,
+        credentials: dict | None = None, server_id: int | None = None,
+    ) -> tuple[dict, PanelTarget, str]:
+        """Prepare a tenant-owned candidate without modifying working settings."""
+        self._admin(actor_id)
+        from TenantRuntime.server_connections import normalize_settings, credential
+        candidate = self.server(server_id) if server_id is not None else {}
+        candidate.update(settings or {})
+        candidate = normalize_settings(candidate)
+        previous = ""
+        if server_id is not None:
+            if self.secret_cipher is None:
+                raise TenantBusinessError("panel credential encryption is unavailable")
+            row = self.conn.execute(
+                "SELECT encrypted_secret FROM tenant_panel_credentials "
+                "WHERE tenant_id=? AND server_id=?", (self.tenant_id, int(server_id)),
+            ).fetchone()
+            if row is not None:
+                try:
+                    previous = self.secret_cipher.decrypt_secret(str(row["encrypted_secret"]))
+                except TokenCipherError as exc:
+                    raise TenantBusinessError("panel credential cannot be decrypted") from exc
+        if credentials is None:
+            if not previous:
+                raise TenantBusinessError("panel credential is not configured")
+            secret = previous
+        else:
+            values = {}
+            if previous and candidate["panel_kind"] != "hiddify":
+                try:
+                    values = json.loads(previous)
+                except ValueError:
+                    values = {"api_token": previous}
+                if not isinstance(values, dict):
+                    values = {}
+            values.update(credentials)
+            secret = credential(candidate["panel_kind"],
+                flavor=str(candidate.get("xui_flavor") or ""), values=values)
+        return candidate, self._panel_target(candidate), secret
+
+    def commit_server_connection(
+        self, actor_id: int, *, candidate: dict, secret: str,
+        server_id: int | None = None,
+    ) -> dict:
+        """Commit metadata and encrypted access together after the read-only probe."""
+        self._admin(actor_id)
+        from TenantRuntime.server_connections import normalize_settings
+        candidate = normalize_settings(candidate)
+        fields = {key: candidate[key] for key in (
+            "label", "endpoint", "admin_path", "user_path", "xui_inbound_ids",
+            "xui_public_origin", "xui_sub_path", "xnet_inbound_ids",
+            "xnet_public_origin", "xnet_sub_port", "xnet_sub_path", "xnet_api_url",
+            "users_limit", "priority",
+        ) if key in candidate}
+        with transaction(self.conn):
+            if server_id is None:
+                server = self.add_server(actor_id, panel_kind=candidate["panel_kind"],
+                    xui_flavor=str(candidate.get("xui_flavor") or ""), **fields)
+                server_id = int(server["id"])
+            else:
+                self.update_server(actor_id, server_id=server_id, **fields)
+            self._store_panel_secret(server_id=server_id, secret=secret)
+        return self.server(server_id)
+
     def add_node(
         self,
         actor_id: int,
