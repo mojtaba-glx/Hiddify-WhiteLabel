@@ -941,8 +941,69 @@ def _ticket_bucket(status: str) -> set[str]:
     if status == "pending":
         return {"open"}
     if status == "open":
-        return {"open", "answered"}
+        return {"answered"}
     return {"closed"}
+
+
+def _ticket_status_label(status: object) -> str:
+    return {
+        "open": "📨 در انتظار",
+        "answered": "📬 باز / پاسخ‌داده",
+        "closed": "📩 بسته",
+    }.get(str(status or ""), str(status or "-"))
+
+
+def _ticket_thread_admin_text(
+    ticket: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> str:
+    lines = [
+        f"🎫 تیکت #{int(ticket['id'])}",
+        f"👤 {ticket.get('display_name') or '-'}",
+        f"🔹 @{str(ticket.get('username') or '-').lstrip('@')}",
+        f"🔸 Telegram ID: {ticket.get('telegram_user_id') or '-'}",
+        f"وضعیت: {_ticket_status_label(ticket.get('status'))}",
+        f"موضوع: {ticket.get('subject') or '-'}",
+        "",
+    ]
+    for item in messages[-40:]:
+        who = "👤 کاربر" if item.get("sender_type") == "user" else "🛟 پشتیبانی"
+        sender = str(item.get("sender_name") or "").strip()
+        lines.append(f"{who}{' · ' + sender if sender else ''}:")
+        body = str(item.get("message_text") or "").strip()
+        if body:
+            lines.append(body)
+        if item.get("has_media"):
+            lines.append("🖼 تصویر پیوست دارد")
+        lines.append("")
+    if not messages:
+        lines.append("پیامی ثبت نشده است.")
+    return "\n".join(lines).strip()
+
+
+def ticket_reply_skip_cancel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏩رد کردن", callback_data="userbot:ticketreply:skip")],
+        [InlineKeyboardButton("❌لغو", callback_data="userbot:ticketreply:cancel")],
+    ])
+
+
+def ticket_reply_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ارسال", callback_data="userbot:ticketreply:send"),
+            InlineKeyboardButton("✏️ویرایش", callback_data="userbot:ticketreply:edit"),
+        ],
+        [InlineKeyboardButton("❌لغو", callback_data="userbot:ticketreply:cancel")],
+    ])
+
+
+def _ticket_reply_preview_text(flow: dict[str, Any]) -> str:
+    return (
+        "👁 پیش‌نمایش پاسخ تیکت\n\n"
+        f"{str(flow.get('reply_text') or '').strip()}\n\n"
+        f"🖼 تصویر: {'دارد' if flow.get('photo_file_id') else 'ندارد'}"
+    )
 
 
 async def _send_tickets(update: Update, business: Any, actor: int, status: str | None = None, page: int = 1, customer_id: int = 0) -> None:
@@ -999,11 +1060,26 @@ def _sibling_user_bot_token(business: Any) -> str:
     return plain
 
 
-async def _send_via_userbot(business: Any, chat_id: int | str, *, text: str) -> None:
+async def _send_via_userbot(
+    business: Any,
+    chat_id: int | str,
+    *,
+    text: str,
+    photo_bytes: bytes | None = None,
+) -> None:
     token = _sibling_user_bot_token(business)
     try:
         async with Bot(token=token) as bot:
             await bot.send_message(chat_id=chat_id, text=text)
+            payload = bytes(photo_bytes or b"")
+            if payload:
+                stream = BytesIO(payload)
+                stream.name = "ticket-reply.jpg"
+                await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=stream,
+                    caption="🖼 تصویر پاسخ پشتیبانی",
+                )
     finally:
         token = ""
 
