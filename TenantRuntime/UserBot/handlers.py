@@ -1294,7 +1294,7 @@ async def _handle_main_reply_action(
                     callback_data="shop:guide:android",
                 ),
                 InlineKeyboardButton(
-                    "📱 IOS",
+                    "📱 iOS",
                     callback_data="shop:guide:ios",
                 ),
             ],
@@ -1304,7 +1304,7 @@ async def _handle_main_reply_action(
                     callback_data="shop:guide:windows",
                 ),
                 InlineKeyboardButton(
-                    "💻 مک",
+                    "💻 macOS",
                     callback_data="shop:guide:mac",
                 ),
             ],
@@ -2824,11 +2824,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             rows = [
                 [
                     InlineKeyboardButton("📱 اندروید", callback_data="shop:guide:android"),
-                    InlineKeyboardButton("📱 IOS", callback_data="shop:guide:ios"),
+                    InlineKeyboardButton("📱 iOS", callback_data="shop:guide:ios"),
                 ],
                 [
                     InlineKeyboardButton("🖥️ ویندوز", callback_data="shop:guide:windows"),
-                    InlineKeyboardButton("💻 مک", callback_data="shop:guide:mac"),
+                    InlineKeyboardButton("💻 macOS", callback_data="shop:guide:mac"),
                 ],
                 [InlineKeyboardButton("🖥️ لینوکس", callback_data="shop:guide:linux")],
                 [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
