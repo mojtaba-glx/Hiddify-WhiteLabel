@@ -12,7 +12,7 @@ runtime identity for providers added from v0.30.0 onward.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass(frozen=True)
@@ -34,14 +34,34 @@ class PaymentProviderSpec:
             raise ValueError("legacy payment family must be card or crypto")
 
 
+@dataclass(frozen=True)
+class PaymentStartResult:
+    action: str
+    message: str
+    checkout_url: str | None = None
+    external_reference: str | None = None
+
+
+ProviderStarter = Callable[[dict[str, Any]], PaymentStartResult]
+
 _REGISTRY: dict[str, PaymentProviderSpec] = {}
+_STARTERS: dict[str, ProviderStarter] = {}
 
 
-def register_provider(spec: PaymentProviderSpec, *, replace: bool = False) -> None:
+def register_provider(
+    spec: PaymentProviderSpec,
+    *,
+    starter: ProviderStarter | None = None,
+    replace: bool = False,
+) -> None:
     current = _REGISTRY.get(spec.key)
     if current is not None and not replace:
         raise ValueError(f"payment provider already registered: {spec.key}")
     _REGISTRY[spec.key] = spec
+    if starter is not None:
+        _STARTERS[spec.key] = starter
+    elif replace:
+        _STARTERS.pop(spec.key, None)
 
 
 def registered_providers(*, user_selectable: bool | None = None) -> list[PaymentProviderSpec]:
@@ -107,6 +127,33 @@ def payment_prompt(method: dict[str, Any], *, amount: int | None = None) -> str:
     if bool(item.get("requires_receipt", True)):
         lines.extend(["", "🧾 کد پیگیری یا تصویر رسید را ارسال کنید."])
     return "\n".join(lines)
+
+
+def begin_provider_payment(
+    method: dict[str, Any],
+    *,
+    context: dict[str, Any],
+) -> PaymentStartResult:
+    item = method_view(method)
+    provider = provider_for_method(item)
+    starter = _STARTERS.get(provider.key)
+    if starter is not None:
+        result = starter(dict(context, method=item, provider=provider))
+        if result.action not in {"receipt", "external", "complete"}:
+            raise ValueError("invalid provider start action")
+        return result
+    if provider.requires_receipt:
+        return PaymentStartResult(
+            action="receipt",
+            message=payment_prompt(
+                item,
+                amount=int(context["amount"]) if context.get("amount") is not None else None,
+            ),
+        )
+    return PaymentStartResult(
+        action="unavailable",
+        message="این Provider روی این نصب پیکربندی نشده است.",
+    )
 
 
 register_provider(PaymentProviderSpec(
