@@ -1325,32 +1325,106 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not decision.allowed:
         await _deny_update(update, decision.reason)
         raise ApplicationHandlerStop
+
+    settings = _set_button_settings(business.runtime_userbot_settings())
+    if not bool(settings.get("show_user_status", True)):
+        text = "🚫 نمایش وضعیت اشتراک در حال حاضر توسط ادمین غیرفعال است."
+        markup = InlineKeyboardMarkup([[
+            _button(
+                "🔙بازگشت",
+                callback_data="runtime:home",
+                settings=settings,
+            )
+        ]])
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.edit_message_text(
+                text,
+                reply_markup=markup,
+            )
+        elif update.effective_message:
+            await update.effective_message.reply_text(
+                text,
+                reply_markup=markup,
+            )
+        return
+
     state = state_store.load(user_id)
     state_store.save(user_id, {**state, "screen": "status"})
-    base = (
-        f"📊 وضعیت ربات\n\n"
-        f"مجموعه: {spec.tenant_name}\n"
-        "نوع: UserBot\n"
-        f"لایسنس: {decision.license_status}\n"
-        "Runtime: ready"
-    )
     try:
-        summary = business.customer_account_summary(user_id)
+        summary = business.customer_account_summary(user_id, refresh=True)
+        subscriptions = business.list_subscriptions(user_id, limit=100)
+        customer = dict(summary.get("customer") or {})
         subs = dict(summary.get("subscriptions") or {})
-        text = (
-            base
-            + "\n\n📦 وضعیت حساب"
-            + f"\nاشتراک فعال: {int(subs.get('active') or 0)}"
-            + f"\nمنقضی: {int(subs.get('expired') or 0)}"
-            + f"\nسفارش باز: {int(summary.get('pending_orders') or 0)}"
-        )
+        active_items = [
+            item
+            for item in subscriptions
+            if str(item.get("status") or "") == "active"
+        ]
+
+        lines = [
+            "📊 وضعیت حساب و اشتراک‌ها",
+            "",
+            f"👤 وضعیت کاربر: {_account_status_label(customer.get('status'))}",
+        ]
+        if bool(settings.get("show_username", True)):
+            username = str(customer.get("username") or "").strip().lstrip("@")
+            if username:
+                lines.append(f"🆔 نام کاربری: @{username}")
+        lines.extend([
+            "",
+            "📦 خلاصه سرویس‌ها",
+            f"🟢 فعال: {int(subs.get('active') or 0)}",
+            f"🟡 غیرفعال: {int(subs.get('disabled') or 0)}",
+            f"🔴 منقضی: {int(subs.get('expired') or 0)}",
+            f"🟠 در انتظار فعال‌سازی: {int(subs.get('pending') or 0)}",
+            f"🧾 سفارش باز: {int(summary.get('pending_orders') or 0)}",
+        ])
+
+        if active_items:
+            lines.extend(["", "⚡ سرویس‌های فعال"])
+            for item in active_items[:3]:
+                metrics = _subscription_metrics(item, settings)
+                volume = (
+                    f"{metrics['usage_gb']:.1f} گیگ مصرف"
+                    if metrics["unlimited_volume"]
+                    else (
+                        f"{metrics['usage_gb']:.1f}/"
+                        f"{metrics['limit_gb']:.1f} گیگ"
+                    )
+                )
+                days = metrics["days_left"]
+                remaining = (
+                    "نامحدود"
+                    if metrics["unlimited_time"]
+                    else (
+                        "منقضی"
+                        if days is not None and days <= 0
+                        else f"{days} روز" if days is not None else "نامشخص"
+                    )
+                )
+                lines.append(
+                    f"• #{item['id']} · {item.get('plan_name') or '-'}"
+                    f" · {volume} · {remaining}"
+                )
+            if len(active_items) > 3:
+                lines.append(
+                    f"• و {len(active_items) - 3} سرویس فعال دیگر..."
+                )
+        else:
+            lines.extend(["", "⚪ سرویس فعالی ندارید."])
+        text = "\n".join(lines)
     except (TenantBusinessError, ValueError, sqlite3.Error):
-        text = base
-    settings = _set_button_settings(business.runtime_userbot_settings())
+        text = (
+            "📊 وضعیت حساب و اشتراک‌ها\n\n"
+            "⏳ دریافت وضعیت سرویس‌ها موقتاً ممکن نیست."
+        )
+        subs = {}
+
     status_markup = InlineKeyboardMarkup([
         [
             _button(
-                "👤 حساب من",
+                "👤 پروفایل",
                 callback_data="shop:account",
                 settings=settings,
             ),
@@ -1362,7 +1436,19 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ],
         [
             _button(
-                "📦 اشتراک‌های من",
+                f"🟢 فعال ({int(subs.get('active') or 0)})",
+                callback_data="shop:subs:active",
+                settings=settings,
+            ),
+            _button(
+                f"🔴 منقضی ({int(subs.get('expired') or 0)})",
+                callback_data="shop:subs:expired",
+                settings=settings,
+            ),
+        ],
+        [
+            _button(
+                "📦 همه اشتراک‌ها",
                 callback_data="shop:subs",
                 settings=settings,
             ),
@@ -1382,9 +1468,15 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     ])
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(text, reply_markup=status_markup)
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=status_markup,
+        )
     elif update.effective_message:
-        await update.effective_message.reply_text(text, reply_markup=status_markup)
+        await update.effective_message.reply_text(
+            text,
+            reply_markup=status_markup,
+        )
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
