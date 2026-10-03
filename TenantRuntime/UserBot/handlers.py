@@ -3551,7 +3551,7 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Accept a photo only while this user has an owned receipt flow."""
+    """Accept photos for payment receipts and active ticket compose/reply flows."""
     if update.effective_message is None or not update.effective_message.photo:
         return
     spec, _, _, business = _services(context)
@@ -3560,10 +3560,29 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     actor = int(update.effective_user.id) if update.effective_user else 0
     if not await _force_join_allowed(update, context, business):
         return
-    if spec.role != "user" or not isinstance(flow, dict) or flow.get("kind") not in ("receipt", "wallet_receipt"):
-        await update.effective_message.reply_text("از منوی ربات استفاده کنید.", reply_markup=_main_keyboard(spec, business)); return
+    if spec.role != "user" or not isinstance(flow, dict):
+        await update.effective_message.reply_text(
+            "از منوی ربات استفاده کنید.",
+            reply_markup=_main_keyboard(spec, business),
+        )
+        return
+
+    kind = str(flow.get("kind") or "")
+    if kind in {"ticket_new_photo", "ticket_reply_photo"}:
+        flow["photo_file_id"] = str(update.effective_message.photo[-1].file_id)
+        mode = "new" if kind == "ticket_new_photo" else "reply"
+        flow["kind"] = "ticket_new_confirm" if mode == "new" else "ticket_reply_confirm"
+        await _show_ticket_preview(update, context, flow, mode=mode)
+        return
+
+    if kind not in ("receipt", "wallet_receipt"):
+        await update.effective_message.reply_text(
+            "از منوی ربات استفاده کنید.",
+            reply_markup=_main_keyboard(spec, business),
+        )
+        return
     try:
-        if flow.get("kind") == "wallet_receipt":
+        if kind == "wallet_receipt":
             receipt = business.submit_wallet_topup_receipt(
                 actor,
                 topup_id=int(flow["topup_id"]),
