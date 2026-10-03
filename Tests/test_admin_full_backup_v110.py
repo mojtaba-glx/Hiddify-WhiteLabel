@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import sqlite3
 import zipfile
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -92,7 +93,7 @@ def _tenant_service(conn, factories, cipher, *, owner=7001, panel=None):
 
 
 def test_full_backup_keeps_tenant_restore_payload_and_adds_panel_artifacts(
-    conn, factories, cipher
+    conn, factories, cipher, tmp_path
 ):
     tenant, service = _tenant_service(conn, factories, cipher)
     owner = int(tenant["owner_telegram_id"])
@@ -141,16 +142,53 @@ def test_full_backup_keeps_tenant_restore_payload_and_adds_panel_artifacts(
         app_version="1.1.0",
     )
 
-    assert artifact.filename.startswith(
-        f"Backup_All_Tenant_{int(tenant['id'])}_"
-    )
+    assert artifact.filename.startswith("Backup_All_")
+    assert artifact.filename.endswith(".zip")
     assert artifact.panel_backups_count == 1
     assert len(artifact.panel_errors) == 1
 
     with zipfile.ZipFile(io.BytesIO(artifact.data), "r") as archive:
         names = set(archive.namelist())
-        assert {"tenant.json", "manifest.json", "full_manifest.json"} <= names
+        assert {
+            "tenant.json",
+            "manifest.json",
+            "full_manifest.json",
+            "tenant_bot.db",
+            "Shared/tenant.json",
+            "Shared/manifest.json",
+            "Shared/servers.json",
+            "Shared/plans.json",
+        } <= names
+        assert any(
+            name.startswith("Backup_Bot_") and name.endswith(".json")
+            for name in names
+        )
+        assert any(
+            name.startswith("Backup_All_") and name.endswith(".json")
+            for name in names
+        )
         assert "PanelBackups/Turkey/tr.json" in names
+        db_path = tmp_path / "tenant_bot.db"
+        db_path.write_bytes(archive.read("tenant_bot.db"))
+        db = sqlite3.connect(db_path)
+        try:
+            own = db.execute(
+                "SELECT COUNT(*) FROM tenant_customers WHERE tenant_id=?",
+                (int(tenant["id"]),),
+            ).fetchone()[0]
+            foreign = db.execute(
+                "SELECT COUNT(*) FROM tenant_customers WHERE tenant_id=?",
+                (int(other["id"]),),
+            ).fetchone()[0]
+            bots = db.execute(
+                "SELECT COUNT(*) FROM tenant_bots"
+            ).fetchone()[0]
+            assert own == 1
+            assert foreign == 0
+            assert bots == 0
+            assert db.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        finally:
+            db.close()
         full_manifest = json.loads(
             archive.read("full_manifest.json").decode("utf-8")
         )
@@ -334,14 +372,20 @@ def test_admin_backup_button_sends_full_archive_and_records_success(
     )
     assert len(bot.documents) == 1
     sent = bot.documents[0]
-    assert sent["filename"].startswith(
-        f"Backup_All_Tenant_{int(tenant['id'])}_"
-    )
-    assert "📦 نسخه: 1.1.0" in sent["caption"]
+    assert sent["filename"].startswith("Backup_All_")
+    assert sent["caption"].startswith("📬 بکاپ کامل\n🕐 زمان: ")
+    assert "🤖 بکاپ ربات: ✅" in sent["caption"]
+    assert "🖥️ بکاپ سرورها/نودها: 1 مورد" in sent["caption"]
+    assert "⚠️ خطاها: 0 مورد" in sent["caption"]
     snapshot = decode_tenant_backup(sent["raw"])
     assert int(snapshot["tenant_id"]) == int(tenant["id"])
     with zipfile.ZipFile(io.BytesIO(sent["raw"]), "r") as archive:
-        assert "PanelBackups/France/panel-backup.bin" in archive.namelist()
+        names = set(archive.namelist())
+        assert "PanelBackups/France/panel-backup.bin" in names
+        assert "tenant_bot.db" in names
+        assert "Shared/tenant.json" in names
+        assert any(name.startswith("Backup_Bot_") for name in names)
+        assert any(name.startswith("Backup_All_") and name.endswith(".json") for name in names)
 
     row = conn.execute(
         "SELECT status,file_size,sha256 FROM tenant_backup_runs "
