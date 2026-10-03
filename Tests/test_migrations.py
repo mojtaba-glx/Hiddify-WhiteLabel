@@ -58,6 +58,7 @@ def test_migration_is_idempotent(db_path) -> None:
     assert "0008_order_paid_at" in versions
     assert "0021_purchase_catalog" in versions
     assert "0022_renewal_policy" in versions
+    assert "0023_trial_reminder_lifecycle" in versions
 
 
 def test_foreign_keys_enforced(conn, factories) -> None:
@@ -92,6 +93,7 @@ def test_checksums_recorded(db_path) -> None:
     assert len(recorded["0008_order_paid_at"]) == 64
     assert len(recorded["0021_purchase_catalog"]) == 64
     assert len(recorded["0022_renewal_policy"]) == 64
+    assert len(recorded["0023_trial_reminder_lifecycle"]) == 64
 
 
 def test_checksum_mismatch_detected(db_path, tmp_path) -> None:
