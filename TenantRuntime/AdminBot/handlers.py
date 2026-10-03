@@ -2932,6 +2932,42 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     ]),
                 )
                 return
+            if kind == "coupon_edit":
+                coupon_id = int(flow["coupon_id"])
+                field = str(flow["field"])
+                kwargs: dict[str, Any] = {}
+                if field == "code":
+                    kwargs["code"] = text.strip().upper()
+                elif field == "value":
+                    kwargs["value"] = int(text.replace(",", ""))
+                elif field == "max":
+                    kwargs["max_uses"] = int(text.replace(",", ""))
+                elif field == "peruser":
+                    kwargs["per_customer_limit"] = int(text.replace(",", ""))
+                elif field == "expiry":
+                    kwargs["expires_at"] = text.strip()
+                else:
+                    raise ValueError("invalid coupon edit field")
+                business.update_coupon_admin(
+                    actor,
+                    coupon_id=coupon_id,
+                    **kwargs,
+                )
+                context.user_data.pop("biz_flow", None)
+                await update.effective_message.reply_text(
+                    "✅ کوپن تخفیف ویرایش شد.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "🎟 جزئیات کوپن",
+                            callback_data=f"biz:coupon:{coupon_id}",
+                        )],
+                        [InlineKeyboardButton(
+                            "🎟 لیست کوپن‌ها",
+                            callback_data="biz:coupons",
+                        )],
+                    ]),
+                )
+                return
             if kind == "wallet_adjust":
                 if len(fields) not in (2, 3):
                     raise ValueError("invalid wallet adjustment")
