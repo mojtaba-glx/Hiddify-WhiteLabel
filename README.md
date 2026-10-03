@@ -7,9 +7,11 @@ two dedicated bots (`TenantAdminBot` + `TenantUserBot`). The platform owner
 operates the same `MasterBot` as a role-based PlatformBot: the owner gets
 the management panel and normal Telegram users get the customer portal.
 
-> Scope status: **Phases 0–13 implementation complete through broadcast/channel management** (design, independent infrastructure,
+> Scope status: **Phases 0–16 complete — v1.0.0 Stable** (design, independent infrastructure,
 > owner-only MasterBot, automated license jobs, atomic tenant provisioning,
-> shared sharded TenantRuntime, and production installation/operations).
+> shared sharded TenantRuntime, production installation/operations, full Tenant
+> sales lifecycle, support/broadcast, Force Join/event channels, Backup/Restore
+> v2, shared future agency infrastructure, and the final Stable release gate).
 
 ## Layout
 
