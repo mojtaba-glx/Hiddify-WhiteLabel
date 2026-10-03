@@ -10,6 +10,14 @@
 - Kept `ticket_panel_text` as the real support-panel text source and restored SellBot-style FAQ / my tickets / create ticket navigation.
 - Added migration `0028_ticket_phase12` and regression coverage for message/media lifecycle, status transitions, tenant isolation and UI wiring.
 
+## v0.32.0 — Complete customer subscription status
+
+- Added a paginated subscription selector and separate live status details with service names, recorded purchase/renewal prices, remaining quota/time and last connection.
+- Completed customer config, renewal, rename, confirmed link change, refresh, copyable ID and connection-help controls; subscription links include QR images and copyable text.
+- Added resumable credential rotation across Hiddify, Sanaei/Alireza X-UI and X-NET, invalidating previous smart-link tokens while preserving subscription terms and consumption.
+- Added customer/tenant ownership checks, duplicate-confirmation protection, cached-status notices during outages and preflight rejection of unsupported WireGuard rotation.
+- Added migration `0027_subscription_status` and 17 dedicated regression tests; the complete suite passes 602 tests with CI on Python 3.10 and 3.12.
+
 ## v0.30.0 — Tenant payment architecture
 
 - Unified Tenant card-to-card, Crypto, wallet checkout and wallet-topup payment status under one payment history/review model.
