@@ -1860,20 +1860,29 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ); return
         if data.startswith("shop:wallettopupmethod:"):
             _, _, topup_id, method_id = data.split(":", 3)
-            topup = business.wallet_topup(actor, int(topup_id))
-            method = business.method(int(method_id), currency=str(topup["currency"]))
-            context.user_data["biz_flow"] = {
-                "kind": "wallet_receipt",
-                "topup_id": int(topup_id),
-                "method_id": int(method_id),
-            }
+            session = business.begin_wallet_topup_payment(
+                actor,
+                topup_id=int(topup_id),
+                method_id=int(method_id),
+            )
+            rows: list[list[TelegramInlineKeyboardButton]] = []
+            if session["action"] == "receipt":
+                context.user_data["biz_flow"] = {
+                    "kind": "wallet_receipt",
+                    "topup_id": int(topup_id),
+                    "method_id": int(method_id),
+                }
+            else:
+                context.user_data.pop("biz_flow", None)
+            if session.get("checkout_url"):
+                rows.append([InlineKeyboardButton(
+                    "🌐 ورود به درگاه پرداخت",
+                    url=str(session["checkout_url"]),
+                )])
+            rows.append([InlineKeyboardButton("↩️ کیف پول", callback_data="shop:wallet")])
             await update.callback_query.edit_message_text(
-                business.payment_method_prompt(
-                    method, amount=int(topup["amount"])
-                ),
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("↩️ کیف پول", callback_data="shop:wallet")]
-                ]),
+                str(session["message"]),
+                reply_markup=InlineKeyboardMarkup(rows),
             ); return
         if data == "shop:gift":
             if not bool(settings.get("show_gift_button", True)):
@@ -2286,18 +2295,33 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 reply_markup=InlineKeyboardMarkup(rows),
             ); return
         if data.startswith("shop:pay:"):
-            _, _, order_id, method_id = data.split(":", 3); order = business.order(actor, int(order_id)); method = business.method(int(method_id), currency=str(order['currency']))
-            context.user_data["biz_flow"] = {"kind": "receipt", "order_id": int(order_id), "method_id": int(method_id)}
+            _, _, order_id, method_id = data.split(":", 3)
+            session = business.begin_order_payment(
+                actor,
+                order_id=int(order_id),
+                method_id=int(method_id),
+            )
+            rows: list[list[TelegramInlineKeyboardButton]] = []
+            if session["action"] == "receipt":
+                context.user_data["biz_flow"] = {
+                    "kind": "receipt",
+                    "order_id": int(order_id),
+                    "method_id": int(method_id),
+                }
+            else:
+                context.user_data.pop("biz_flow", None)
+            if session.get("checkout_url"):
+                rows.append([InlineKeyboardButton(
+                    "🌐 ورود به درگاه پرداخت",
+                    url=str(session["checkout_url"]),
+                )])
+            rows.append([InlineKeyboardButton(
+                "↩️ سفارش",
+                callback_data=f"shop:checkout:{int(order_id)}",
+            )])
             await update.callback_query.edit_message_text(
-                business.payment_method_prompt(
-                    method, amount=int(order["amount"])
-                ),
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(
-                        "↩️ سفارش",
-                        callback_data=f"shop:checkout:{int(order_id)}",
-                    )]
-                ]),
+                str(session["message"]),
+                reply_markup=InlineKeyboardMarkup(rows),
             ); return
         if data == "shop:renewmenu":
             if not bool(settings.get("enable_renew", True)):
