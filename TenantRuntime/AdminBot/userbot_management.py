@@ -2029,6 +2029,20 @@ async def handle_callback(
     if query is None:
         return False
     data = str(query.data or "")
+
+    # Phase 13 owns broadcast/channel callbacks before the legacy partial
+    # branches below can answer or mutate state.
+    from TenantRuntime.AdminBot import broadcast_channel
+    from TenantRuntime.AdminBot.handlers import admin_main_keyboard
+    if await broadcast_channel.handle_callback(
+        update,
+        context,
+        business=business,
+        actor=actor,
+        admin_main_keyboard=admin_main_keyboard,
+    ):
+        return True
+
     if not (data.startswith("userbot:") or data.startswith("channelpost:")):
         return False
 
@@ -3609,6 +3623,17 @@ async def handle_text(
     admin_main_keyboard: Any,
 ) -> bool:
     set_button_settings(business.runtime_userbot_settings())
+
+    from TenantRuntime.AdminBot import broadcast_channel
+    if await broadcast_channel.handle_text(
+        update,
+        context,
+        business=business,
+        actor=actor,
+        admin_main_keyboard=admin_main_keyboard,
+    ):
+        return True
+
     flow=context.user_data.get(FLOW_KEY)
     if not isinstance(flow,dict):
         return False
@@ -4152,6 +4177,17 @@ async def handle_media(
     admin_main_keyboard: Any,
 ) -> bool:
     set_button_settings(business.runtime_userbot_settings())
+
+    from TenantRuntime.AdminBot import broadcast_channel
+    if await broadcast_channel.handle_media(
+        update,
+        context,
+        business=business,
+        actor=actor,
+        admin_main_keyboard=admin_main_keyboard,
+    ):
+        return True
+
     flow=context.user_data.get(FLOW_KEY)
     if not isinstance(flow,dict):
         return False
@@ -4274,6 +4310,17 @@ async def handle_document(
     admin_main_keyboard: Any,
 ) -> bool:
     set_button_settings(business.runtime_userbot_settings())
+
+    from TenantRuntime.AdminBot import broadcast_channel
+    if await broadcast_channel.handle_document(
+        update,
+        context,
+        business=business,
+        actor=actor,
+        admin_main_keyboard=admin_main_keyboard,
+    ):
+        return True
+
     flow=context.user_data.get(FLOW_KEY)
     if (
         isinstance(flow, dict)
