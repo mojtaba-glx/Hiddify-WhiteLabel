@@ -29,6 +29,7 @@ class PanelTarget:
     xnet_public_origin: str = ""
     xnet_sub_port: int = 0
     xnet_sub_path: str = ""
+    xnet_api_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,8 @@ class UsageResult:
 
 
 class PanelAdapter(Protocol):
+    def inspect_connection(self, *, target: PanelTarget, secret: str) -> dict: ...
+
     def provision(
         self, *, target: PanelTarget, secret: str, request: ProvisionRequest
     ) -> ProvisionResult: ...
@@ -178,6 +181,13 @@ class RoutedPanelAdapter:
         if adapter is None:
             raise PanelError("panel kind is not supported")
         return adapter
+
+    def inspect_connection(self, *, target: PanelTarget, secret: str) -> dict:
+        adapter = self._adapter(target)
+        inspect = getattr(adapter, "inspect_connection", None)
+        if inspect is None:
+            raise PanelError("panel connection inspection is unavailable")
+        return inspect(target=target, secret=secret)
 
     def provision(
         self, *, target: PanelTarget, secret: str, request: ProvisionRequest
