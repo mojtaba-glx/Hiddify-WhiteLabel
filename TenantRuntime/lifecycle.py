@@ -14,6 +14,13 @@ from typing import Callable
 from Database.connection import connect
 from Shared.crypto import TokenCipher
 from TenantRuntime.business import TenantBusinessService
+from TenantRuntime.backup import (
+    AutoBackupDelivery,
+    AutoBackupSender,
+    TelegramAutoBackupSender,
+    complete_auto_backup_delivery,
+    prepare_auto_backup_delivery,
+)
 from TenantRuntime.panels import PanelAdapter, build_default_panel_adapter
 from TenantRuntime.reminders import (
     ReminderDelivery,
@@ -39,6 +46,9 @@ class LifecycleReport:
     reminders_retried: int = 0
     reminders_abandoned: int = 0
     reminders_skipped: int = 0
+    backups_claimed: int = 0
+    backups_sent: int = 0
+    backups_failed: int = 0
     errors: int = 0
 
 
@@ -52,6 +62,7 @@ class TenantLifecycleCoordinator:
         shard_index: int,
         panel_adapter_factory: Callable[[], PanelAdapter] = build_default_panel_adapter,
         reminder_sender: ReminderSender | None = None,
+        backup_sender: AutoBackupSender | None = None,
         enforcer_batch_size: int = 30,
         hot_usage_ratio: float = 0.85,
         node_freeze_failures: int = 3,
@@ -68,6 +79,7 @@ class TenantLifecycleCoordinator:
         self.shard_index = int(shard_index)
         self.panel_adapter_factory = panel_adapter_factory
         self.reminder_sender = reminder_sender or TelegramReminderSender()
+        self.backup_sender = backup_sender or TelegramAutoBackupSender()
         self.enforcer_batch_size = max(1, min(int(enforcer_batch_size), 500))
         self.hot_usage_ratio = min(max(float(hot_usage_ratio), 0.5), 1.0)
         self.node_freeze_failures = max(1, min(int(node_freeze_failures), 20))
@@ -84,7 +96,9 @@ class TenantLifecycleCoordinator:
             raise ValueError("invalid lifecycle shard scope")
 
     async def run_once(self) -> LifecycleReport:
-        report, deliveries = await asyncio.to_thread(self._prepare_sync)
+        report, deliveries, backup_deliveries = await asyncio.to_thread(
+            self._prepare_sync
+        )
         for delivery in deliveries:
             success = False
             try:
@@ -104,12 +118,43 @@ class TenantLifecycleCoordinator:
                 report.errors += int(outcome.errors)
             except Exception:
                 report.errors += 1
+
+        for delivery in backup_deliveries:
+            success = False
+            error = ""
+            try:
+                await self.backup_sender.send(delivery)
+                success = True
+            except Exception as exc:
+                error = type(exc).__name__
+            try:
+                await asyncio.to_thread(
+                    self._finish_backup_delivery_sync,
+                    delivery,
+                    success,
+                    error,
+                )
+                if success:
+                    report.backups_sent += 1
+                else:
+                    report.backups_failed += 1
+                    report.errors += 1
+            except Exception:
+                report.backups_failed += 1
+                report.errors += 1
         return report
 
-    def _prepare_sync(self) -> tuple[LifecycleReport, list[ReminderDelivery]]:
+    def _prepare_sync(
+        self,
+    ) -> tuple[
+        LifecycleReport,
+        list[ReminderDelivery],
+        list[AutoBackupDelivery],
+    ]:
         conn = connect(self.db_path)
         report = LifecycleReport()
         adapter = self.panel_adapter_factory()
+        backup_deliveries: list[AutoBackupDelivery] = []
         try:
             rows = conn.execute(
                 "SELECT id, owner_telegram_id FROM tenants "
@@ -185,8 +230,26 @@ class TenantLifecycleCoordinator:
                             days_threshold=days_threshold,
                             remaining_gb_threshold=remaining_gb_threshold,
                         )
+
+                    # Auto backup is independent from Telegram polling and uses
+                    # the same shard ownership as lifecycle/enforcement.
+                    try:
+                        backup_delivery = prepare_auto_backup_delivery(
+                            conn,
+                            tenant_id=tenant_id,
+                            owner_telegram_id=owner_id,
+                            cipher=self.cipher,
+                            settings=reminder_values,
+                        )
+                        if backup_delivery is not None:
+                            backup_deliveries.append(backup_delivery)
+                            report.backups_claimed += 1
+                    except Exception:
+                        report.backups_failed += 1
+                        report.errors += 1
                 except Exception:
-                    # One tenant must never stop enforcement/reminders for others.
+                    # One tenant must never stop enforcement/reminders/backups
+                    # for the remaining tenants.
                     report.errors += 1
 
             deliveries, queue = claim_due_deliveries(
@@ -204,7 +267,7 @@ class TenantLifecycleCoordinator:
             report.reminders_abandoned += int(queue.abandoned)
             report.reminders_skipped += int(queue.skipped)
             report.errors += int(queue.errors)
-            return report, deliveries
+            return report, deliveries, backup_deliveries
         finally:
             conn.close()
 
@@ -227,6 +290,24 @@ class TenantLifecycleCoordinator:
                 reminders_retried=int(queue.retried),
                 reminders_abandoned=int(queue.abandoned),
                 errors=int(queue.errors),
+            )
+        finally:
+            conn.close()
+
+
+    def _finish_backup_delivery_sync(
+        self,
+        delivery: AutoBackupDelivery,
+        success: bool,
+        error: str,
+    ) -> None:
+        conn = connect(self.db_path)
+        try:
+            complete_auto_backup_delivery(
+                conn,
+                delivery=delivery,
+                success=bool(success),
+                error=str(error or ""),
             )
         finally:
             conn.close()
