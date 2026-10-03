@@ -2841,18 +2841,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         if data.startswith("shop:guide:"):
             platform = data.rsplit(":", 1)[1]
-            labels = {
-                "android": "📱 راهنمای اندروید",
-                "ios": "📱 راهنمای IOS",
-                "windows": "🖥️ راهنمای ویندوز",
-                "mac": "💻 راهنمای مک",
-                "linux": "🖥️ راهنمای لینوکس",
+            guide_specs = {
+                "android": ("📱 راهنمای اندروید", "guide_android_text"),
+                "ios": ("📱 راهنمای iOS", "guide_ios_text"),
+                "windows": ("🖥️ راهنمای ویندوز", "guide_windows_text"),
+                "mac": ("💻 راهنمای macOS", "guide_mac_text"),
+                "linux": ("🖥️ راهنمای Linux", "guide_linux_text"),
             }
-            if platform not in labels:
+            if platform not in guide_specs:
                 raise TenantBusinessError("invalid guide platform")
-            body = str(settings.get(f"guide_{platform}_text") or "").strip()
+            label, setting_key = guide_specs[platform]
+            body = str(settings.get(setting_key) or "").strip()
             await update.callback_query.edit_message_text(
-                body or labels[platform],
+                body or label,
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔙بازگشت", callback_data="shop:guide")],
                     [InlineKeyboardButton("🏠 منو", callback_data="runtime:home")],
