@@ -6,7 +6,6 @@ User-shop handlers are intentionally kept out of this package.
 
 from __future__ import annotations
 
-import asyncio
 import sqlite3
 from html import escape
 from typing import Any
@@ -812,8 +811,7 @@ async def show_server_status_detail(
             pass
 
     try:
-        stats = await asyncio.to_thread(
-            business.server_status_admin,
+        stats = business.server_status_admin(
             actor,
             server_id=int(server_id),
         )
