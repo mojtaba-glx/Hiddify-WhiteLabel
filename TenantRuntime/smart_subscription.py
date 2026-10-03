@@ -203,6 +203,11 @@ class SmartSubscriptionService:
             if subscription_row is None:
                 raise SmartSubscriptionError("subscription was not found")
             subscription = dict(subscription_row)
+            if conn.execute(
+                "SELECT 1 FROM tenant_subscription_rotations WHERE tenant_id=? AND subscription_id=?",
+                (int(subscription["tenant_id"]), int(subscription["id"]))
+            ).fetchone():
+                raise SmartSubscriptionError("subscription is not active")
             if str(subscription["status"]) != "active":
                 raise SmartSubscriptionError("subscription is not active")
             try:
@@ -278,7 +283,7 @@ class SmartSubscriptionService:
                 else plain
             )
 
-            title = str(subscription.get("plan_name") or link["label"] or "subscription")
+            title = str(subscription.get("service_name") or subscription.get("plan_name") or link["label"] or "subscription")
             title_b64 = base64.b64encode(title.encode("utf-8")).decode("ascii")
             total = max(0, int(subscription.get("traffic_bytes") or 0))
             used = max(0, int(subscription.get("usage_bytes") or 0))
