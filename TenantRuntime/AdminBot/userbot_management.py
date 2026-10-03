@@ -1438,9 +1438,16 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
             [InlineKeyboardButton("🛰️متن لیست سرورها", callback_data="userbot:settings:texts:edit:servers_list_text")],
             [InlineKeyboardButton("📋متن لیست پلن‌ها", callback_data="userbot:settings:texts:edit:plans_list_text")],
             [InlineKeyboardButton("📬متن پنل تیکت", callback_data="userbot:settings:texts:edit:ticket_panel_text")],
+            [InlineKeyboardButton("💌 متون دعوت و بنر", callback_data="userbot:settings:texts:invite_menu")],
             [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
         ]
-        await _edit_or_send(update, "🧾 تنظیمات متون", InlineKeyboardMarkup(rows))
+        await _edit_or_send(
+            update,
+            "🧾 تنظیمات متون\n\n"
+            "تمام متن‌های این بخش مستقیماً در UserBot استفاده می‌شوند. "
+            "برای بازگشت یک متن به مقدار پیش‌فرض، 0 ارسال کنید.",
+            InlineKeyboardMarkup(rows),
+        )
         return
 
     if section == "guide_texts":
@@ -1454,6 +1461,28 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
             [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:texts")],
         ]
         await _edit_or_send(update, "💡 تنظیم متن‌های راهنما", InlineKeyboardMarkup(rows))
+        return
+
+    if section == "invite_texts":
+        photo_state = "تنظیم شده ✅" if str(s.get("invite_banner_photo_id") or "").strip() else "بدون عکس"
+        rows = [
+            [InlineKeyboardButton("💌 متن لینک دعوت", callback_data="userbot:settings:texts:edit:invite_text")],
+            [InlineKeyboardButton("🎁 متن معرفی دعوت", callback_data="userbot:settings:texts:edit:invite_info_text")],
+            [InlineKeyboardButton("📝 متن بنر دعوت", callback_data="userbot:settings:texts:edit:invite_banner_text")],
+            [InlineKeyboardButton(f"🖼 عکس بنر دعوت | {photo_state}", callback_data="userbot:settings:texts:invite_photo")],
+        ]
+        if str(s.get("invite_banner_photo_id") or "").strip():
+            rows.append([InlineKeyboardButton(
+                "🗑 حذف عکس بنر",
+                callback_data="userbot:settings:texts:invite_photo_remove",
+            )])
+        rows.append([InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:texts")])
+        await _edit_or_send(
+            update,
+            "💌 تنظیمات دعوت و بنر\n\n"
+            "متغیرهای قابل استفاده: {invite_link}، {trial_reward} و {purchase_reward}.",
+            InlineKeyboardMarkup(rows),
+        )
         return
 
     if section == "marketing":
@@ -2087,16 +2116,49 @@ async def handle_callback(
     if data == "userbot:settings:texts:guide_menu":
         await _settings_section(update, business, actor, "guide_texts")
         return True
+    if data == "userbot:settings:texts:invite_menu":
+        await _settings_section(update, business, actor, "invite_texts")
+        return True
+    if data == "userbot:settings:texts:invite_photo":
+        current = str(
+            business.userbot_settings_admin(actor).get("invite_banner_photo_id")
+            or ""
+        )
+        context.user_data[FLOW_KEY] = {
+            "kind": "invite_banner_photo",
+            "return_section": "invite_texts",
+        }
+        await query.message.reply_text(
+            "🖼 عکس جدید بنر دعوت را ارسال کنید.\n"
+            f"وضعیت فعلی: {'تنظیم شده' if current else 'بدون عکس'}",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+    if data == "userbot:settings:texts:invite_photo_remove":
+        business.set_userbot_setting_admin(
+            actor,
+            key="invite_banner_photo_id",
+            value="",
+        )
+        await _settings_section(update, business, actor, "invite_texts")
+        return True
     if data.startswith("userbot:settings:texts:edit:"):
         key = data.rsplit(":", 1)[1]
         current = business.userbot_settings_admin(actor).get(key) or "—"
+        if key.startswith("guide_") or key == "guide_text":
+            return_section = "guide_texts"
+        elif key.startswith("invite_"):
+            return_section = "invite_texts"
+        else:
+            return_section = "texts"
         context.user_data[FLOW_KEY] = {
             "kind": "setting_text",
             "key": key,
-            "return_section": "guide_texts" if key.startswith("guide_") or key == "guide_text" else "texts",
+            "return_section": return_section,
         }
         await query.message.reply_text(
-            f"📝 مقدار فعلی:\n{current}\n\nمتن جدید را ارسال کنید:",
+            f"📝 مقدار فعلی:\n{current}\n\n"
+            "متن جدید را ارسال کنید. برای بازگشت به متن پیش‌فرض، 0 بفرستید:",
             reply_markup=userbot_cancel_keyboard(),
         )
         return True
@@ -3225,6 +3287,34 @@ async def handle_media(
     message=update.effective_message
     if message is None:
         return False
+
+    if kind=="invite_banner_photo":
+        file_id = ""
+        if getattr(message, "photo", None):
+            file_id = str(message.photo[-1].file_id)
+        else:
+            document = getattr(message, "document", None)
+            mime = str(getattr(document, "mime_type", "") or "").lower()
+            if document is not None and mime.startswith("image/"):
+                file_id = str(document.file_id)
+        if not file_id:
+            await message.reply_text(
+                "❌ فقط عکس معتبر ارسال کنید.",
+                reply_markup=userbot_cancel_keyboard(),
+            )
+            return True
+        business.set_userbot_setting_admin(
+            actor,
+            key="invite_banner_photo_id",
+            value=file_id,
+        )
+        context.user_data.pop(FLOW_KEY, None)
+        await message.reply_text(
+            "✅ عکس بنر دعوت ذخیره شد.",
+            reply_markup=admin_main_keyboard(),
+        )
+        await _settings_section(update, business, actor, "invite_texts")
+        return True
 
     if kind=="broadcast" and str(flow.get("step") or "")=="wait_photo":
         file_id=""
