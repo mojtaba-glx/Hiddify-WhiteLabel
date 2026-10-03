@@ -21,6 +21,13 @@ from urllib.parse import quote, urlsplit
 from Database.connection import transaction
 from Shared.crypto import TokenCipher, TokenCipherError, fingerprint_token
 from Shared.timeutils import iso_utc, parse_utc, utcnow
+from TenantRuntime.payments import (
+    begin_provider_payment,
+    method_view as payment_method_view,
+    payment_prompt,
+    provider_for_key,
+    registered_providers,
+)
 from TenantRuntime.panels import (
     PanelAdapter,
     PanelError,
@@ -1878,7 +1885,7 @@ class TenantBusinessService:
         method = self.method(int(method_id), currency=str(topup["currency"]))
         ref = _text(reference, 160, required=False) or None
         file_id = _text(telegram_file_id, 256, required=False) or None
-        if not ref and not file_id:
+        if bool(method.get("requires_receipt", True)) and not ref and not file_id:
             raise ValueError("receipt is required")
         now = iso_utc(utcnow())
         with transaction(self.conn):
@@ -1902,7 +1909,24 @@ class TenantBusinessService:
                     now,
                 ),
             )
-        return {"id": int(cursor.lastrowid or 0), "topup_id": int(topup_id)}
+            receipt_id = int(cursor.lastrowid or 0)
+            self._record_payment_event_tx(
+                source="wallet_topup",
+                payment_ref_id=receipt_id,
+                provider_key=str(method.get("provider_key") or method.get("kind") or ""),
+                event_type="submitted",
+                actor_id=actor_id,
+                idempotency_key=(
+                    f"tenant:{self.tenant_id}:payment:wallet_topup:"
+                    f"{receipt_id}:submitted"
+                ),
+            )
+        return {
+            "id": receipt_id,
+            "topup_id": int(topup_id),
+            "payment_key": f"wallet_topup:{receipt_id}",
+            "status": "pending",
+        }
 
     def list_wallet_topups_admin(self, actor_id: int) -> list[dict[str, Any]]:
         self._admin(actor_id)
@@ -1940,6 +1964,8 @@ class TenantBusinessService:
         *,
         receipt_id: int,
         approve: bool,
+        note: str = "",
+        external_event_id: str | None = None,
     ) -> dict[str, Any]:
         self._admin(actor_id)
         now = iso_utc(utcnow())
@@ -1960,12 +1986,15 @@ class TenantBusinessService:
                 raise TenantBusinessError("wallet topup receipt was already reviewed")
             changed = self.conn.execute(
                 "UPDATE tenant_wallet_topup_receipts "
-                "SET status=?, reviewed_by=?, reviewed_at=? "
+                "SET status=?, reviewed_by=?, reviewed_at=?, review_note=?, "
+                "provider_event_id=COALESCE(?, provider_event_id) "
                 "WHERE id=? AND tenant_id=? AND status='pending'",
                 (
                     "approved" if approve else "rejected",
                     int(actor_id),
                     now,
+                    _text(note, 500, required=False),
+                    _text(external_event_id, 180, required=False) or None,
                     int(receipt_id),
                     self.tenant_id,
                 ),
@@ -2001,6 +2030,27 @@ class TenantBusinessService:
                     ),
                     note=f"wallet topup #{int(receipt['topup_id'])}",
                 )
+            method_row = self.conn.execute(
+                "SELECT kind, provider_key FROM tenant_payment_methods "
+                "WHERE tenant_id=? AND id=?",
+                (self.tenant_id, int(receipt["payment_method_id"])),
+            ).fetchone()
+            provider_key = (
+                str(method_row["provider_key"] or method_row["kind"])
+                if method_row is not None else "unknown"
+            )
+            self._record_payment_event_tx(
+                source="wallet_topup",
+                payment_ref_id=int(receipt_id),
+                provider_key=provider_key,
+                event_type="approved" if approve else "rejected",
+                actor_id=actor_id,
+                external_event_id=external_event_id,
+                idempotency_key=(
+                    f"tenant:{self.tenant_id}:payment:wallet_topup:"
+                    f"{int(receipt_id)}:{'approved' if approve else 'rejected'}"
+                ),
+            )
         return {
             "topup_id": int(receipt["topup_id"]),
             "status": target,
@@ -2008,6 +2058,7 @@ class TenantBusinessService:
             "amount": int(receipt["amount"]),
             "currency": str(receipt["currency"]),
             "wallet_transaction": wallet_tx,
+            "payment_key": f"wallet_topup:{int(receipt_id)}",
         }
 
     def adjust_wallet_admin(
@@ -2896,6 +2947,17 @@ class TenantBusinessService:
                     reward_type="purchase",
                     order_id=int(order_id),
                 )
+            self._record_payment_event_tx(
+                source="wallet_order",
+                payment_ref_id=int(order_id),
+                provider_key="wallet",
+                event_type="approved",
+                actor_id=actor_id,
+                idempotency_key=(
+                    f"tenant:{self.tenant_id}:payment:wallet_order:"
+                    f"{int(order_id)}:approved"
+                ),
+            )
         result: dict[str, Any] = {
             "order_id": int(order_id),
             "status": "paid",
@@ -3355,34 +3417,276 @@ class TenantBusinessService:
             for row in self.conn.execute(query, tuple(args)).fetchall()
         ]
 
-    def add_payment_method(self, actor_id: int, *, kind: str, title: str, currency: str, destination: str, network: str = "", instructions: str = "") -> dict[str, Any]:
+    @staticmethod
+    def _payment_method_view(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        return payment_method_view(dict(row))
+
+    def available_payment_providers_admin(self, actor_id: int) -> list[dict[str, Any]]:
         self._admin(actor_id)
-        if kind not in ("card", "crypto"):
-            raise ValueError("invalid payment kind")
+        return [
+            {
+                "key": spec.key,
+                "title": spec.title,
+                "icon": spec.icon,
+                "legacy_kind": spec.legacy_kind,
+                "requires_network": spec.requires_network,
+                "requires_receipt": spec.requires_receipt,
+                "manual_review": spec.manual_review,
+            }
+            for spec in registered_providers(user_selectable=True)
+        ]
+
+    def add_payment_method(
+        self,
+        actor_id: int,
+        *,
+        kind: str = "",
+        provider_key: str = "",
+        title: str,
+        currency: str,
+        destination: str,
+        network: str = "",
+        instructions: str = "",
+        priority: int = 100,
+        provider_options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        clean_kind = str(kind or "").strip().lower()
+        clean_provider = str(provider_key or "").strip().lower()
+        if not clean_provider:
+            if clean_kind not in ("card", "crypto"):
+                raise ValueError("invalid payment kind")
+            clean_provider = "card_manual" if clean_kind == "card" else "crypto_manual"
+        spec = provider_for_key(clean_provider, legacy_kind=clean_kind)
+        if clean_kind and clean_kind != spec.legacy_kind:
+            raise ValueError("payment provider family mismatch")
+        if int(priority) < 0:
+            raise ValueError("invalid payment priority")
+        clean_network = _text(network, 40, required=False)
+        options = provider_options or {}
+        if not isinstance(options, dict):
+            raise ValueError("invalid provider options")
         now = iso_utc(utcnow())
         with transaction(self.conn):
             cursor = self.conn.execute(
-                "INSERT INTO tenant_payment_methods (tenant_id, kind, title, currency, destination, network, instructions, status, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
-                (self.tenant_id, kind, _text(title, 80), _text(currency, 8).upper(), _text(destination, 180), _text(network, 40, required=False) or None, _text(instructions, 500, required=False), now, now),
+                "INSERT INTO tenant_payment_methods "
+                "(tenant_id, kind, provider_key, title, currency, destination, "
+                "network, instructions, priority, provider_options_json, status, "
+                "created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+                (
+                    self.tenant_id,
+                    spec.legacy_kind,
+                    spec.key,
+                    _text(title, 80),
+                    _text(currency, 8).upper(),
+                    _text(destination, 180),
+                    clean_network or None,
+                    _text(instructions, 500, required=False),
+                    int(priority),
+                    json.dumps(options, ensure_ascii=False, separators=(",", ":")),
+                    now,
+                    now,
+                ),
             )
         return self.method(int(cursor.lastrowid or 0), currency=None)
 
     def method(self, method_id: int, *, currency: str | None) -> dict[str, Any]:
-        query = "SELECT * FROM tenant_payment_methods WHERE id = ? AND tenant_id = ? AND status = 'active'"
+        query = (
+            "SELECT * FROM tenant_payment_methods "
+            "WHERE id = ? AND tenant_id = ? AND status = 'active'"
+        )
         args: list[Any] = [int(method_id), self.tenant_id]
         if currency is not None:
-            query += " AND currency = ?"; args.append(str(currency).upper())
+            query += " AND currency = ?"
+            args.append(str(currency).upper())
         row = self.conn.execute(query, tuple(args)).fetchone()
         if row is None:
             raise TenantBusinessError("payment method not found")
-        return dict(row)
+        return self._payment_method_view(row)
+
+    def payment_method_admin(self, actor_id: int, *, method_id: int) -> dict[str, Any]:
+        self._admin(actor_id)
+        row = self.conn.execute(
+            "SELECT * FROM tenant_payment_methods WHERE id=? AND tenant_id=?",
+            (int(method_id), self.tenant_id),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("payment method not found")
+        return self._payment_method_view(row)
 
     def list_methods(self, *, currency: str | None = None) -> list[dict[str, Any]]:
-        query = "SELECT * FROM tenant_payment_methods WHERE tenant_id = ? AND status = 'active'"; args: list[Any] = [self.tenant_id]
+        query = (
+            "SELECT * FROM tenant_payment_methods "
+            "WHERE tenant_id = ? AND status = 'active'"
+        )
+        args: list[Any] = [self.tenant_id]
         if currency:
-            query += " AND currency = ?"; args.append(str(currency).upper())
-        return [dict(row) for row in self.conn.execute(query + " ORDER BY id", tuple(args)).fetchall()]
+            query += " AND currency = ?"
+            args.append(str(currency).upper())
+        rows = self.conn.execute(
+            query + " ORDER BY priority ASC, id ASC", tuple(args)
+        ).fetchall()
+        return [self._payment_method_view(row) for row in rows]
+
+    def payment_method_prompt(
+        self, method: dict[str, Any], *, amount: int | None = None
+    ) -> str:
+        return payment_prompt(method, amount=amount)
+
+    def begin_order_payment(
+        self,
+        actor_id: int,
+        *,
+        order_id: int,
+        method_id: int,
+    ) -> dict[str, Any]:
+        order = self.order(actor_id, int(order_id))
+        if order["status"] != "pending_payment":
+            raise TenantBusinessError("order is not awaiting payment")
+        method = self.method(int(method_id), currency=str(order["currency"]))
+        result = begin_provider_payment(
+            method,
+            context={
+                "tenant_id": self.tenant_id,
+                "actor_id": int(actor_id),
+                "source": "order",
+                "subject_id": int(order_id),
+                "amount": int(order["amount"]),
+                "currency": str(order["currency"]),
+            },
+        )
+        return {
+            "action": result.action,
+            "message": result.message,
+            "checkout_url": result.checkout_url,
+            "external_reference": result.external_reference,
+            "method": method,
+            "order": order,
+        }
+
+    def begin_wallet_topup_payment(
+        self,
+        actor_id: int,
+        *,
+        topup_id: int,
+        method_id: int,
+    ) -> dict[str, Any]:
+        topup = self.wallet_topup(actor_id, int(topup_id))
+        if topup["status"] != "pending_payment":
+            raise TenantBusinessError("wallet topup is not awaiting payment")
+        method = self.method(int(method_id), currency=str(topup["currency"]))
+        result = begin_provider_payment(
+            method,
+            context={
+                "tenant_id": self.tenant_id,
+                "actor_id": int(actor_id),
+                "source": "wallet_topup",
+                "subject_id": int(topup_id),
+                "amount": int(topup["amount"]),
+                "currency": str(topup["currency"]),
+            },
+        )
+        return {
+            "action": result.action,
+            "message": result.message,
+            "checkout_url": result.checkout_url,
+            "external_reference": result.external_reference,
+            "method": method,
+            "topup": topup,
+        }
+
+    def update_payment_method_admin(
+        self,
+        actor_id: int,
+        *,
+        method_id: int,
+        title: str | None = None,
+        currency: str | None = None,
+        destination: str | None = None,
+        network: str | None = None,
+        instructions: str | None = None,
+        priority: int | None = None,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        current = self.payment_method_admin(actor_id, method_id=int(method_id))
+        updates: list[str] = []
+        args: list[Any] = []
+        if title is not None:
+            updates.append("title=?")
+            args.append(_text(title, 80))
+        if currency is not None:
+            updates.append("currency=?")
+            args.append(_text(currency, 8).upper())
+        if destination is not None:
+            updates.append("destination=?")
+            args.append(_text(destination, 180))
+        if network is not None:
+            clean_network = _text(network, 40, required=False)
+            updates.append("network=?")
+            args.append(clean_network or None)
+        if instructions is not None:
+            updates.append("instructions=?")
+            args.append(_text(instructions, 500, required=False))
+        if priority is not None:
+            clean_priority = int(priority)
+            if clean_priority < 0:
+                raise ValueError("invalid payment priority")
+            updates.append("priority=?")
+            args.append(clean_priority)
+        if not updates:
+            return current
+        updates.append("updated_at=?")
+        args.append(iso_utc(utcnow()))
+        args.extend([self.tenant_id, int(method_id)])
+        with transaction(self.conn):
+            changed = self.conn.execute(
+                "UPDATE tenant_payment_methods SET " + ", ".join(updates)
+                + " WHERE tenant_id=? AND id=?",
+                tuple(args),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("payment method not found")
+        return self.payment_method_admin(actor_id, method_id=int(method_id))
+
+    def remove_payment_method_admin(
+        self, actor_id: int, *, method_id: int
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        current = self.payment_method_admin(actor_id, method_id=int(method_id))
+        refs = self.conn.execute(
+            "SELECT "
+            "(SELECT COUNT(*) FROM tenant_receipts "
+            " WHERE tenant_id=? AND payment_method_id=?) + "
+            "(SELECT COUNT(*) FROM tenant_wallet_topup_receipts "
+            " WHERE tenant_id=? AND payment_method_id=?) AS total",
+            (
+                self.tenant_id,
+                int(method_id),
+                self.tenant_id,
+                int(method_id),
+            ),
+        ).fetchone()
+        total = int(refs["total"] or 0) if refs is not None else 0
+        with transaction(self.conn):
+            if total:
+                self.conn.execute(
+                    "UPDATE tenant_payment_methods SET status='disabled', "
+                    "updated_at=? WHERE tenant_id=? AND id=?",
+                    (iso_utc(utcnow()), self.tenant_id, int(method_id)),
+                )
+                result = self.payment_method_admin(
+                    actor_id, method_id=int(method_id)
+                )
+                result["removed"] = False
+                return result
+            self.conn.execute(
+                "DELETE FROM tenant_payment_methods WHERE tenant_id=? AND id=?",
+                (self.tenant_id, int(method_id)),
+            )
+        result = dict(current)
+        result["removed"] = True
+        return result
 
     def create_order(
         self,
@@ -3784,21 +4088,102 @@ class TenantBusinessService:
                 )
         return self.order(actor_id, int(order_id))
 
-    def submit_receipt(self, actor_id: int, *, order_id: int, method_id: int, reference: str | None = None, telegram_file_id: str | None = None) -> dict[str, Any]:
+    def _record_payment_event_tx(
+        self,
+        *,
+        source: str,
+        payment_ref_id: int,
+        provider_key: str,
+        event_type: str,
+        actor_id: int | None,
+        external_event_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+        idempotency_key: str,
+    ) -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO tenant_payment_events "
+            "(tenant_id,payment_source,payment_ref_id,provider_key,event_type,"
+            "actor_id,external_event_id,payload_json,idempotency_key,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                self.tenant_id,
+                source,
+                int(payment_ref_id),
+                str(provider_key or "unknown"),
+                event_type,
+                int(actor_id) if actor_id is not None else None,
+                _text(external_event_id, 180, required=False) or None,
+                json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":")),
+                idempotency_key,
+                iso_utc(utcnow()),
+            ),
+        )
+
+    def submit_receipt(
+        self,
+        actor_id: int,
+        *,
+        order_id: int,
+        method_id: int,
+        reference: str | None = None,
+        telegram_file_id: str | None = None,
+    ) -> dict[str, Any]:
         order = self.order(actor_id, order_id)
-        if order["status"] != "pending_payment": raise TenantBusinessError("order is not awaiting payment")
+        if order["status"] != "pending_payment":
+            raise TenantBusinessError("order is not awaiting payment")
         method = self.method(method_id, currency=str(order["currency"]))
-        ref = _text(reference, 160, required=False) or None; file_id = _text(telegram_file_id, 256, required=False) or None
-        if not ref and not file_id: raise ValueError("receipt is required")
+        ref = _text(reference, 160, required=False) or None
+        file_id = _text(telegram_file_id, 256, required=False) or None
+        if bool(method.get("requires_receipt", True)) and not ref and not file_id:
+            raise ValueError("receipt is required")
         now = iso_utc(utcnow())
         with transaction(self.conn):
-            changed = self.conn.execute("UPDATE tenant_orders SET status='payment_review', updated_at=? WHERE id=? AND tenant_id=? AND status='pending_payment'", (now, int(order_id), self.tenant_id))
-            if changed.rowcount != 1: raise TenantBusinessError("order state changed")
-            cursor = self.conn.execute("INSERT INTO tenant_receipts (tenant_id, order_id, payment_method_id, reference, telegram_file_id, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)", (self.tenant_id, int(order_id), int(method["id"]), ref, file_id, now))
-        return {"id": int(cursor.lastrowid or 0), "order_id": int(order_id)}
+            changed = self.conn.execute(
+                "UPDATE tenant_orders SET status='payment_review', updated_at=? "
+                "WHERE id=? AND tenant_id=? AND status='pending_payment'",
+                (now, int(order_id), self.tenant_id),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("order state changed")
+            cursor = self.conn.execute(
+                "INSERT INTO tenant_receipts "
+                "(tenant_id,order_id,payment_method_id,reference,telegram_file_id,"
+                "status,created_at) VALUES (?,?,?,?,?,'pending',?)",
+                (
+                    self.tenant_id,
+                    int(order_id),
+                    int(method["id"]),
+                    ref,
+                    file_id,
+                    now,
+                ),
+            )
+            receipt_id = int(cursor.lastrowid or 0)
+            self._record_payment_event_tx(
+                source="order",
+                payment_ref_id=receipt_id,
+                provider_key=str(method.get("provider_key") or method.get("kind") or ""),
+                event_type="submitted",
+                actor_id=actor_id,
+                idempotency_key=(
+                    f"tenant:{self.tenant_id}:payment:order:{receipt_id}:submitted"
+                ),
+            )
+        return {
+            "id": receipt_id,
+            "order_id": int(order_id),
+            "payment_key": f"order:{receipt_id}",
+            "status": "pending",
+        }
 
     def review_receipt(
-        self, actor_id: int, receipt_id: int, *, approve: bool
+        self,
+        actor_id: int,
+        receipt_id: int,
+        *,
+        approve: bool,
+        note: str = "",
+        external_event_id: str | None = None,
     ) -> dict[str, Any]:
         """Approve money first; fulfillment and referral credit stay retry-safe."""
         self._admin(actor_id)
@@ -3825,12 +4210,15 @@ class TenantBusinessService:
 
             receipt_status = "approved" if approve else "rejected"
             changed = self.conn.execute(
-                "UPDATE tenant_receipts SET status=?, reviewed_by=?, reviewed_at=? "
+                "UPDATE tenant_receipts SET status=?, reviewed_by=?, reviewed_at=?, "
+                "review_note=?, provider_event_id=COALESCE(?, provider_event_id) "
                 "WHERE id=? AND tenant_id=? AND status='pending'",
                 (
                     receipt_status,
                     int(actor_id),
                     now,
+                    _text(note, 500, required=False),
+                    _text(external_event_id, 180, required=False) or None,
                     int(receipt_id),
                     self.tenant_id,
                 ),
@@ -3861,6 +4249,26 @@ class TenantBusinessService:
                         "WHERE tenant_id=? AND order_id=?",
                         (self.tenant_id, int(receipt["order_id"])),
                     )
+                method_row = self.conn.execute(
+                    "SELECT kind, provider_key FROM tenant_payment_methods "
+                    "WHERE tenant_id=? AND id=?",
+                    (self.tenant_id, int(receipt["payment_method_id"])),
+                ).fetchone()
+                provider_key = (
+                    str(method_row["provider_key"] or method_row["kind"])
+                    if method_row is not None else "unknown"
+                )
+                self._record_payment_event_tx(
+                    source="order",
+                    payment_ref_id=int(receipt_id),
+                    provider_key=provider_key,
+                    event_type="rejected",
+                    actor_id=actor_id,
+                    external_event_id=external_event_id,
+                    idempotency_key=(
+                        f"tenant:{self.tenant_id}:payment:order:{int(receipt_id)}:rejected"
+                    ),
+                )
                 return {
                     "order_id": int(receipt["order_id"]),
                     "status": "rejected",
@@ -3899,6 +4307,26 @@ class TenantBusinessService:
                     reward_type="purchase",
                     order_id=int(receipt["order_id"]),
                 )
+            method_row = self.conn.execute(
+                "SELECT kind, provider_key FROM tenant_payment_methods "
+                "WHERE tenant_id=? AND id=?",
+                (self.tenant_id, int(receipt["payment_method_id"])),
+            ).fetchone()
+            provider_key = (
+                str(method_row["provider_key"] or method_row["kind"])
+                if method_row is not None else "unknown"
+            )
+            self._record_payment_event_tx(
+                source="order",
+                payment_ref_id=int(receipt_id),
+                provider_key=provider_key,
+                event_type="approved",
+                actor_id=actor_id,
+                external_event_id=external_event_id,
+                idempotency_key=(
+                    f"tenant:{self.tenant_id}:payment:order:{int(receipt_id)}:approved"
+                ),
+            )
         return {
             "order_id": int(receipt["order_id"]),
             "status": "paid",
@@ -6443,6 +6871,295 @@ class TenantBusinessService:
             raise TenantBusinessError("receipt not found")
         return dict(row)
 
+    def _payment_rows(
+        self, *, customer_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        customer_filter = ""
+        args_order: list[Any] = [self.tenant_id]
+        args_topup: list[Any] = [self.tenant_id]
+        args_wallet: list[Any] = [self.tenant_id]
+        if customer_id is not None:
+            customer_filter = " AND c.id=?"
+            args_order.append(int(customer_id))
+            args_topup.append(int(customer_id))
+            args_wallet.append(int(customer_id))
+
+        order_rows = self.conn.execute(
+            "SELECT r.id, r.order_id AS subject_id, r.payment_method_id, "
+            "r.reference, r.telegram_file_id, r.status, r.reviewed_by, "
+            "r.review_note, r.provider_event_id, r.created_at, r.reviewed_at, "
+            "o.amount, o.currency, o.customer_id, o.order_kind AS operation, "
+            "o.status AS subject_status, c.display_name, c.username, "
+            "c.telegram_user_id, m.kind AS payment_kind, m.title AS payment_title, "
+            "m.provider_key, m.network, m.destination "
+            "FROM tenant_receipts r "
+            "JOIN tenant_orders o ON o.id=r.order_id AND o.tenant_id=r.tenant_id "
+            "JOIN tenant_customers c ON c.id=o.customer_id AND c.tenant_id=o.tenant_id "
+            "JOIN tenant_payment_methods m ON m.id=r.payment_method_id "
+            "AND m.tenant_id=r.tenant_id "
+            "WHERE r.tenant_id=?" + customer_filter + " ORDER BY r.id DESC LIMIT 400",
+            tuple(args_order),
+        ).fetchall()
+
+        topup_rows = self.conn.execute(
+            "SELECT r.id, r.topup_id AS subject_id, r.payment_method_id, "
+            "r.reference, r.telegram_file_id, r.status, r.reviewed_by, "
+            "r.review_note, r.provider_event_id, r.created_at, r.reviewed_at, "
+            "w.amount, w.currency, w.customer_id, 'wallet_topup' AS operation, "
+            "w.status AS subject_status, c.display_name, c.username, "
+            "c.telegram_user_id, m.kind AS payment_kind, m.title AS payment_title, "
+            "m.provider_key, m.network, m.destination "
+            "FROM tenant_wallet_topup_receipts r "
+            "JOIN tenant_wallet_topups w ON w.id=r.topup_id AND w.tenant_id=r.tenant_id "
+            "JOIN tenant_customers c ON c.id=w.customer_id AND c.tenant_id=w.tenant_id "
+            "JOIN tenant_payment_methods m ON m.id=r.payment_method_id "
+            "AND m.tenant_id=r.tenant_id "
+            "WHERE r.tenant_id=?" + customer_filter + " ORDER BY r.id DESC LIMIT 400",
+            tuple(args_topup),
+        ).fetchall()
+
+        wallet_rows = self.conn.execute(
+            "SELECT o.id, o.id AS subject_id, NULL AS payment_method_id, "
+            "NULL AS reference, NULL AS telegram_file_id, 'approved' AS status, "
+            "NULL AS reviewed_by, '' AS review_note, NULL AS provider_event_id, "
+            "COALESCE(o.paid_at,o.updated_at,o.created_at) AS created_at, "
+            "o.paid_at AS reviewed_at, o.wallet_amount AS amount, o.currency, "
+            "o.customer_id, o.order_kind AS operation, o.status AS subject_status, "
+            "c.display_name, c.username, c.telegram_user_id, 'wallet' AS payment_kind, "
+            "'کیف پول' AS payment_title, 'wallet' AS provider_key, "
+            "NULL AS network, NULL AS destination "
+            "FROM tenant_orders o "
+            "JOIN tenant_customers c ON c.id=o.customer_id AND c.tenant_id=o.tenant_id "
+            "WHERE o.tenant_id=? AND o.wallet_amount>0 "
+            "AND o.status IN ('paid','fulfilled')" + customer_filter
+            + " ORDER BY o.id DESC LIMIT 400",
+            tuple(args_wallet),
+        ).fetchall()
+
+        items: list[dict[str, Any]] = []
+        for source, rows in (
+            ("order", order_rows),
+            ("wallet_topup", topup_rows),
+            ("wallet_order", wallet_rows),
+        ):
+            for row in rows:
+                item = dict(row)
+                item["source"] = source
+                item["payment_key"] = f"{source}:{int(item['id'])}"
+                if source == "wallet_order":
+                    item["provider_title"] = "کیف پول"
+                    item["provider_icon"] = "💰"
+                else:
+                    view = payment_method_view(
+                        {
+                            "kind": item.get("payment_kind"),
+                            "provider_key": item.get("provider_key"),
+                        }
+                    )
+                    item["provider_key"] = view["provider_key"]
+                    item["provider_title"] = view["provider_title"]
+                    item["provider_icon"] = view["provider_icon"]
+                items.append(item)
+        items.sort(
+            key=lambda item: (
+                str(item.get("created_at") or ""),
+                int(item.get("id") or 0),
+            ),
+            reverse=True,
+        )
+        return items
+
+    def list_payments_admin(
+        self,
+        actor_id: int,
+        *,
+        status: str | None = None,
+        kind: str | None = None,
+        source: str | None = None,
+        provider_key: str | None = None,
+        customer_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        items = self._payment_rows(customer_id=customer_id)
+        if status is not None:
+            normalized = str(status or "").strip().lower()
+            if normalized not in ("pending", "approved", "rejected"):
+                raise ValueError("invalid payment status")
+            items = [item for item in items if item.get("status") == normalized]
+        if kind is not None:
+            normalized_kind = str(kind or "").strip().lower()
+            items = [
+                item for item in items
+                if str(item.get("payment_kind") or "").lower() == normalized_kind
+            ]
+        if source is not None:
+            clean_source = str(source or "").strip().lower()
+            items = [item for item in items if item.get("source") == clean_source]
+        if provider_key is not None:
+            clean_provider = str(provider_key or "").strip().lower()
+            items = [
+                item for item in items
+                if str(item.get("provider_key") or "").lower() == clean_provider
+            ]
+        return items[:500]
+
+    def customer_payment_history(self, actor_id: int) -> list[dict[str, Any]]:
+        customer = self._customer(actor_id, active=False)
+        return self._payment_rows(customer_id=int(customer["id"]))[:50]
+
+    def attach_payment_receipt_media(
+        self,
+        actor_id: int,
+        *,
+        payment_key: str,
+        media: bytes,
+        mime_type: str = "image/jpeg",
+    ) -> dict[str, Any]:
+        customer = self._customer(actor_id, active=False)
+        source, receipt_id = self._parse_payment_key(payment_key)
+        if source not in ("order", "wallet_topup"):
+            raise TenantBusinessError("payment does not accept receipt media")
+        owned = next(
+            (
+                item for item in self._payment_rows(customer_id=int(customer["id"]))
+                if item["payment_key"] == f"{source}:{receipt_id}"
+            ),
+            None,
+        )
+        if owned is None:
+            raise TenantBusinessError("payment not found")
+        payload = bytes(media or b"")
+        if not payload or len(payload) > 8 * 1024 * 1024:
+            raise ValueError("invalid receipt media")
+        clean_mime = _text(mime_type, 80, required=False) or "image/jpeg"
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            self.conn.execute(
+                "INSERT INTO tenant_payment_receipt_media "
+                "(tenant_id,payment_source,receipt_id,mime_type,media,created_at) "
+                "VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(tenant_id,payment_source,receipt_id) DO UPDATE SET "
+                "mime_type=excluded.mime_type, media=excluded.media, "
+                "created_at=excluded.created_at",
+                (
+                    self.tenant_id,
+                    source,
+                    int(receipt_id),
+                    clean_mime,
+                    sqlite3.Binary(payload),
+                    now,
+                ),
+            )
+        return {
+            "payment_key": f"{source}:{receipt_id}",
+            "size": len(payload),
+            "mime_type": clean_mime,
+        }
+
+    def payment_receipt_media_admin(
+        self, actor_id: int, *, payment_key: str | int
+    ) -> dict[str, Any] | None:
+        self._admin(actor_id)
+        source, receipt_id = self._parse_payment_key(payment_key)
+        if source not in ("order", "wallet_topup"):
+            return None
+        row = self.conn.execute(
+            "SELECT mime_type, media, created_at "
+            "FROM tenant_payment_receipt_media "
+            "WHERE tenant_id=? AND payment_source=? AND receipt_id=?",
+            (self.tenant_id, source, int(receipt_id)),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "mime_type": str(row["mime_type"] or "image/jpeg"),
+            "media": bytes(row["media"]),
+            "created_at": row["created_at"],
+        }
+
+    @staticmethod
+    def _parse_payment_key(payment_key: str | int) -> tuple[str, int]:
+        raw = str(payment_key or "").strip()
+        if raw.isdigit():
+            return "order", int(raw)
+        if ":" not in raw:
+            raise ValueError("invalid payment key")
+        source, raw_id = raw.split(":", 1)
+        if source not in ("order", "wallet_topup", "wallet_order"):
+            raise ValueError("invalid payment source")
+        payment_id = int(raw_id)
+        if payment_id <= 0:
+            raise ValueError("invalid payment id")
+        return source, payment_id
+
+    def payment_admin(
+        self, actor_id: int, *, payment_key: str | int
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        source, payment_id = self._parse_payment_key(payment_key)
+        key = f"{source}:{payment_id}"
+        item = next(
+            (row for row in self._payment_rows() if row["payment_key"] == key),
+            None,
+        )
+        if item is None:
+            raise TenantBusinessError("payment not found")
+        return item
+
+    def review_payment_admin(
+        self,
+        actor_id: int,
+        *,
+        payment_key: str | int,
+        approve: bool,
+        note: str = "",
+        external_event_id: str | None = None,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        source, payment_id = self._parse_payment_key(payment_key)
+        if source == "order":
+            result = self.review_receipt(
+                actor_id,
+                payment_id,
+                approve=approve,
+                note=note,
+                external_event_id=external_event_id,
+            )
+        elif source == "wallet_topup":
+            result = self.review_wallet_topup_receipt(
+                actor_id,
+                receipt_id=payment_id,
+                approve=approve,
+                note=note,
+                external_event_id=external_event_id,
+            )
+        else:
+            raise TenantBusinessError("wallet payment is already final")
+        result["payment_key"] = f"{source}:{payment_id}"
+        result["source"] = source
+        return result
+
+    def search_payments_admin(
+        self, actor_id: int, query: str
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        term = str(query or "").strip().lower().lstrip("#")
+        if not term:
+            return []
+        matches: list[dict[str, Any]] = []
+        for item in self._payment_rows():
+            haystack = " ".join(
+                str(item.get(key) or "")
+                for key in (
+                    "payment_key", "id", "display_name", "username",
+                    "telegram_user_id", "reference", "amount", "payment_title",
+                    "provider_title",
+                )
+            ).lower()
+            if term in haystack:
+                matches.append(item)
+        return matches[:100]
+
     def update_coupon_admin(
         self,
         actor_id: int,
@@ -6730,10 +7447,10 @@ class TenantBusinessService:
     def list_payment_methods_admin(self, actor_id: int) -> list[dict[str, Any]]:
         self._admin(actor_id)
         return [
-            dict(row)
+            self._payment_method_view(row)
             for row in self.conn.execute(
                 "SELECT * FROM tenant_payment_methods "
-                "WHERE tenant_id=? ORDER BY id DESC",
+                "WHERE tenant_id=? ORDER BY priority ASC, id ASC",
                 (self.tenant_id,),
             ).fetchall()
         ]

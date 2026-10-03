@@ -167,10 +167,19 @@ def build_users_search_menu_keyboard() -> InlineKeyboardMarkup:
 
 def build_payments_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅لیست تراکنشات تایید شده", callback_data="userbot:payments:list:approved")],
-        [InlineKeyboardButton("🚫لیست تراکنشات رد شده", callback_data="userbot:payments:list:rejected")],
         [InlineKeyboardButton("⏳لیست تراکنشات در انتظار", callback_data="userbot:payments:list:pending")],
-        [InlineKeyboardButton("💳لیست تراکنشات کارت به کارت", callback_data="userbot:payments:list:card")],
+        [
+            InlineKeyboardButton("✅لیست تراکنشات تایید شده", callback_data="userbot:payments:list:approved"),
+            InlineKeyboardButton("🚫لیست تراکنشات رد شده", callback_data="userbot:payments:list:rejected"),
+        ],
+        [
+            InlineKeyboardButton("💳لیست تراکنشات کارت به کارت", callback_data="userbot:payments:list:card"),
+            InlineKeyboardButton("🪙لیست تراکنشات Crypto", callback_data="userbot:payments:list:crypto"),
+        ],
+        [
+            InlineKeyboardButton("➕شارژهای کیف پول", callback_data="userbot:payments:list:wallet_topup"),
+            InlineKeyboardButton("💰پرداخت‌های کیف پول", callback_data="userbot:payments:list:wallet_order"),
+        ],
         [InlineKeyboardButton("🔍جستجوی تراکنش", callback_data="userbot:payments:search")],
         [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:menu")],
     ])
@@ -630,17 +639,32 @@ async def _send_order_detail(update: Update, business: Any, actor: int, order_id
     )
 
 
-async def _send_payments_page(update: Update, business: Any, actor: int, filter_type: str, page: int = 1) -> None:
+async def _send_payments_page(
+    update: Update,
+    business: Any,
+    actor: int,
+    filter_type: str,
+    page: int = 1,
+) -> None:
     status = filter_type if filter_type in ("approved", "rejected", "pending") else None
-    kind = "card" if filter_type == "card" else None
-    items = business.list_receipts_history_admin(actor, status=status, kind=kind)
+    kind = filter_type if filter_type in ("card", "crypto") else None
+    source = filter_type if filter_type in ("wallet_topup", "wallet_order") else None
+    items = business.list_payments_admin(
+        actor,
+        status=status,
+        kind=kind,
+        source=source,
+    )
     selected, page, pages = _page(items, page)
     title = {
-        "approved": "لیست تراکنشات تایید شده ✅",
-        "rejected": "لیست تراکنشات رد شده 🚫",
-        "pending": "لیست تراکنشات در انتظار ⏳",
-        "card": "لیست تراکنشات کارت به کارت 💳",
-    }.get(filter_type, "لیست تراکنشات")
+        "approved": "تراکنشات تایید شده ✅",
+        "rejected": "تراکنشات رد شده 🚫",
+        "pending": "تراکنشات در انتظار ⏳",
+        "card": "تراکنشات کارت به کارت 💳",
+        "crypto": "تراکنشات Crypto 🪙",
+        "wallet_topup": "شارژهای کیف پول ➕",
+        "wallet_order": "پرداخت‌های مستقیم کیف پول 💰",
+    }.get(filter_type, "همه تراکنشات")
     money: dict[str, int] = {}
     for item in items:
         currency = str(item.get("currency") or "")
@@ -648,17 +672,28 @@ async def _send_payments_page(update: Update, business: Any, actor: int, filter_
     rows: list[list[InlineKeyboardButton]] = []
     current: list[InlineKeyboardButton] = []
     for item in selected:
-        current.append(InlineKeyboardButton(str(item["id"]), callback_data=f"userbot:pay:detail:{int(item['id'])}"))
+        icon = str(item.get("provider_icon") or "💳")
+        current.append(InlineKeyboardButton(
+            f"{icon} {int(item['id'])}",
+            callback_data=f"userbot:pay:detail:{item['payment_key']}",
+        ))
         if len(current) == 3:
-            rows.append(current); current = []
+            rows.append(current)
+            current = []
     if current:
         rows.append(current)
     nav: list[InlineKeyboardButton] = []
     if page > 1:
-        nav.append(InlineKeyboardButton("➡️", callback_data=f"userbot:payments:list:{filter_type}:{page-1}"))
+        nav.append(InlineKeyboardButton(
+            "➡️",
+            callback_data=f"userbot:payments:list:{filter_type}:{page-1}",
+        ))
     nav.append(InlineKeyboardButton(f"{page}/{pages}", callback_data="userbot:noop"))
     if page < pages:
-        nav.append(InlineKeyboardButton("⬅️", callback_data=f"userbot:payments:list:{filter_type}:{page+1}"))
+        nav.append(InlineKeyboardButton(
+            "⬅️",
+            callback_data=f"userbot:payments:list:{filter_type}:{page+1}",
+        ))
     rows.append(nav)
     rows.append([InlineKeyboardButton("🔙بازگشت", callback_data="userbot:payments_menu")])
     await _edit_or_send(
@@ -672,23 +707,44 @@ async def _send_payments_page(update: Update, business: Any, actor: int, filter_
     )
 
 
-async def _send_payment_detail(update: Update, business: Any, actor: int, receipt_id: int) -> None:
-    pay = business.receipt_admin(actor, receipt_id=receipt_id)
-    status_title = {"approved": "✅ تایید شده", "rejected": "❌ رد شده", "pending": "⏳ در انتظار"}.get(str(pay.get("status")), str(pay.get("status")))
+async def _send_payment_detail(
+    update: Update,
+    business: Any,
+    actor: int,
+    payment_key: str | int,
+) -> None:
+    pay = business.payment_admin(actor, payment_key=payment_key)
+    status_title = {
+        "approved": "✅ تایید شده",
+        "rejected": "❌ رد شده",
+        "pending": "⏳ در انتظار",
+    }.get(str(pay.get("status")), str(pay.get("status")))
+    source_title = {
+        "order": "سفارش",
+        "wallet_topup": "شارژ کیف پول",
+        "wallet_order": "پرداخت مستقیم کیف پول",
+    }.get(str(pay.get("source") or ""), str(pay.get("source") or "-"))
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton("👤 پروفایل کاربر", callback_data=f"userbot:user:{int(pay['customer_id'])}")]
+        [InlineKeyboardButton(
+            "👤 پروفایل کاربر",
+            callback_data=f"userbot:user:{int(pay['customer_id'])}",
+        )]
     ]
-    if pay["status"] == "pending":
-        rows.extend([
-            [
-                InlineKeyboardButton("✅ تایید", callback_data=f"userbot:pay:review:{receipt_id}:yes"),
-                InlineKeyboardButton("❌ رد", callback_data=f"userbot:pay:review:{receipt_id}:no"),
-            ]
+    if pay["status"] == "pending" and pay.get("source") in ("order", "wallet_topup"):
+        rows.append([
+            InlineKeyboardButton(
+                "✅ تایید",
+                callback_data=f"userbot:pay:review:{pay['payment_key']}:yes",
+            ),
+            InlineKeyboardButton(
+                "❌ رد",
+                callback_data=f"userbot:pay:review:{pay['payment_key']}:no",
+            ),
         ])
     rows.append([InlineKeyboardButton("🔙بازگشت", callback_data="userbot:payments_menu")])
     await _edit_or_send(
         update,
-        f"◈ شناسه تراکنش: {receipt_id}\n"
+        f"◈ شناسه تراکنش: {pay['payment_key']}\n"
         f"👤 کاربر: {pay.get('display_name') or '-'}\n"
         f"◈ نام کاربری: {'@' + str(pay.get('username')).lstrip('@') if pay.get('username') else '-'}\n"
         f"◈ شناسه کاربر: {pay.get('telegram_user_id') or '-'}\n"
@@ -696,10 +752,25 @@ async def _send_payment_detail(update: Update, business: Any, actor: int, receip
         f"◈ مبلغ تراکنش: {int(pay.get('amount') or 0):,} {pay.get('currency') or ''}\n"
         "❖ • -------------------------- • ❖\n"
         f"◈ وضعیت: {status_title}\n"
-        f"◈ روش تراکنش: {pay.get('payment_kind') or '-'}\n"
-        f"◈ پیگیری: {pay.get('reference') or ('تصویر رسید' if pay.get('telegram_file_id') else '-')}",
+        f"◈ نوع: {source_title}\n"
+        f"◈ Provider: {pay.get('provider_icon') or ''} {pay.get('provider_title') or pay.get('payment_title') or '-'}\n"
+        f"◈ پیگیری: {pay.get('reference') or ('تصویر رسید' if pay.get('telegram_file_id') else '-')}\n"
+        f"◈ یادداشت بررسی: {pay.get('review_note') or '-'}",
         InlineKeyboardMarkup(rows),
     )
+    media = business.payment_receipt_media_admin(
+        actor, payment_key=pay["payment_key"]
+    )
+    if media is not None and update.effective_message is not None:
+        receipt_file = BytesIO(bytes(media["media"]))
+        receipt_file.name = "receipt.jpg"
+        try:
+            await update.effective_message.reply_photo(
+                photo=receipt_file,
+                caption=f"🧾 تصویر رسید {pay['payment_key']}",
+            )
+        except (BadRequest, Forbidden, NetworkError, TimedOut):
+            pass
 
 
 def _gift_stats(business: Any, actor: int) -> dict[str, int]:
@@ -1660,22 +1731,24 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
         methods = business.list_payment_methods_admin(actor)
         rows: list[list[InlineKeyboardButton]] = [
             [InlineKeyboardButton(
-                f"{'✅' if x['status']=='active' else '❌'} {x['title']} · {x['currency']}",
+                f"{'✅' if x['status']=='active' else '❌'} "
+                f"{x.get('provider_icon') or '💳'} {x['title']} · {x['currency']}",
                 callback_data=f"userbot:settings:payment:method:{int(x['id'])}",
             )]
             for x in methods
         ]
-        rows.extend([
-            [
-                InlineKeyboardButton("💳 افزودن کارت به کارت", callback_data="userbot:settings:payment:addkind:card"),
-                InlineKeyboardButton("🔗 افزودن ارز دیجیتال", callback_data="userbot:settings:payment:addkind:crypto"),
-            ],
-            [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
+        rows.append([
+            InlineKeyboardButton(
+                "➕ افزودن روش پرداخت",
+                callback_data="userbot:settings:payment:add",
+            )
         ])
+        rows.append([InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")])
         await _edit_or_send(
             update,
-            "💳 تنظیمات پرداخت\n"
-            "روش‌های پرداخت هر Tenant مستقل هستند و فقط روش‌های واقعاً پشتیبانی‌شده نمایش داده می‌شوند.",
+            "💳 تنظیمات پرداخت Tenant\n"
+            "ترتیب نمایش با Priority است. Provider مستقل از UserBot ذخیره می‌شود؛ "
+            "درگاه یا تأییدکننده جدید بعداً از همین لایه اضافه می‌شود.",
             InlineKeyboardMarkup(rows),
         )
         return
@@ -1897,8 +1970,11 @@ async def handle_callback(
             rows.append([InlineKeyboardButton("👤بازگشت به پروفایل", callback_data=f"userbot:user:{customer_id}")])
             await _edit_or_send(update, f"📗 لیست سفارشات\nتعداد: {len(items)}", InlineKeyboardMarkup(rows)); return True
         if action == "payments":
-            items = business.customer_receipts_admin(actor, customer_id=customer_id)
-            rows = [[InlineKeyboardButton(f"#{x['id']} · {x['status']}", callback_data=f"userbot:pay:detail:{int(x['id'])}")] for x in items[:50]]
+            items = business.list_payments_admin(actor, customer_id=customer_id)
+            rows = [[InlineKeyboardButton(
+                f"{x.get('provider_icon') or '💳'} {x['payment_key']} · {x['status']}",
+                callback_data=f"userbot:pay:detail:{x['payment_key']}",
+            )] for x in items[:50]]
             rows.append([InlineKeyboardButton("👤بازگشت به پروفایل", callback_data=f"userbot:user:{customer_id}")])
             await _edit_or_send(update, f"💵 لیست تراکنشات\nتعداد: {len(items)}", InlineKeyboardMarkup(rows)); return True
         if action == "wallet":
@@ -1958,14 +2034,23 @@ async def handle_callback(
         context.user_data[FLOW_KEY]={"kind":"payment_search"}
         await query.message.reply_text("🔎 شناسه تراکنش را وارد کنید:",reply_markup=userbot_cancel_keyboard()); return True
     if data.startswith("userbot:pay:detail:"):
-        await _send_payment_detail(update,business,actor,int(data.rsplit(":",1)[1])); return True
+        payment_key = data[len("userbot:pay:detail:"):]
+        await _send_payment_detail(update, business, actor, payment_key)
+        return True
     if data.startswith("userbot:pay:review:"):
-        parts=data.split(":"); rid=int(parts[3]); approve=parts[4]=="yes"
-        result=business.review_receipt(actor,rid,approve=approve)
-        if approve and result.get("status")=="paid":
-            try: business.fulfill_paid_order(actor,order_id=int(result["order_id"]))
-            except TenantBusinessError: pass
-        await _send_payment_detail(update,business,actor,rid); return True
+        raw = data[len("userbot:pay:review:"):]
+        payment_key, decision = raw.rsplit(":", 1)
+        approve = decision == "yes"
+        result = business.review_payment_admin(
+            actor, payment_key=payment_key, approve=approve
+        )
+        if approve and result.get("source") == "order" and result.get("status") == "paid":
+            try:
+                business.fulfill_paid_order(actor, order_id=int(result["order_id"]))
+            except TenantBusinessError:
+                pass
+        await _send_payment_detail(update, business, actor, payment_key)
+        return True
 
     if data == "userbot:gifts_menu":
         await _send_gifts_menu(update,business,actor); return True
@@ -2946,64 +3031,160 @@ async def handle_callback(
         return True
 
     if data == "userbot:settings:payment:add":
-        context.user_data[FLOW_KEY] = {"kind": "payment_add_kind"}
+        providers = business.available_payment_providers_admin(actor)
+        rows = [[InlineKeyboardButton(
+            f"{item['icon']} {item['title']}",
+            callback_data=f"userbot:settings:payment:addprovider:{item['key']}",
+        )] for item in providers]
+        rows.append([InlineKeyboardButton(
+            "🔙بازگشت", callback_data="userbot:settings:payment"
+        )])
         await _edit_or_send(
             update,
-            "💳 نوع روش پرداخت را انتخاب کنید:",
-            InlineKeyboardMarkup([
-                [InlineKeyboardButton("💳 کارت به کارت", callback_data="userbot:settings:payment:addkind:card")],
-                [InlineKeyboardButton("🪙 رمزارز", callback_data="userbot:settings:payment:addkind:crypto")],
-                [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:payment")],
-            ]),
+            "💳 Provider روش پرداخت را انتخاب کنید:",
+            InlineKeyboardMarkup(rows),
         )
         return True
-    if data.startswith("userbot:settings:payment:addkind:"):
-        kind = data.rsplit(":", 1)[1]
-        if kind not in {"card", "crypto"}:
-            raise ValueError("invalid payment kind")
+    if data.startswith("userbot:settings:payment:addprovider:"):
+        provider_key = data.rsplit(":", 1)[1]
+        provider = next(
+            (
+                item for item in business.available_payment_providers_admin(actor)
+                if item["key"] == provider_key
+            ),
+            None,
+        )
+        if provider is None:
+            raise TenantBusinessError("payment provider not found")
         context.user_data[FLOW_KEY] = {
             "kind": "payment_add_title",
-            "payment_kind": kind,
+            "payment_provider": provider_key,
+            "payment_kind": provider["legacy_kind"],
+            "requires_network": bool(provider.get("requires_network")),
         }
         await query.message.reply_text(
             "📝 عنوان روش پرداخت را وارد کنید:",
             reply_markup=userbot_cancel_keyboard(),
         )
         return True
-    if data.startswith("userbot:settings:payment:method:"):
-        mid = int(data.rsplit(":", 1)[1])
-        item = next(
+    if data.startswith("userbot:settings:payment:addkind:"):
+        # Backward compatibility for old Telegram messages from <= v0.20.0.
+        kind = data.rsplit(":", 1)[1]
+        provider_key = "card_manual" if kind == "card" else "crypto_manual"
+        provider = next(
             (
-                x
-                for x in business.list_payment_methods_admin(actor)
-                if int(x["id"]) == mid
+                item for item in business.available_payment_providers_admin(actor)
+                if item["key"] == provider_key
             ),
             None,
         )
-        if item is None:
-            raise TenantBusinessError("payment method not found")
+        if provider is None:
+            raise TenantBusinessError("payment provider not found")
+        context.user_data[FLOW_KEY] = {
+            "kind": "payment_add_title",
+            "payment_provider": provider_key,
+            "payment_kind": provider["legacy_kind"],
+            "requires_network": bool(provider.get("requires_network")),
+        }
+        await query.message.reply_text(
+            "📝 عنوان روش پرداخت را وارد کنید:",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+    if data.startswith("userbot:settings:payment:edit:"):
+        parts = data.split(":")
+        if len(parts) != 6:
+            raise ValueError("invalid payment edit callback")
+        mid = int(parts[4])
+        field = parts[5]
+        if field not in {"title","currency","destination","network","instructions","priority"}:
+            raise ValueError("invalid payment edit field")
+        item = business.payment_method_admin(actor, method_id=mid)
+        current = item.get(field) if field != "priority" else int(item.get("priority") or 0)
+        context.user_data[FLOW_KEY] = {
+            "kind": "payment_edit",
+            "method_id": mid,
+            "field": field,
+        }
+        await query.message.reply_text(
+            f"✏️ مقدار فعلی: {current or '-'}\nمقدار جدید را ارسال کنید:",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+    if data.startswith("userbot:settings:payment:remove_confirm:"):
+        mid = int(data.rsplit(":", 1)[1])
+        result = business.remove_payment_method_admin(actor, method_id=mid)
+        message = (
+            "✅ روش پرداخت حذف شد."
+            if result.get("removed")
+            else "✅ روش دارای سابقه تراکنش بود؛ برای حفظ تاریخچه غیرفعال شد."
+        )
         await _edit_or_send(
             update,
-            f"💳 {item['title']}\n"
-            f"نوع: {item['kind']}\n"
+            message,
+            InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "🔙 تنظیمات پرداخت",
+                    callback_data="userbot:settings:payment",
+                )
+            ]]),
+        )
+        return True
+    if data.startswith("userbot:settings:payment:remove:"):
+        mid = int(data.rsplit(":", 1)[1])
+        item = business.payment_method_admin(actor, method_id=mid)
+        await _edit_or_send(
+            update,
+            f"⚠️ حذف روش پرداخت «{item['title']}»؟\n"
+            "اگر سابقه مالی داشته باشد حذف نمی‌شود و فقط غیرفعال خواهد شد.",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "✅ تأیید",
+                    callback_data=f"userbot:settings:payment:remove_confirm:{mid}",
+                )],
+                [InlineKeyboardButton(
+                    "❌ لغو",
+                    callback_data=f"userbot:settings:payment:method:{mid}",
+                )],
+            ]),
+        )
+        return True
+    if data.startswith("userbot:settings:payment:method:"):
+        mid = int(data.rsplit(":", 1)[1])
+        item = business.payment_method_admin(actor, method_id=mid)
+        await _edit_or_send(
+            update,
+            f"{item.get('provider_icon') or '💳'} {item['title']}\n"
+            f"Provider: {item.get('provider_title') or item.get('provider_key')} "
+            f"({item.get('provider_key')})\n"
             f"ارز: {item['currency']}\n"
             f"مقصد: {item['destination']}\n"
             f"شبکه: {item.get('network') or '-'}\n"
+            f"Priority: {int(item.get('priority') or 0)}\n"
             f"توضیحات: {item.get('instructions') or '-'}\n"
             f"وضعیت: {item['status']}",
             InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✏️ عنوان", callback_data=f"userbot:settings:payment:edit:{mid}:title"),
+                    InlineKeyboardButton("💱 ارز", callback_data=f"userbot:settings:payment:edit:{mid}:currency"),
+                ],
+                [
+                    InlineKeyboardButton("📍 مقصد", callback_data=f"userbot:settings:payment:edit:{mid}:destination"),
+                    InlineKeyboardButton("🌐 شبکه", callback_data=f"userbot:settings:payment:edit:{mid}:network"),
+                ],
+                [
+                    InlineKeyboardButton("📝 توضیحات", callback_data=f"userbot:settings:payment:edit:{mid}:instructions"),
+                    InlineKeyboardButton("↕️ Priority", callback_data=f"userbot:settings:payment:edit:{mid}:priority"),
+                ],
                 [InlineKeyboardButton("⏸/▶️ تغییر وضعیت", callback_data=f"userbot:settings:payment:toggle:{mid}")],
+                [InlineKeyboardButton("🗑 حذف / غیرفعال امن", callback_data=f"userbot:settings:payment:remove:{mid}")],
                 [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:payment")],
             ]),
         )
         return True
     if data.startswith("userbot:settings:payment:toggle:"):
         mid = int(data.rsplit(":", 1)[1])
-        item = next(
-            x
-            for x in business.list_payment_methods_admin(actor)
-            if int(x["id"]) == mid
-        )
+        item = business.payment_method_admin(actor, method_id=mid)
         business.set_payment_method_status_admin(
             actor, method_id=mid, enabled=item["status"] != "active"
         )
@@ -3223,13 +3404,18 @@ async def handle_text(
             rows=[[InlineKeyboardButton(f"#{x['id']} · {x['display_name']}",callback_data=f"userbot:order:{int(x['id'])}")] for x in items[:50]] or [[InlineKeyboardButton("نتیجه‌ای نیست",callback_data="userbot:noop")]]
             await update.effective_message.reply_text("نتایج سفارش:",reply_markup=InlineKeyboardMarkup(rows)); return True
         if kind=="payment_search":
-            rid=int(text.lstrip("#")); context.user_data.pop(FLOW_KEY,None)
-            await update.effective_message.reply_text("✅ تراکنش یافت شد.",reply_markup=admin_main_keyboard())
-            # send a synthetic callback-like detail as a new message
-            pay=business.receipt_admin(actor,receipt_id=rid)
+            items=business.search_payments_admin(actor,text)
+            context.user_data.pop(FLOW_KEY,None)
             await update.effective_message.reply_text(
-                f"◈ شناسه تراکنش: {rid}\n👤 {pay['display_name']}\n💰 {int(pay['amount']):,} {pay['currency']}\nوضعیت: {pay['status']}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("جزئیات",callback_data=f"userbot:pay:detail:{rid}")]])
+                f"✅ {len(items)} تراکنش پیدا شد.",
+                reply_markup=admin_main_keyboard(),
+            )
+            rows=[[InlineKeyboardButton(
+                f"{x.get('provider_icon') or '💳'} {x['payment_key']} · {x.get('display_name') or '-'}",
+                callback_data=f"userbot:pay:detail:{x['payment_key']}",
+            )] for x in items[:50]] or [[InlineKeyboardButton("نتیجه‌ای نیست",callback_data="userbot:noop")]]
+            await update.effective_message.reply_text(
+                "نتایج تراکنش:",reply_markup=InlineKeyboardMarkup(rows)
             ); return True
         if kind=="gift_add_code":
             code=text.strip().upper()
@@ -3583,22 +3769,54 @@ async def handle_text(
             await update.effective_message.reply_text("✅ تنظیم یادآور ذخیره شد.",reply_markup=admin_main_keyboard()); return True
         if kind=="force_join_channel":
             business.set_userbot_setting_admin(actor,key="force_join_channel",value=text); context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ کانال عضویت اجباری ذخیره شد.",reply_markup=admin_main_keyboard()); return True
+        if kind=="payment_edit":
+            field=str(flow["field"])
+            mid=int(flow["method_id"])
+            kwargs: dict[str, Any] = {}
+            if field == "priority":
+                value=int(text.replace(",",""))
+                if value < 0:
+                    raise ValueError("payment priority")
+                kwargs[field]=value
+            elif field == "currency":
+                value=text.strip().upper()
+                if not 3 <= len(value) <= 8:
+                    raise ValueError("payment currency")
+                kwargs[field]=value
+            elif field == "network":
+                kwargs[field]="" if text in {"0","-","—"} else text
+            elif field == "instructions":
+                kwargs[field]="" if text in {"0","-","—"} else text
+            else:
+                kwargs[field]=text
+            business.update_payment_method_admin(
+                actor, method_id=mid, **kwargs
+            )
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text(
+                "✅ روش پرداخت ویرایش شد.",
+                reply_markup=admin_main_keyboard(),
+            )
+            return True
         if kind=="payment_add_title":
             if not text or len(text)>80: raise ValueError("payment title")
             flow["title"]=text; flow["kind"]="payment_add_currency"
-            await update.effective_message.reply_text("💱 ارز را وارد کنید؛ مثال IRR یا USDT:",reply_markup=userbot_cancel_keyboard()); return True
+            await update.effective_message.reply_text(
+                "💱 ارز را وارد کنید؛ مثال IRR یا USDT:",
+                reply_markup=userbot_cancel_keyboard(),
+            ); return True
         if kind=="payment_add_currency":
             currency=text.strip().upper()
             if not 3<=len(currency)<=8: raise ValueError("payment currency")
             flow["currency"]=currency; flow["kind"]="payment_add_destination"
             await update.effective_message.reply_text(
-                "📍 شماره کارت / آدرس کیف پول را وارد کنید:",
+                "📍 شماره کارت / آدرس کیف پول / مقصد Provider را وارد کنید:",
                 reply_markup=userbot_cancel_keyboard(),
             ); return True
         if kind=="payment_add_destination":
             if not text or len(text)>180: raise ValueError("payment destination")
             flow["destination"]=text
-            if str(flow["payment_kind"])=="crypto":
+            if bool(flow.get("requires_network")):
                 flow["kind"]="payment_add_network"
                 await update.effective_message.reply_text(
                     "🌐 نام شبکه را وارد کنید؛ مثال TRC20:",
@@ -3610,7 +3828,10 @@ async def handle_text(
                 reply_markup=userbot_cancel_keyboard(),
             ); return True
         if kind=="payment_add_network":
-            flow["network"]="" if text in {"0","-","—"} else text
+            network="" if text in {"0","-","—"} else text
+            if bool(flow.get("requires_network")) and not network:
+                raise ValueError("payment network")
+            flow["network"]=network
             flow["kind"]="payment_add_instructions"
             await update.effective_message.reply_text(
                 "📝 توضیحات پرداخت را وارد کنید یا 0 برای بدون توضیح:",
@@ -3619,9 +3840,14 @@ async def handle_text(
         if kind=="payment_add_instructions":
             instructions="" if text in {"0","-","—"} else text
             business.add_payment_method(
-                actor,kind=str(flow["payment_kind"]),title=str(flow["title"]),
-                currency=str(flow["currency"]),destination=str(flow["destination"]),
-                network=str(flow.get("network") or ""),instructions=instructions,
+                actor,
+                provider_key=str(flow["payment_provider"]),
+                kind=str(flow["payment_kind"]),
+                title=str(flow["title"]),
+                currency=str(flow["currency"]),
+                destination=str(flow["destination"]),
+                network=str(flow.get("network") or ""),
+                instructions=instructions,
             )
             context.user_data.pop(FLOW_KEY,None)
             await update.effective_message.reply_text(

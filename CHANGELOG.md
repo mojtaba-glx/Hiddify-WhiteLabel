@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.30.0 — Tenant payment architecture
+
+- Unified Tenant card-to-card, Crypto, wallet checkout and wallet-topup payment status under one payment history/review model.
+- Added a provider registry and generic payment-start contract so future gateways can return receipt, external-URL or completed actions without provider-specific UserBot branches.
+- Added provider metadata, priority and safe method editing/removal while preserving old payment receipts and installed databases.
+- Added unified AdminBot approve/reject handling for both order receipts and wallet-topup receipts, with review notes and payment audit events.
+- Added Tenant-scoped receipt-media archival so photos submitted through UserBot remain reviewable from the separate AdminBot token.
+- Added UserBot payment-status history for manual receipts and direct wallet payments without changing the persistent main-menu layout.
+- Added migration `0026_payment_phase11` and regression coverage for provider extension, wallet review, payment status, receipt media and safe method lifecycle.
+
 ## v0.20.1 — Server connection parity
 
 - Completed tenant server connection controls using Hiddify-SellBot `AdminBot/servers.py` and its provider-specific authentication flows as the reference.
