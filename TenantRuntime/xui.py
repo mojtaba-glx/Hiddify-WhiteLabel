@@ -514,6 +514,29 @@ class _Session:
         return data
 
 
+    def raw_request(
+        self,
+        method: str,
+        path: str,
+    ) -> httpx.Response:
+        headers = {"Accept": "*/*"}
+        if self.token_auth:
+            headers["Authorization"] = f"Bearer {self.credential['api_token']}"
+        elif self.credential.get("secret_header"):
+            headers[_SECRET_HEADER] = self.credential["secret_header"]
+        try:
+            response = self.client.request(
+                method,
+                f"{self.api_base}/{path.lstrip('/')}",
+                headers=headers,
+            )
+        except httpx.TransportError as exc:
+            raise PanelError("X-UI backup connection failed") from exc
+        if response.status_code >= 400:
+            raise _StatusError(response.status_code)
+        return response
+
+
 class XuiPanelAdapter:
     """Synchronous PanelAdapter implementation for Sanaei and Alireza."""
 
@@ -872,6 +895,37 @@ class XuiPanelAdapter:
             if result is None:
                 raise PanelError("X-UI edit could not be verified")
             return result
+
+    def server_backup(self, *, target: PanelTarget, secret: str) -> dict:
+        """Download the X-UI SQLite database for Sanaei or Alireza."""
+        with self._session(target, secret) as session:
+            response = session.raw_request("GET", "server/getDb")
+            content = bytes(response.content or b"")
+            if not content:
+                raise PanelError("X-UI backup is empty")
+            disposition = str(response.headers.get("content-disposition") or "")
+            filename = ""
+            match = __import__("re").search(
+                r"filename\*?=(?:UTF-8''|\")?([^\";]+)",
+                disposition,
+                flags=__import__("re").IGNORECASE,
+            )
+            if match:
+                filename = str(match.group(1) or "").strip().strip("'\"")
+            filename = filename.replace("\\", "/").split("/")[-1].strip()
+            filename = "".join(
+                ch if (ch.isalnum() or ch in "._- @()") else "_"
+                for ch in filename
+            ).strip(" .")
+            if not filename:
+                host = urlsplit(_clean_base(target.endpoint)).hostname or "x-ui"
+                stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+                filename = f"xui-{host}-{stamp}.db"
+            return {
+                "filename": filename,
+                "content": content,
+                "source_url": f"{session.api_base}/server/getDb",
+            }
 
     def server_stats(self, *, target: PanelTarget, secret: str) -> dict:
         """SellBot-compatible X-UI server/system statistics."""
