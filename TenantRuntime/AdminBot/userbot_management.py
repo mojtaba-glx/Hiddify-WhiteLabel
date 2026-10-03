@@ -3723,7 +3723,8 @@ async def handle_callback(
         context.user_data[FLOW_KEY] = {"kind": "backup_restore"}
         await query.message.reply_text(
             "📦 فایل بکاپ همین Tenant را ارسال کنید.\n"
-            "فرمت جدید ZIP v2 و JSON قدیمی v1 پشتیبانی می‌شوند.",
+            "فرمت جدید ZIP v2 و JSON قدیمی v1 پشتیبانی می‌شوند.\n"
+            "از بکاپ کامل، داده‌های ربات بازیابی می‌شود؛ فایل‌های پوشهٔ PanelBackups را باید از داخل پنل مربوط بازیابی کنید.",
             reply_markup=userbot_cancel_keyboard(),
         )
         return True

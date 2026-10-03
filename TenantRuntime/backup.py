@@ -37,7 +37,7 @@ from Shared.timeutils import iso_utc, parse_utc, utcnow
 BACKUP_FORMAT = "hiddify-whitelabel-tenant-v2"
 LEGACY_FORMAT = "hiddify-whitelabel-tenant-userbot-v1"
 MAX_BACKUP_BYTES = 128 * 1024 * 1024
-MAX_ZIP_MEMBERS = 8
+MAX_ZIP_MEMBERS = 512
 AUTO_BACKUP_TIMEZONE = "Asia/Tehran"
 AUTO_BACKUP_HOURS = (0, 6, 12, 18)
 AUTO_BACKUP_MAX_ATTEMPTS = 3
@@ -343,7 +343,7 @@ def _decode_zip(data: bytes) -> dict[str, Any]:
             if not infos or len(infos) > MAX_ZIP_MEMBERS:
                 raise TenantBackupError("invalid backup zip member count")
             names = {str(info.filename) for info in infos if not info.is_dir()}
-            if names != {"manifest.json", "tenant.json"}:
+            if len(names) != len(infos) or not {"manifest.json", "tenant.json"}.issubset(names):
                 raise TenantBackupError("invalid backup zip layout")
             total = sum(int(info.file_size or 0) for info in infos)
             if total > MAX_BACKUP_BYTES:
@@ -353,6 +353,31 @@ def _decode_zip(data: bytes) -> dict[str, Any]:
                 raise TenantBackupError("backup zip CRC check failed")
             manifest_raw = zf.read("manifest.json")
             payload = zf.read("tenant.json")
+            try:
+                archive_manifest = json.loads(manifest_raw)
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise TenantBackupError("backup manifest is invalid") from exc
+            if not isinstance(archive_manifest, dict):
+                raise TenantBackupError("backup manifest is invalid")
+            panels = archive_manifest.get("panel_backups", [])
+            if not isinstance(panels, list):
+                raise TenantBackupError("panel backup manifest is invalid")
+            expected_names = {"manifest.json", "tenant.json"}
+            for panel in panels:
+                if not isinstance(panel, dict):
+                    raise TenantBackupError("panel backup manifest is invalid")
+                path = panel.get("path", "")
+                if (not isinstance(path, str) or not path.startswith("PanelBackups/")
+                        or "\\" in path or any(p in {"", ".", ".."} for p in path.split("/"))
+                        or path in expected_names or path not in names):
+                    raise TenantBackupError("panel backup path is invalid")
+                body = zf.read(path)
+                if (panel.get("size") != len(body)
+                        or panel.get("sha256") != hashlib.sha256(body).hexdigest()):
+                    raise TenantBackupError("panel backup checksum mismatch")
+                expected_names.add(path)
+            if expected_names != names:
+                raise TenantBackupError("invalid backup zip layout")
     except TenantBackupError:
         raise
     except (zipfile.BadZipFile, OSError, KeyError) as exc:

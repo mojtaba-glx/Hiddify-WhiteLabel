@@ -101,6 +101,7 @@ def decode_panel_note(raw: object) -> dict:
 
 
 class PanelAdapter(Protocol):
+    def download_backup(self, *, target: PanelTarget, secret: str): ...
     def inspect_connection(self, *, target: PanelTarget, secret: str) -> dict: ...
 
     def list_users(self, *, target: PanelTarget, secret: str) -> list[dict]: ...
@@ -228,6 +229,12 @@ class RoutedPanelAdapter:
         method = getattr(self._adapter(target), "list_users", None)
         if not callable(method):
             raise PanelError("panel user inventory is unavailable")
+        return method(target=target, secret=secret)
+
+    def download_backup(self, *, target: PanelTarget, secret: str):
+        method = getattr(self._adapter(target), "download_backup", None)
+        if not callable(method):
+            raise PanelError("panel backup download is unavailable")
         return method(target=target, secret=secret)
 
     def update_user(self, *, target: PanelTarget, secret: str,

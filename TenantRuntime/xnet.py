@@ -311,6 +311,7 @@ class _Session:
         params: dict[str, Any] | None = None,
         auth: bool = True,
         allow_not_found: bool = False,
+        raw: bool = False,
     ) -> Any:
         attempts = 0
         while True:
@@ -325,7 +326,13 @@ class _Session:
             if token:
                 headers["Authorization"] = f"Bearer {token}"
             try:
-                response = self.client.request(
+                from TenantRuntime.panel_backups import bounded_request
+                if raw:
+                    from functools import partial
+                    request = partial(bounded_request, self.client)
+                else:
+                    request = self.client.request
+                response = request(
                     method.upper(),
                     f"{self.base}/{path.lstrip('/')}",
                     headers=headers,
@@ -356,6 +363,8 @@ class _Session:
 
             if response.status_code >= 400:
                 raise _StatusError(response.status_code)
+            if raw:
+                return response
             if not response.content:
                 return {}
             try:
@@ -366,6 +375,10 @@ class _Session:
 
 class XnetPanelAdapter:
     """Synchronous PanelAdapter implementation for X-NET."""
+
+    def download_backup(self, *, target: PanelTarget, secret: str):
+        from TenantRuntime.panel_backups import download_xnet
+        return download_xnet(self, target, secret)
 
     def __init__(
         self,
