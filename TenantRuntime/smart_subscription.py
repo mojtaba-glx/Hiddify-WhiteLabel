@@ -128,7 +128,12 @@ def aggregate_lines(payloads: list[str]) -> list[str]:
     return lines
 
 
-def smart_subscription_url(public_base_url: str, code: str) -> str:
+def smart_subscription_url(
+    public_base_url: str,
+    code: str,
+    *,
+    base64_output: bool = True,
+) -> str:
     base = str(public_base_url or "").strip().rstrip("/")
     token = str(code or "").strip()
     if not base or not token:
@@ -143,7 +148,8 @@ def smart_subscription_url(public_base_url: str, code: str) -> str:
         or parsed.fragment
     ):
         return ""
-    return f"{base}/sub/{quote(token, safe='-._~')}/all.b64"
+    filename = "all.b64" if bool(base64_output) else "all.txt"
+    return f"{base}/sub/{quote(token, safe='-._~')}/{filename}"
 
 
 class SmartSubscriptionService:
