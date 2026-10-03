@@ -221,7 +221,7 @@ def test_receipt_approval_sets_paid_at_and_reports_ignore_later_updated_at(
 def test_sales_report_separates_purchase_and_renewal_by_paid_at_period(
     conn, factories, cipher
 ) -> None:
-    _tenant, service, _panel, plan, method = _service(
+    _tenant, service, panel, plan, method = _service(
         conn, factories, cipher
     )
     order, reviewed = _approve_purchase(
@@ -239,6 +239,11 @@ def test_sales_report_separates_purchase_and_renewal_by_paid_at_period(
     conn.execute(
         "UPDATE tenant_subscriptions SET usage_bytes=traffic_bytes-? WHERE id=?",
         (1024 ** 3, int(subscription["id"])),
+    )
+    ref = str(subscription["external_ref"])
+    primary_endpoint = "https://primary.example"
+    panel.users[(primary_endpoint, ref)]["usage"] = (
+        int(subscription["traffic_bytes"]) - 1024 ** 3
     )
     conn.commit()
     renewal = service.create_renewal_order(
