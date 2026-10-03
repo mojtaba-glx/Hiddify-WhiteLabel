@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import random
 import sqlite3
+from io import BytesIO
 from contextvars import ContextVar
 from typing import Any
 
@@ -3394,6 +3395,66 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if isinstance(flow, dict):
             fields = [part.strip() for part in text.split("|")]
             kind = flow.get("kind")
+            if kind == "ticket_new_title":
+                if not text:
+                    raise ValueError("ticket subject")
+                flow["subject"] = text
+                flow["kind"] = "ticket_new_body"
+                await update.effective_message.reply_text(
+                    "✍️ لطفا سوال خود را به صورت کامل ارسال نمایید:",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("❌لغو", callback_data="shop:ticketflow:new:cancel")
+                    ]]),
+                )
+                return
+            if kind == "ticket_new_body":
+                if not text:
+                    raise ValueError("ticket body")
+                flow["body"] = text
+                flow["kind"] = "ticket_new_photo"
+                await update.effective_message.reply_text(
+                    "🖼 لطفا اسکرین‌شات خود را ارسال کنید یا روی دکمه «▶️رد کردن» کلیک کنید.",
+                    reply_markup=_ticket_skip_markup("new"),
+                )
+                return
+            if kind == "ticket_new_photo":
+                await update.effective_message.reply_text(
+                    "❌ لطفا عکس ارسال کنید یا روی دکمه «▶️رد کردن» بزنید.",
+                    reply_markup=_ticket_skip_markup("new"),
+                )
+                return
+            if kind == "ticket_new_confirm":
+                await update.effective_message.reply_text(
+                    "برای ارسال تیکت از دکمه‌های «✅ارسال» یا «✏️ویرایش» استفاده کنید.",
+                    reply_markup=_ticket_confirm_markup("new"),
+                )
+                return
+            if kind == "ticket_reply_text":
+                ticket_id = int(flow.get("ticket_id") or 0)
+                ticket = business.ticket(actor, ticket_id=ticket_id)
+                if str(ticket.get("status") or "") == "closed":
+                    raise TenantBusinessError("ticket is closed")
+                if not text:
+                    raise ValueError("ticket reply")
+                flow["reply_text"] = text
+                flow["kind"] = "ticket_reply_photo"
+                await update.effective_message.reply_text(
+                    "🖼 لطفا اسکرین‌شات خود را ارسال کنید یا روی دکمه «▶️رد کردن» کلیک کنید.",
+                    reply_markup=_ticket_skip_markup("reply"),
+                )
+                return
+            if kind == "ticket_reply_photo":
+                await update.effective_message.reply_text(
+                    "❌ لطفا عکس ارسال کنید یا روی دکمه «▶️رد کردن» بزنید.",
+                    reply_markup=_ticket_skip_markup("reply"),
+                )
+                return
+            if kind == "ticket_reply_confirm":
+                await update.effective_message.reply_text(
+                    "برای ارسال پاسخ از دکمه‌های «✅ارسال» یا «✏️ویرایش» استفاده کنید.",
+                    reply_markup=_ticket_confirm_markup("reply"),
+                )
+                return
             if kind == "wallet_topup_create":
                 if len(fields) != 2:
                     raise ValueError("invalid wallet topup")
@@ -3473,8 +3534,6 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     method_id=int(flow["method_id"]),
                     reference=text,
                 )
-            elif kind == "ticket" and len(fields) == 2:
-                business.create_ticket(actor, subject=fields[0], body=fields[1])
             else:
                 raise ValueError("invalid input")
             context.user_data.pop("biz_flow", None)
