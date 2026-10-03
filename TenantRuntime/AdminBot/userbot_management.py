@@ -11,6 +11,7 @@ import asyncio
 import json
 import math
 import re
+import secrets
 from io import BytesIO
 from typing import Any
 from urllib.parse import urlparse
@@ -1977,6 +1978,38 @@ async def handle_callback(
         cid=int(data.rsplit(":",1)[1]); item=business.gift_voucher_admin(actor,voucher_id=cid)
         business.set_gift_voucher_status_admin(actor,voucher_id=cid,enabled=item["status"]!="active")
         await _send_coupon_detail(update,business,actor,cid); return True
+    if data.startswith("userbot:gifts:coupon:set_code:"):
+        cid=int(data.rsplit(":",1)[1])
+        business.gift_voucher_admin(actor,voucher_id=cid)
+        context.user_data[FLOW_KEY]={"kind":"gift_edit_code","voucher_id":cid}
+        await query.message.reply_text(
+            "✏️ کد جدید را وارد کنید؛ فقط حروف انگلیسی، عدد، _ و -:",
+            reply_markup=userbot_cancel_keyboard(),
+        ); return True
+    if data.startswith("userbot:gifts:coupon:set_amount:"):
+        cid=int(data.rsplit(":",1)[1])
+        business.gift_voucher_admin(actor,voucher_id=cid)
+        context.user_data[FLOW_KEY]={"kind":"gift_edit_amount","voucher_id":cid}
+        await query.message.reply_text(
+            "🎁 مبلغ جدید هدیه را وارد کنید:",
+            reply_markup=userbot_cancel_keyboard(),
+        ); return True
+    if data.startswith("userbot:gifts:coupon:set_limit:"):
+        cid=int(data.rsplit(":",1)[1])
+        business.gift_voucher_admin(actor,voucher_id=cid)
+        context.user_data[FLOW_KEY]={"kind":"gift_edit_limit","voucher_id":cid}
+        await query.message.reply_text(
+            "👥 سقف کل مصرف را وارد کنید (عدد مثبت):",
+            reply_markup=userbot_cancel_keyboard(),
+        ); return True
+    if data.startswith("userbot:gifts:coupon:set_exp:"):
+        cid=int(data.rsplit(":",1)[1])
+        business.gift_voucher_admin(actor,voucher_id=cid)
+        context.user_data[FLOW_KEY]={"kind":"gift_edit_expiry","voucher_id":cid}
+        await query.message.reply_text(
+            "🕒 مدت انقضا را به ساعت وارد کنید؛ 0 یعنی نامحدود:",
+            reply_markup=userbot_cancel_keyboard(),
+        ); return True
     if data.startswith("userbot:gifts:coupon:delete:"):
         cid=int(data.rsplit(":",1)[1])
         await _edit_or_send(update,"❓ از حذف این کوپن مطمئن هستید؟",InlineKeyboardMarkup([[
@@ -2016,7 +2049,17 @@ async def handle_callback(
             "◈ سقف کل مصرف هر کد در دیتابیس enforce می‌شود.\n"
             "◈ انقضا و تکمیل ظرفیت قبل از شارژ کیف پول کنترل می‌شود.\n"
             f"🟢 فعال: {stats['active']} · ⏰ منقضی: {stats['expired']} · 🔒 تکمیل ظرفیت: {stats['full']}",
-            InlineKeyboardMarkup([[InlineKeyboardButton("🔙بازگشت",callback_data="userbot:gifts_menu")]])
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("🧹 خاموش‌سازی منقضی/تکمیل",callback_data="userbot:gifts:auto_off")],
+                [InlineKeyboardButton("🔙بازگشت",callback_data="userbot:gifts_menu")],
+            ])
+        ); return True
+    if data == "userbot:gifts:auto_off":
+        changed=business.deactivate_unusable_gift_vouchers_admin(actor)
+        await _edit_or_send(
+            update,
+            f"✅ {changed} کد منقضی یا تکمیل‌شده خاموش شد.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙بازگشت",callback_data="userbot:gifts:security")]])
         ); return True
     if data == "userbot:gifts:help":
         await _edit_or_send(update,
@@ -2039,20 +2082,39 @@ async def handle_callback(
             InlineKeyboardMarkup([[InlineKeyboardButton("🔙بازگشت",callback_data="userbot:gifts_menu")]])
         ); return True
     if data == "userbot:gifts:presets":
-        await _edit_or_send(update,
+        rows=[
+            [InlineKeyboardButton(
+                f"{item['title']} · {int(item['amount']):,}",
+                callback_data=f"userbot:gifts:preset:{key}",
+            )]
+            for key,item in GIFT_CAMPAIGN_PRESETS.items()
+        ]
+        rows.append([InlineKeyboardButton("🔙بازگشت",callback_data="userbot:gifts_menu")])
+        await _edit_or_send(
+            update,
             "🎯 قالب‌های آماده کمپین هدیه\n"
-            "یک قالب را انتخاب کنید؛ کد به‌صورت درصدی ساخته می‌شود.",
-            InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎁 خوش‌آمدگویی 100,000",callback_data="userbot:gifts:preset:WELCOME:10")],
-                [InlineKeyboardButton("🔥 جشنواره 200,000",callback_data="userbot:gifts:preset:FEST:20")],
-                [InlineKeyboardButton("💎 VIP 300,000",callback_data="userbot:gifts:preset:VIP:30")],
-                [InlineKeyboardButton("🔙بازگشت",callback_data="userbot:gifts_menu")],
-            ])
+            "هر قالب یک کد واقعی کیف پول با مبلغ، ظرفیت و انقضای مشخص می‌سازد.",
+            InlineKeyboardMarkup(rows),
         ); return True
     if data.startswith("userbot:gifts:preset:"):
-        parts=data.split(":"); prefix=parts[3]; amount=int(parts[4])*10000; code=f"{prefix}-{str(int(utcnow().timestamp()))[-6:]}"
-        business.add_gift_voucher_admin(actor,code=code,amount=amount,currency="IRR",max_uses=100)
-        await _send_coupons(update,business,actor); return True
+        key=data.rsplit(":",1)[1]
+        preset=GIFT_CAMPAIGN_PRESETS.get(key)
+        if preset is None:
+            raise ValueError("invalid gift preset")
+        code=f"{preset['prefix']}-{secrets.token_hex(3).upper()}"
+        item=business.add_gift_voucher_admin(
+            actor,
+            code=code,
+            amount=int(preset["amount"]),
+            currency="IRR",
+            max_uses=int(preset["max_uses"]),
+        )
+        item=business.set_gift_voucher_expiry_hours_admin(
+            actor,
+            voucher_id=int(item["id"]),
+            hours=int(preset["hours"]),
+        )
+        await _send_coupon_detail(update,business,actor,int(item["id"])); return True
     if data == "userbot:gifts:bulk":
         context.user_data[FLOW_KEY]={"kind":"gift_bulk_prefix"}
         await query.message.reply_text("🧩 پیشوند کدها را وارد کنید؛ مثال: FEST",reply_markup=userbot_cancel_keyboard()); return True
