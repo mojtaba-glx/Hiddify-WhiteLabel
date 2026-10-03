@@ -706,10 +706,12 @@ def _active_admin_bot_token(
     *,
     tenant_id: int,
     cipher: TokenCipher,
-) -> str:
+) -> str | None:
     row = BotRepository(conn).get_by_tenant_role(int(tenant_id), "admin")
     if row is None or str(row.get("status") or "") != "active":
-        raise TenantBackupError("tenant AdminBot is not active")
+        # A partially provisioned Tenant is not an auto-backup failure.  Do
+        # not consume retry attempts before its AdminBot exists.
+        return None
     token = cipher.decrypt(str(row["encrypted_token"]))
     if fingerprint_token(token) != str(row["token_fingerprint"]):
         raise TenantBackupError("tenant AdminBot credential integrity failed")
@@ -732,6 +734,13 @@ def prepare_auto_backup_delivery(
     """
     if not bool(settings.get("auto_backup_enabled", True)):
         return None
+    token = _active_admin_bot_token(
+        conn,
+        tenant_id=int(tenant_id),
+        cipher=cipher,
+    )
+    if not token:
+        return None
     slot = auto_backup_slot_key(now)
     if not claim_auto_backup_slot(
         conn,
@@ -743,11 +752,6 @@ def prepare_auto_backup_delivery(
         artifact = create_tenant_backup(
             conn,
             tenant_id=int(tenant_id),
-        )
-        token = _active_admin_bot_token(
-            conn,
-            tenant_id=int(tenant_id),
-            cipher=cipher,
         )
         target = ""
         if bool(settings.get("system_event_channel_enabled", False)):
