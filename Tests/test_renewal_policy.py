@@ -18,6 +18,7 @@ class RenewalPanel:
     def __init__(self) -> None:
         self.renew_requests: list[RenewRequest] = []
         self.usage_bytes = 10 * GIB
+        self.usage_bytes = 10 * GIB
 
     def renew(self, *, target, secret: str, external_ref: str, request: RenewRequest):
         assert secret
