@@ -489,8 +489,14 @@ def _subscription_metrics(
     }
 
 
-def _subscription_menu_text() -> str:
-    return "📊 وضعیت اشتراک\n\nیکی از گزینه‌های زیر را انتخاب کنید:"
+def _subscription_menu_text(item: dict[str, Any] | None = None) -> str:
+    if item is None:
+        return "📊 وضعیت اشتراک\n\nیکی از گزینه‌های زیر را انتخاب کنید:"
+    return (
+        "📊 وضعیت اشتراک\n\n"
+        f"{_subscription_name(item)}\n\n"
+        "یکی از گزینه‌های زیر را انتخاب کنید:"
+    )
 
 
 def _subscription_name(item: dict[str, Any]) -> str:
@@ -517,34 +523,30 @@ def _subscription_status_rows(business, actor, item, settings):
 
 
 def _subscription_list(business, actor, settings, *, view="all", page=0):
-    statuses = {"active": "🟢 سرویس‌های فعال", "expired": "🔴 سرویس‌های منقضی",
-                "disabled": "🟡 سرویس‌های غیرفعال", "pending_provisioning": "🟠 در انتظار فعال‌سازی"}
-    view = view if view in statuses else "all"
-    page = max(0, int(page))
-    items = business.list_subscriptions(actor, status=None if view == "all" else view,
-                                       limit=13, offset=page * 12)
-    rows = [[InlineKeyboardButton(
-        f"{_subscription_status_label(x).split()[0]} {_subscription_name(x)} · #{x['id']}"[:60],
-        callback_data=f"shop:substatus:{x['id']}")] for x in items[:12]]
-    navigation = []
-    if page:
-        navigation.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"shop:subs:{view}:{page-1}"))
-    if len(items) > 12:
-        navigation.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"shop:subs:{view}:{page+1}"))
-    if navigation:
-        rows.append(navigation)
-    rows.extend([
-        [InlineKeyboardButton("🟢 فعال", callback_data="shop:subs:active"),
-         InlineKeyboardButton("🔴 منقضی", callback_data="shop:subs:expired")],
-        [InlineKeyboardButton("🟡 غیرفعال", callback_data="shop:subs:disabled"),
-         InlineKeyboardButton("🟠 در انتظار", callback_data="shop:subs:pending_provisioning")],
-        [InlineKeyboardButton("📦 همه اشتراک‌ها", callback_data="shop:subs")],
-        [InlineKeyboardButton("👤 پروفایل", callback_data="shop:account"),
-         InlineKeyboardButton("🧾 سفارش‌های من", callback_data="shop:orders")],
-        [InlineKeyboardButton("🔙بازگشت", callback_data="runtime:home")],
+    status = view if view in {
+        "active", "expired", "disabled", "pending_provisioning"
+    } else None
+    items = business.list_subscriptions(
+        actor,
+        status=status,
+        limit=500,
+        offset=0,
+    )
+    rows = [
+        [InlineKeyboardButton(
+            _subscription_name(item)[:60],
+            callback_data=f"shop:substatus:{int(item['id'])}",
+        )]
+        for item in items
+    ]
+    rows.append([
+        InlineKeyboardButton("🔙بازگشت", callback_data="runtime:home")
     ])
-    text = statuses.get(view, "📄 وضعیت اشتراک‌های شما") + f" — صفحه {page+1}\n\n"
-    text += "اشتراک موردنظر را انتخاب کنید:" if items else "در این بخش اشتراکی ندارید."
+    text = (
+        "👇 لطفا یکی از اشتراک‌های خود را انتخاب نمایید"
+        if items
+        else "❌ اشتراک وجود ندارد."
+    )
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -1782,17 +1784,83 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     state = state_store.load(user_id)
     state_store.save(user_id, {**state, "screen": "status"})
     try:
-        text, status_markup = _subscription_list(business, user_id, settings)
+        items = business.list_subscriptions(user_id, limit=4)
+        if not items:
+            text = "❌ اشتراک وجود ندارد."
+            status_markup = InlineKeyboardMarkup([[
+                _button("🔙بازگشت", callback_data="runtime:home", settings=settings)
+            ]])
+            direct_items: list[dict[str, Any]] = []
+        elif len(items) > 3:
+            text, status_markup = _subscription_list(
+                business, user_id, settings
+            )
+            direct_items = []
+        else:
+            direct_items = [
+                business.customer_subscription_status(
+                    user_id,
+                    subscription_id=int(item["id"]),
+                    refresh=True,
+                )
+                for item in items
+            ]
+            text = ""
+            status_markup = None
     except (TenantBusinessError, ValueError, sqlite3.Error):
         text = "⏳ دریافت وضعیت اشتراک‌ها موقتاً ممکن نیست."
         status_markup = InlineKeyboardMarkup([[
             _button("🔙بازگشت", callback_data="runtime:home", settings=settings)
         ]])
+        direct_items = []
+
+    if direct_items:
+        multiple = len(direct_items) > 1
+        if update.callback_query:
+            await update.callback_query.answer()
+            first, *rest = direct_items
+            await _edit_subscription(
+                update.callback_query,
+                _subscription_menu_text(first if multiple else None),
+                reply_markup=InlineKeyboardMarkup(
+                    _subscription_status_rows(
+                        business, user_id, first, settings
+                    )
+                ),
+            )
+            for item in rest:
+                await update.callback_query.message.reply_text(
+                    _subscription_menu_text(item),
+                    reply_markup=InlineKeyboardMarkup(
+                        _subscription_status_rows(
+                            business, user_id, item, settings
+                        )
+                    ),
+                )
+        elif update.effective_message:
+            for item in direct_items:
+                await update.effective_message.reply_text(
+                    _subscription_menu_text(item if multiple else None),
+                    reply_markup=InlineKeyboardMarkup(
+                        _subscription_status_rows(
+                            business, user_id, item, settings
+                        )
+                    ),
+                )
+        return
+
     if update.callback_query:
         await update.callback_query.answer()
-        await _edit_subscription(update.callback_query, text, reply_markup=status_markup)
+        await _edit_subscription(
+            update.callback_query,
+            text,
+            reply_markup=status_markup,
+        )
     elif update.effective_message:
-        await update.effective_message.reply_text(text, reply_markup=status_markup)
+        await update.effective_message.reply_text(
+            text,
+            reply_markup=status_markup,
+        )
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2559,8 +2627,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             markup = InlineKeyboardMarkup(_subscription_status_rows(business, actor, item, settings))
             text = notice + _subscription_menu_text()
             if action == "substatus":
-                # Keep the selectable list intact, as in SellBot.
-                await update.effective_message.reply_text(text, reply_markup=markup, parse_mode="HTML")
+                # For the >3-services path, keep the simple SellBot list intact
+                # and send the selected service menu as a new message.
+                await update.effective_message.reply_text(
+                    text,
+                    reply_markup=markup,
+                    parse_mode="HTML",
+                )
             else:
                 await _edit_subscription(update.callback_query, text, reply_markup=markup, parse_mode="HTML")
             return
