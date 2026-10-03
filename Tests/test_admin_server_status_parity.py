@@ -9,7 +9,6 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from Gateway.catalog import RuntimeBotSpec
 from TenantRuntime.AdminBot import handlers
 from TenantRuntime.business import TenantBusinessError, TenantBusinessService
 from TenantRuntime.hiddify import HiddifyPanelAdapter
@@ -76,15 +75,12 @@ class Query:
         self.deleted = True
 
 
-def _spec(tenant_id: int, owner: int) -> RuntimeBotSpec:
-    return RuntimeBotSpec(
+def _spec(tenant_id: int, owner: int):
+    return SimpleNamespace(
         tenant_id=tenant_id,
         tenant_name="Status Tenant",
         role="admin",
-        token="123456:FAKE_status_token_abcdefghijklmnopqrstuvwxyz",
         owner_telegram_id=owner,
-        runtime_status="ready",
-        license_status="active",
     )
 
 
