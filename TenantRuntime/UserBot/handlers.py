@@ -830,6 +830,23 @@ def _subscription_config_menu_rows(
     return rows
 
 
+def _trial_delivery_text(
+    business: Any,
+    actor: int,
+    result: dict[str, Any],
+    settings: dict[str, Any],
+    *,
+    announce_enabled: bool,
+) -> str:
+    access = _delivery_access_text(business, actor, result, settings)
+    if announce_enabled:
+        return (
+            "✅ اکانت تست رایگان شما با موفقیت فعال شد.\n\n"
+            + access
+        )
+    return access
+
+
 def _delivery_access_text(
     business: Any,
     actor: int,
@@ -1135,8 +1152,15 @@ async def _handle_main_reply_action(
             raise TenantBusinessError("free trial is disabled")
         result = business.claim_free_trial(actor)
         await update.effective_message.reply_text(
-            "✅ تست رایگان فعال شد.\n\n"
-            + _delivery_access_text(business, actor, result, settings),
+            _trial_delivery_text(
+                business,
+                actor,
+                result,
+                settings,
+                announce_enabled=bool(
+                    growth.get("trial_announce_enabled", True)
+                ),
+            ),
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(
                     "📦 اشتراک‌های من",
@@ -1833,8 +1857,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 raise TenantBusinessError("free trial is disabled")
             result = business.claim_free_trial(actor)
             await update.callback_query.edit_message_text(
-                "✅ تست رایگان فعال شد.\n\n"
-                + _delivery_access_text(business, actor, result, settings),
+                _trial_delivery_text(
+                    business,
+                    actor,
+                    result,
+                    settings,
+                    announce_enabled=bool(
+                        growth.get("trial_announce_enabled", True)
+                    ),
+                ),
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("📦 اشتراک‌های من", callback_data="shop:subs")],
                     [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
