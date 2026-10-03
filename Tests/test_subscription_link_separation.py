@@ -162,6 +162,51 @@ def test_smart_url_builder_has_distinct_text_and_b64_outputs() -> None:
     assert encoded == "https://smart.example/sub/abc/all.b64"
 
 
+def test_delivery_output_respects_independent_visibility_switches(
+    conn, factories, cipher
+) -> None:
+    from TenantRuntime.UserBot import handlers as user_handlers
+
+    service, subscription_id = _service(conn, factories, cipher)
+    service.set_userbot_setting_admin(
+        7001,
+        key="smart_base_url",
+        value="https://smart.example",
+    )
+    result = {
+        "id": subscription_id,
+        "subscription_url": "https://must-not-be-read-directly.example",
+    }
+
+    settings = service.runtime_userbot_settings()
+    visible = user_handlers._delivery_access_text(
+        service, 7101, result, settings
+    )
+    assert "https://native.example/sub/sub-user-1" in visible
+    assert "https://must-not-be-read-directly.example" not in visible
+    assert "کانفیگ مستقیم" in visible
+
+    for key in (
+        "show_user_page_link",
+        "show_direct_config",
+        "show_auto_sub_link",
+        "show_sub_link",
+        "show_sub_link_b64",
+        "show_multi_server",
+        "show_multi_server_b64",
+    ):
+        service.set_userbot_setting_admin(7001, key=key, value=False)
+
+    hidden = user_handlers._delivery_access_text(
+        service,
+        7101,
+        result,
+        service.runtime_userbot_settings(),
+    )
+    assert "https://" not in hidden
+    assert "غیرفعال است" in hidden
+
+
 def test_userbot_runtime_wires_all_subscription_link_controls() -> None:
     source = open(
         "TenantRuntime/UserBot/handlers.py",
