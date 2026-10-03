@@ -174,12 +174,6 @@ def _selected_inbound_ids(
         if str(row.get("id") or "").strip() and bool(row.get("enabled", True))
     ]
     if not active:
-        active = [
-            str(row.get("id") or "").strip()
-            for row in inbounds
-            if str(row.get("id") or "").strip()
-        ]
-    if not active:
         raise PanelError("no X-NET inbound is available")
 
     raw = str(target.xnet_inbound_ids or "").strip()
@@ -250,10 +244,13 @@ class _Session:
         self.adapter = adapter
         self.client = client
         self.target = target
-        self.base = _clean_base(target.endpoint)
+        self.base = _clean_base(target.xnet_api_url or target.endpoint)
         self.credential = credential
         self._api_token_rejected = False
         self._jwt = ""
+        # Changing credentials must never pass a probe using the previous JWT.
+        digest = hashlib.sha256(json.dumps(credential, sort_keys=True).encode()).hexdigest()
+        self._cache_key = (self.base, digest)
 
     def _login(self, *, force: bool = False) -> str:
         username = self.credential["username"]
@@ -261,7 +258,7 @@ class _Session:
         if not password:
             raise PanelError("X-NET admin fallback credentials are unavailable")
 
-        cache_key = (self.base, username)
+        cache_key = self._cache_key
         if not force:
             cached = self.adapter._cached_jwt(cache_key)
             if cached:
@@ -348,7 +345,7 @@ class _Session:
                     self._login(force=False)
                     continue
                 if self.credential.get("password"):
-                    self.adapter._drop_jwt((self.base, self.credential["username"]))
+                    self.adapter._drop_jwt(self._cache_key)
                     self._jwt = ""
                     self._login(force=True)
                     continue
@@ -693,6 +690,20 @@ class XnetPanelAdapter:
         if not raw:
             return ""
         return "wl-renew:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+
+    def inspect_connection(self, *, target: PanelTarget, secret: str) -> dict:
+        with self._session(target, secret) as session:
+            inbounds = self._inbounds(session)
+            selected = _selected_inbound_ids(target, inbounds) if inbounds else []
+            if not inbounds and target.xnet_inbound_ids not in {"", "0"}:
+                raise PanelError("configured X-NET inbound is unavailable")
+            self.subscription_link(target=target, external_ref="connection-test")
+            return {"connected": True, "inbounds": [
+                {"id": str(x.get("id") or ""), "protocol": str(x.get("protocol") or ""),
+                 "remark": str(x.get("remark") or x.get("name") or ""),
+                 "enabled": bool(x.get("enabled", True))} for x in inbounds],
+                "selected_inbound_ids": selected,
+                "users_count": sum(len(x.get("clients") or []) for x in inbounds)}
 
     def provision(
         self,
