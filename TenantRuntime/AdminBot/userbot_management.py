@@ -3862,10 +3862,35 @@ async def handle_text(
                 reply_markup=admin_main_keyboard(),
             ); return True
         if kind=="ticket_reply":
-            item=business.reply_ticket_admin(actor,ticket_id=int(flow["ticket_id"]),reply=text)
-            try: await _send_via_userbot(business,int(item["telegram_user_id"]),text=f"📩 پاسخ تیکت #{item['id']}\n\n{text}")
-            except Exception: pass
-            context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ پاسخ ثبت شد.",reply_markup=admin_main_keyboard()); return True
+            step=str(flow.get("step") or "wait_text")
+            if step=="wait_text":
+                if not text:
+                    raise ValueError("empty ticket reply")
+                flow["reply_text"]=text
+                flow["step"]="wait_photo"
+                await update.effective_message.reply_text(
+                    "🖼️ لطفا عکس پاسخ را ارسال کنید یا روی دکمه [⏩رد کردن] کلیک کنید:",
+                    reply_markup=ticket_reply_skip_cancel_keyboard(),
+                )
+                return True
+            if step=="wait_photo":
+                await update.effective_message.reply_text(
+                    "❌ لطفا عکس ارسال کنید یا روی دکمه [⏩رد کردن] بزنید.",
+                    reply_markup=ticket_reply_skip_cancel_keyboard(),
+                )
+                return True
+            if step=="wait_confirm":
+                await update.effective_message.reply_text(
+                    "برای ارسال پاسخ از دکمه‌های «✅ارسال» یا «✏️ویرایش» استفاده کنید.",
+                    reply_markup=ticket_reply_confirm_keyboard(),
+                )
+                return True
+            flow["step"]="wait_text"
+            await update.effective_message.reply_text(
+                "📩 متن پاسخ تیکت را ارسال کنید:",
+                reply_markup=userbot_cancel_keyboard(),
+            )
+            return True
         if kind=="broadcast":
             step=str(flow.get("step") or "wait_text")
             if step=="wait_text":
@@ -4158,6 +4183,38 @@ async def handle_media(
         await _settings_section(update, business, actor, "invite_texts")
         return True
 
+    if kind=="ticket_reply" and str(flow.get("step") or "")=="wait_photo":
+        file_id=""
+        if getattr(message,"photo",None):
+            file_id=str(message.photo[-1].file_id)
+        else:
+            document=getattr(message,"document",None)
+            mime=str(getattr(document,"mime_type","") or "").lower()
+            if document is not None and mime.startswith("image/"):
+                file_id=str(document.file_id)
+        if not file_id:
+            await message.reply_text(
+                "❌ فقط عکس ارسال کنید یا «⏩رد کردن» را بزنید.",
+                reply_markup=ticket_reply_skip_cancel_keyboard(),
+            )
+            return True
+        flow["photo_file_id"]=file_id
+        flow["step"]="wait_confirm"
+        preview=_ticket_reply_preview_text(flow)
+        try:
+            await context.bot.send_photo(
+                chat_id=message.chat_id,
+                photo=file_id,
+                caption=preview,
+                reply_markup=ticket_reply_confirm_keyboard(),
+            )
+        except Exception:
+            await message.reply_text(
+                preview,
+                reply_markup=ticket_reply_confirm_keyboard(),
+            )
+        return True
+
     if kind=="broadcast" and str(flow.get("step") or "")=="wait_photo":
         file_id=""
         if getattr(message,"photo",None):
@@ -4221,6 +4278,10 @@ async def handle_document(
                 and str(flow.get("step") or "") == "wait_photo"
             )
             or flow.get("kind") == "invite_banner_photo"
+            or (
+                flow.get("kind") == "ticket_reply"
+                and str(flow.get("step") or "") == "wait_photo"
+            )
         )
     ):
         return await handle_media(
