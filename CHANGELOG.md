@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.0.0 — Stable release
+
+- Promoted the completed WhiteLabel implementation to the first Stable release after the Phase 16 final release gate.
+- Added a cross-phase end-to-end release test covering multi-node purchase, paid renewal, expiry enforcement, AdminBot/UserBot support tickets, broadcast audit, full Tenant backup/restore and cross-Tenant isolation in one continuous flow.
+- Added automatic inline-callback coverage across AdminBot, UserBot, management and broadcast handlers so directly rendered buttons cannot ship without a registered callback route.
+- Revalidated the AdminBot ↔ UserBot two-role Tenant runtime contract while keeping future AgentBot/CustomerBot infrastructure dormant until its dedicated implementation phase.
+- Verified the complete Tenant feature set: Hiddify/X-UI/X-NET server boundaries, multi-node smart subscriptions, customer status/config actions, renewal/expiry, payments, wallet/coupons/referrals/trials, tickets, broadcast/channel management, Force Join/event channels and Tenant Backup/Restore v2.
+- Fixed Stable release metadata so README, VERSION and migration documentation agree on v1.0.0 and migration 0031.
+- Final release gate: 688 tests passed on both Python 3.10 and Python 3.12, followed by successful Release Drill, install.sh syntax check and bootstrap.sh syntax check.
+
 ## v0.50.0 — Broadcast and channel management parity
 
 - Finalized Tenant AdminBot broadcast delivery using Hiddify-SellBot targeting semantics for all users, no-order users and expired cohorts through 1/2/4/8-week windows.
