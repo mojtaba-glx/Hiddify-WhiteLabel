@@ -64,6 +64,64 @@ def callbacks(markup):
     return [button.callback_data for row in markup.inline_keyboard for button in row]
 
 
+
+def test_single_subscription_status_opens_four_actions_directly(
+    monkeypatch, conn, factories, cipher
+):
+    service, panel, actor, sid, _ = _service(conn, factories, cipher)
+
+    class Policy:
+        def check(self, spec, telegram_user_id):
+            return SimpleNamespace(allowed=True, reason='')
+
+    class StateStore:
+        def load(self, user_id):
+            return {}
+
+        def save(self, user_id, state):
+            self.state = state
+
+    message = Messages()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=actor),
+        effective_message=message,
+        callback_query=None,
+    )
+    context = SimpleNamespace(user_data={})
+    monkeypatch.setattr(
+        handlers,
+        '_services',
+        lambda _: (
+            SimpleNamespace(role='user'),
+            Policy(),
+            StateStore(),
+            service,
+        ),
+    )
+
+    async def allowed(*args):
+        return True
+
+    monkeypatch.setattr(handlers, '_force_join_allowed', allowed)
+    asyncio.run(handlers.show_status(update, context))
+
+    assert len(message.sent) == 1
+    text, kwargs = message.sent[0]
+    assert text == '📊 وضعیت اشتراک\n\nیکی از گزینه‌های زیر را انتخاب کنید:'
+    assert callbacks(kwargs['reply_markup']) == [
+        f'shop:configmenu:{sid}',
+        f'shop:renew:{sid}',
+        f'shop:subrename:{sid}',
+        f'shop:subrotate:{sid}',
+    ]
+    for removed in (
+        'فعال', 'منقضی', 'غیرفعال', 'در انتظار',
+        'پروفایل', 'سفارش‌های من', 'همه اشتراک‌ها',
+    ):
+        assert removed not in text
+
+
+
 def attach_rotation(service, panel, *, fail_after=None, reset=False):
     panel.calls = []
     def rotate(**kwargs):
@@ -111,22 +169,50 @@ def test_customer_mutations_cannot_cross_customer_or_tenant(conn, factories, cip
         service.rotate_customer_subscription(actor, subscription_id=sid)
 
 
-def test_paginated_list_reaches_every_subscription(conn, factories, cipher):
+def test_large_subscription_list_is_sellbot_style_only(conn, factories, cipher):
     service, panel, actor, sid, _ = _service(conn, factories, cipher)
     customer = service._customer(actor)
-    item = service.customer_subscription_status(actor, subscription_id=sid, refresh=False)
-    for index in range(25):
-        order = service.create_order(actor, item['plan_id'], server_id=item['server_id'])
-        conn.execute("INSERT INTO tenant_subscriptions (tenant_id,customer_id,plan_id,order_id,status,traffic_bytes,expires_at,created_at,updated_at) VALUES (?,?,?,?,'pending_provisioning',?,?,?,?)",
-                     (service.tenant_id, customer['id'], item['plan_id'], order['id'], 1024, item['expires_at'], iso_utc(utcnow()), iso_utc(utcnow())))
+    item = service.customer_subscription_status(
+        actor, subscription_id=sid, refresh=False
+    )
+    for _ in range(5):
+        order = service.create_order(
+            actor,
+            item['plan_id'],
+            server_id=item['server_id'],
+        )
+        conn.execute(
+            "INSERT INTO tenant_subscriptions "
+            "(tenant_id,customer_id,plan_id,order_id,status,traffic_bytes,"
+            "expires_at,created_at,updated_at) "
+            "VALUES (?,?,?,?,'pending_provisioning',?,?,?,?)",
+            (
+                service.tenant_id,
+                customer['id'],
+                item['plan_id'],
+                order['id'],
+                1024,
+                item['expires_at'],
+                iso_utc(utcnow()),
+                iso_utc(utcnow()),
+            ),
+        )
     conn.commit()
-    found = []
-    for page in range(3):
-        text, markup = handlers._subscription_list(service, actor, {}, page=page)
-        found.extend(int(data.rsplit(':', 1)[1]) for data in callbacks(markup) if data.startswith('shop:substatus:'))
-        assert f'صفحه {page+1}' in text
-    assert len(found) == len(set(found)) == 26
-    assert sid in found
+
+    text, markup = handlers._subscription_list(service, actor, {})
+    data = callbacks(markup)
+    assert text == '👇 لطفا یکی از اشتراک‌های خود را انتخاب نمایید'
+    assert sum(x.startswith('shop:substatus:') for x in data) == 6
+    assert data[-1] == 'runtime:home'
+    for removed in (
+        'shop:subs:active',
+        'shop:subs:expired',
+        'shop:subs:disabled',
+        'shop:subs:pending_provisioning',
+        'shop:account',
+        'shop:orders',
+    ):
+        assert removed not in data
 
 
 def test_rotation_preserves_terms_and_invalidates_smart_link(conn, factories, cipher):
