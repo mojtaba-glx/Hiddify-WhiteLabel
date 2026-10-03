@@ -76,8 +76,10 @@ def test_lifecycle_reads_adminbot_settings_and_reconciles_existing_queue() -> No
     assert "service.runtime_userbot_settings()" in source
     assert "reconcile_reminder_queue_settings(" in source
     assert 'reminder_values.get("reminder_enabled", True)' in source
-    assert 'reminder_values.get("reminder_days"' in source
-    assert 'reminder_values.get("reminder_remaining_gb"' in source
+    assert '"reminder_days"' in source
+    assert '"reminder_remaining_gb"' in source
+    assert "days_threshold=days_threshold" in source
+    assert "remaining_gb_threshold=remaining_gb_threshold" in source
 
 
 def test_reminder_queue_reconciliation_handles_pending_failed_and_processing() -> None:
