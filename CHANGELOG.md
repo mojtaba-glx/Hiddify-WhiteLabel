@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.50.0 — Broadcast and channel management parity
+
+- Finalized Tenant AdminBot broadcast delivery using Hiddify-SellBot targeting semantics for all users, no-order users and expired cohorts through 1/2/4/8-week windows.
+- Added SellBot-style live audience statistics, tenant-safe target selection and detailed delivery results for successful, failed, recovered, unreachable, temporary and Telegram errors.
+- Completed broadcast authoring for text, photo and video with up to eight URL buttons, preview, independent editing, full replacement, confirmation-by-publish and safe cancellation.
+- Bridged AdminBot-owned media to the sibling UserBot token by downloading once and reusing UserBot-owned Telegram file IDs, with RetryAfter/network retry handling and safe delivery pacing.
+- Added long-caption handling so media over Telegram's caption limit is delivered first and the formatted text/buttons are sent separately instead of failing.
+- Completed channel management for text/photo/video posts, buttons, preview, edit text/media, replace while preserving buttons, channel target configuration and graceful publish failures.
+- Added tenant-scoped broadcast audit details and migration `0030_broadcast_channel_phase13`, including video/button/error counters.
+- Added regression coverage for SellBot segmentation semantics, tenant isolation, media token bridging, video/buttons, audit counts, channel target validation and edit preservation.
+
 ## v0.40.0 — Tenant tickets and support parity
 
 - Rebuilt Tenant support tickets around a threaded message model while preserving and backfilling legacy ticket body/admin replies.

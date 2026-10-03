@@ -1005,13 +1005,20 @@ def test_admin_forms_use_bottom_cancel_and_not_pipe_for_core_new_flows() -> None
 
 def test_broadcast_and_channel_media_flows_are_real() -> None:
     source = open(
+        "TenantRuntime/AdminBot/broadcast_channel.py",
+        encoding="utf-8",
+    ).read()
+    router = open(
         "TenantRuntime/AdminBot/userbot_management.py",
         encoding="utf-8",
     ).read()
-    assert "broadcast_skip_cancel_keyboard" in source
-    assert "_send_broadcast_to_targets" in source
+    assert "_send_broadcast" in source
     assert "await bot.send_photo" in source
+    assert "await bot.send_video" in source
+    assert "userbot:broadcast:preview" in source
+    assert "userbot:broadcast:publish" in source
     assert "channelpost:preview" in source
     assert "channelpost:publish" in source
-    assert "_download_admin_file" in source
-    assert "MAX_CHANNEL_BUTTONS = 8" in source
+    assert "_download_admin_media" in source
+    assert "MAX_BUTTONS = 8" in source
+    assert "broadcast_channel.handle_callback" in router

@@ -608,11 +608,15 @@ def test_fresh_and_upgrade_migrations_preserve_subscription_data(tmp_path):
     conn = connect(db)
     versions = conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
     conn.close()
-    migrate(db)
+    applied = migrate(db)
+    assert applied == [
+        "0029_server_management",
+        "0030_broadcast_channel_phase13",
+    ]
     conn = connect(db)
     assert (
         conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
-        == versions + 1
+        == versions + len(applied)
     )
     assert "server_id" in [
         r["name"] for r in conn.execute("PRAGMA table_info(tenant_sale_plans)")

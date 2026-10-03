@@ -2029,6 +2029,33 @@ async def handle_callback(
     if query is None:
         return False
     data = str(query.data or "")
+
+    # Phase 13 owns broadcast/channel callbacks before the legacy partial
+    # branches below can answer or mutate state. Clear a pre-v0.50 stale
+    # broadcast/channel wizard so it cannot consume a later admin message.
+    if (
+        data == "userbot:broadcast_menu"
+        or data.startswith("userbot:broadcast:")
+        or data.startswith("channelpost:")
+    ):
+        context.user_data.pop(FLOW_KEY, None)
+    from TenantRuntime.AdminBot import broadcast_channel
+    from TenantRuntime.AdminBot.handlers import admin_main_keyboard
+    try:
+        if await broadcast_channel.handle_callback(
+            update,
+            context,
+            business=business,
+            actor=actor,
+            admin_main_keyboard=admin_main_keyboard,
+        ):
+            return True
+    except (ValueError, TenantBusinessError):
+        await query.message.reply_text(
+            "❌ مقدار یا وضعیت معتبر نیست. دوباره تلاش کنید."
+        )
+        return True
+
     if not (data.startswith("userbot:") or data.startswith("channelpost:")):
         return False
 
@@ -3609,6 +3636,24 @@ async def handle_text(
     admin_main_keyboard: Any,
 ) -> bool:
     set_button_settings(business.runtime_userbot_settings())
+
+    from TenantRuntime.AdminBot import broadcast_channel
+    try:
+        if await broadcast_channel.handle_text(
+            update,
+            context,
+            business=business,
+            actor=actor,
+            admin_main_keyboard=admin_main_keyboard,
+        ):
+            return True
+    except (ValueError, TenantBusinessError):
+        await update.effective_message.reply_text(
+            "❌ مقدار یا وضعیت معتبر نیست. دوباره تلاش کنید.",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+
     flow=context.user_data.get(FLOW_KEY)
     if not isinstance(flow,dict):
         return False
@@ -4152,6 +4197,24 @@ async def handle_media(
     admin_main_keyboard: Any,
 ) -> bool:
     set_button_settings(business.runtime_userbot_settings())
+
+    from TenantRuntime.AdminBot import broadcast_channel
+    try:
+        if await broadcast_channel.handle_media(
+            update,
+            context,
+            business=business,
+            actor=actor,
+            admin_main_keyboard=admin_main_keyboard,
+        ):
+            return True
+    except (ValueError, TenantBusinessError):
+        await update.effective_message.reply_text(
+            "❌ رسانه یا کپشن معتبر نیست. دوباره تلاش کنید.",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+
     flow=context.user_data.get(FLOW_KEY)
     if not isinstance(flow,dict):
         return False
@@ -4274,6 +4337,24 @@ async def handle_document(
     admin_main_keyboard: Any,
 ) -> bool:
     set_button_settings(business.runtime_userbot_settings())
+
+    from TenantRuntime.AdminBot import broadcast_channel
+    try:
+        if await broadcast_channel.handle_document(
+            update,
+            context,
+            business=business,
+            actor=actor,
+            admin_main_keyboard=admin_main_keyboard,
+        ):
+            return True
+    except (ValueError, TenantBusinessError):
+        await update.effective_message.reply_text(
+            "❌ فایل معتبر نیست. دوباره تلاش کنید.",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+
     flow=context.user_data.get(FLOW_KEY)
     if (
         isinstance(flow, dict)
