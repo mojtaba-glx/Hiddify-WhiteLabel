@@ -265,7 +265,14 @@ def test_renew_main_menu_setting_is_functional(
         7001, key="show_renew_in_main_menu", value=True
     )
     labels = sum(_reply_labels(user_handlers._main_keyboard(spec, service)), [])
-    assert "♾تمدید اشتراک" not in labels
+    # SellBot parity: visibility is independent from enable_renew; the
+    # renewal handler itself rejects access while renewal is disabled.
+    assert "♾تمدید اشتراک" in labels
+    runtime = open(
+        "TenantRuntime/UserBot/handlers.py",
+        encoding="utf-8",
+    ).read()
+    assert 'if not bool(settings.get("enable_renew", True)):' in runtime
 
 
 def test_user_status_visibility_is_functional(
