@@ -62,7 +62,8 @@ def test_migration_is_idempotent(db_path) -> None:
     assert "0022_renewal_policy" in versions
     assert "0023_trial_reminder_lifecycle" in versions
     assert "0024_referral_phase10" in versions
-    assert "0025_payment_phase11" in versions
+    assert "0025_server_connection_parity" in versions
+    assert "0026_payment_phase11" in versions
 
 
 def test_foreign_keys_enforced(conn, factories) -> None:
@@ -99,7 +100,8 @@ def test_checksums_recorded(db_path) -> None:
     assert len(recorded["0022_renewal_policy"]) == 64
     assert len(recorded["0023_trial_reminder_lifecycle"]) == 64
     assert len(recorded["0024_referral_phase10"]) == 64
-    assert len(recorded["0025_payment_phase11"]) == 64
+    assert len(recorded["0025_server_connection_parity"]) == 64
+    assert len(recorded["0026_payment_phase11"]) == 64
 
 
 def test_checksum_mismatch_detected(db_path, tmp_path) -> None:
