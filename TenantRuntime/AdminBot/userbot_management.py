@@ -1718,22 +1718,24 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
         methods = business.list_payment_methods_admin(actor)
         rows: list[list[InlineKeyboardButton]] = [
             [InlineKeyboardButton(
-                f"{'✅' if x['status']=='active' else '❌'} {x['title']} · {x['currency']}",
+                f"{'✅' if x['status']=='active' else '❌'} "
+                f"{x.get('provider_icon') or '💳'} {x['title']} · {x['currency']}",
                 callback_data=f"userbot:settings:payment:method:{int(x['id'])}",
             )]
             for x in methods
         ]
-        rows.extend([
-            [
-                InlineKeyboardButton("💳 افزودن کارت به کارت", callback_data="userbot:settings:payment:addkind:card"),
-                InlineKeyboardButton("🔗 افزودن ارز دیجیتال", callback_data="userbot:settings:payment:addkind:crypto"),
-            ],
-            [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
+        rows.append([
+            InlineKeyboardButton(
+                "➕ افزودن روش پرداخت",
+                callback_data="userbot:settings:payment:add",
+            )
         ])
+        rows.append([InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")])
         await _edit_or_send(
             update,
-            "💳 تنظیمات پرداخت\n"
-            "روش‌های پرداخت هر Tenant مستقل هستند و فقط روش‌های واقعاً پشتیبانی‌شده نمایش داده می‌شوند.",
+            "💳 تنظیمات پرداخت Tenant\n"
+            "ترتیب نمایش با Priority است. Provider مستقل از UserBot ذخیره می‌شود؛ "
+            "درگاه یا تأییدکننده جدید بعداً از همین لایه اضافه می‌شود.",
             InlineKeyboardMarkup(rows),
         )
         return
@@ -3016,64 +3018,160 @@ async def handle_callback(
         return True
 
     if data == "userbot:settings:payment:add":
-        context.user_data[FLOW_KEY] = {"kind": "payment_add_kind"}
+        providers = business.available_payment_providers_admin(actor)
+        rows = [[InlineKeyboardButton(
+            f"{item['icon']} {item['title']}",
+            callback_data=f"userbot:settings:payment:addprovider:{item['key']}",
+        )] for item in providers]
+        rows.append([InlineKeyboardButton(
+            "🔙بازگشت", callback_data="userbot:settings:payment"
+        )])
         await _edit_or_send(
             update,
-            "💳 نوع روش پرداخت را انتخاب کنید:",
-            InlineKeyboardMarkup([
-                [InlineKeyboardButton("💳 کارت به کارت", callback_data="userbot:settings:payment:addkind:card")],
-                [InlineKeyboardButton("🪙 رمزارز", callback_data="userbot:settings:payment:addkind:crypto")],
-                [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:payment")],
-            ]),
+            "💳 Provider روش پرداخت را انتخاب کنید:",
+            InlineKeyboardMarkup(rows),
         )
         return True
-    if data.startswith("userbot:settings:payment:addkind:"):
-        kind = data.rsplit(":", 1)[1]
-        if kind not in {"card", "crypto"}:
-            raise ValueError("invalid payment kind")
+    if data.startswith("userbot:settings:payment:addprovider:"):
+        provider_key = data.rsplit(":", 1)[1]
+        provider = next(
+            (
+                item for item in business.available_payment_providers_admin(actor)
+                if item["key"] == provider_key
+            ),
+            None,
+        )
+        if provider is None:
+            raise TenantBusinessError("payment provider not found")
         context.user_data[FLOW_KEY] = {
             "kind": "payment_add_title",
-            "payment_kind": kind,
+            "payment_provider": provider_key,
+            "payment_kind": provider["legacy_kind"],
+            "requires_network": bool(provider.get("requires_network")),
         }
         await query.message.reply_text(
             "📝 عنوان روش پرداخت را وارد کنید:",
             reply_markup=userbot_cancel_keyboard(),
         )
         return True
-    if data.startswith("userbot:settings:payment:method:"):
-        mid = int(data.rsplit(":", 1)[1])
-        item = next(
+    if data.startswith("userbot:settings:payment:addkind:"):
+        # Backward compatibility for old Telegram messages from <= v0.20.0.
+        kind = data.rsplit(":", 1)[1]
+        provider_key = "card_manual" if kind == "card" else "crypto_manual"
+        provider = next(
             (
-                x
-                for x in business.list_payment_methods_admin(actor)
-                if int(x["id"]) == mid
+                item for item in business.available_payment_providers_admin(actor)
+                if item["key"] == provider_key
             ),
             None,
         )
-        if item is None:
-            raise TenantBusinessError("payment method not found")
+        if provider is None:
+            raise TenantBusinessError("payment provider not found")
+        context.user_data[FLOW_KEY] = {
+            "kind": "payment_add_title",
+            "payment_provider": provider_key,
+            "payment_kind": provider["legacy_kind"],
+            "requires_network": bool(provider.get("requires_network")),
+        }
+        await query.message.reply_text(
+            "📝 عنوان روش پرداخت را وارد کنید:",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+    if data.startswith("userbot:settings:payment:edit:"):
+        parts = data.split(":")
+        if len(parts) != 6:
+            raise ValueError("invalid payment edit callback")
+        mid = int(parts[4])
+        field = parts[5]
+        if field not in {"title","currency","destination","network","instructions","priority"}:
+            raise ValueError("invalid payment edit field")
+        item = business.payment_method_admin(actor, method_id=mid)
+        current = item.get(field) if field != "priority" else int(item.get("priority") or 0)
+        context.user_data[FLOW_KEY] = {
+            "kind": "payment_edit",
+            "method_id": mid,
+            "field": field,
+        }
+        await query.message.reply_text(
+            f"✏️ مقدار فعلی: {current or '-'}\nمقدار جدید را ارسال کنید:",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+    if data.startswith("userbot:settings:payment:remove_confirm:"):
+        mid = int(data.rsplit(":", 1)[1])
+        result = business.remove_payment_method_admin(actor, method_id=mid)
+        message = (
+            "✅ روش پرداخت حذف شد."
+            if result.get("removed")
+            else "✅ روش دارای سابقه تراکنش بود؛ برای حفظ تاریخچه غیرفعال شد."
+        )
         await _edit_or_send(
             update,
-            f"💳 {item['title']}\n"
-            f"نوع: {item['kind']}\n"
+            message,
+            InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "🔙 تنظیمات پرداخت",
+                    callback_data="userbot:settings:payment",
+                )
+            ]]),
+        )
+        return True
+    if data.startswith("userbot:settings:payment:remove:"):
+        mid = int(data.rsplit(":", 1)[1])
+        item = business.payment_method_admin(actor, method_id=mid)
+        await _edit_or_send(
+            update,
+            f"⚠️ حذف روش پرداخت «{item['title']}»؟\n"
+            "اگر سابقه مالی داشته باشد حذف نمی‌شود و فقط غیرفعال خواهد شد.",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "✅ تأیید",
+                    callback_data=f"userbot:settings:payment:remove_confirm:{mid}",
+                )],
+                [InlineKeyboardButton(
+                    "❌ لغو",
+                    callback_data=f"userbot:settings:payment:method:{mid}",
+                )],
+            ]),
+        )
+        return True
+    if data.startswith("userbot:settings:payment:method:"):
+        mid = int(data.rsplit(":", 1)[1])
+        item = business.payment_method_admin(actor, method_id=mid)
+        await _edit_or_send(
+            update,
+            f"{item.get('provider_icon') or '💳'} {item['title']}\n"
+            f"Provider: {item.get('provider_title') or item.get('provider_key')} "
+            f"({item.get('provider_key')})\n"
             f"ارز: {item['currency']}\n"
             f"مقصد: {item['destination']}\n"
             f"شبکه: {item.get('network') or '-'}\n"
+            f"Priority: {int(item.get('priority') or 0)}\n"
             f"توضیحات: {item.get('instructions') or '-'}\n"
             f"وضعیت: {item['status']}",
             InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✏️ عنوان", callback_data=f"userbot:settings:payment:edit:{mid}:title"),
+                    InlineKeyboardButton("💱 ارز", callback_data=f"userbot:settings:payment:edit:{mid}:currency"),
+                ],
+                [
+                    InlineKeyboardButton("📍 مقصد", callback_data=f"userbot:settings:payment:edit:{mid}:destination"),
+                    InlineKeyboardButton("🌐 شبکه", callback_data=f"userbot:settings:payment:edit:{mid}:network"),
+                ],
+                [
+                    InlineKeyboardButton("📝 توضیحات", callback_data=f"userbot:settings:payment:edit:{mid}:instructions"),
+                    InlineKeyboardButton("↕️ Priority", callback_data=f"userbot:settings:payment:edit:{mid}:priority"),
+                ],
                 [InlineKeyboardButton("⏸/▶️ تغییر وضعیت", callback_data=f"userbot:settings:payment:toggle:{mid}")],
+                [InlineKeyboardButton("🗑 حذف / غیرفعال امن", callback_data=f"userbot:settings:payment:remove:{mid}")],
                 [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:payment")],
             ]),
         )
         return True
     if data.startswith("userbot:settings:payment:toggle:"):
         mid = int(data.rsplit(":", 1)[1])
-        item = next(
-            x
-            for x in business.list_payment_methods_admin(actor)
-            if int(x["id"]) == mid
-        )
+        item = business.payment_method_admin(actor, method_id=mid)
         business.set_payment_method_status_admin(
             actor, method_id=mid, enabled=item["status"] != "active"
         )
