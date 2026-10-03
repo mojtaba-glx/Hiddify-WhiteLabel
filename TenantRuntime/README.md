@@ -124,3 +124,21 @@ and support tools.
 Sanaei uses an encrypted Bearer API token; Alireza uses encrypted
 username/password and an optional encrypted Xray application secret header.
 The implementation is independent and does not import the reference SellBot.
+
+Customer subscription status uses a paginated service selector and a separate
+live detail message. It displays the customer-facing service name, current
+usage, remaining quota/time, last connection, and the original order or latest
+fulfilled renewal price with its recorded currency. Names are tenant-local
+aliases; panel email and traffic identities are preserved.
+
+The detail keyboard provides configured connection methods, renewal, rename,
+credential rotation with confirmation, refresh, copyable ID and connection
+help. Subscription links are delivered as copyable HTML with QR images and a
+text fallback. Credential rotation changes the native connection identity on
+Hiddify, Sanaei/Alireza X-UI and X-NET, invalidates previous smart-link tokens,
+and preserves subscription terms and consumption. WireGuard key rotation is
+rejected before making changes. An interrupted multi-node operation is recorded
+in SQLite and resumed with the same desired identity; config delivery, repair
+and renewal are blocked until it completes. Customer ownership is checked
+before every action. Migration `0027_subscription_status.sql` installs the
+metadata without changing the release version.

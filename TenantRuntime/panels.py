@@ -97,6 +97,10 @@ class PanelAdapter(Protocol):
         self, *, target: PanelTarget, secret: str, external_ref: str, enabled: bool
     ) -> PanelUserResult: ...
 
+    def rotate_identity(
+        self, *, target: PanelTarget, secret: str, external_ref: str, new_ref: str
+    ) -> PanelUserResult: ...
+
     def delete_user(
         self, *, target: PanelTarget, secret: str, external_ref: str
     ) -> None: ...
@@ -141,6 +145,9 @@ class UnconfiguredPanelAdapter:
         self, *, target: PanelTarget, secret: str, external_ref: str, enabled: bool
     ) -> PanelUserResult:
         del target, secret, external_ref, enabled
+        self._fail()
+
+    def rotate_identity(self, **kwargs) -> PanelUserResult:
         self._fail()
 
     def delete_user(
@@ -214,6 +221,23 @@ class RoutedPanelAdapter:
         return self._adapter(target).set_enabled(
             target=target, secret=secret, external_ref=external_ref, enabled=enabled
         )
+
+    def validate_identity_rotation(self, *, target: PanelTarget, secret: str,
+                                   external_ref: str) -> None:
+        adapter = self._adapter(target)
+        if not callable(getattr(adapter, "rotate_identity", None)):
+            raise PanelError("panel does not support credential rotation")
+        validator = getattr(adapter, "validate_identity_rotation", None)
+        if callable(validator):
+            validator(target=target, secret=secret, external_ref=external_ref)
+
+    def rotate_identity(self, *, target: PanelTarget, secret: str,
+                        external_ref: str, new_ref: str) -> PanelUserResult:
+        method = getattr(self._adapter(target), "rotate_identity", None)
+        if not callable(method):
+            raise PanelError("panel does not support credential rotation")
+        return method(target=target, secret=secret, external_ref=external_ref,
+                      new_ref=new_ref)
 
     def delete_user(
         self, *, target: PanelTarget, secret: str, external_ref: str

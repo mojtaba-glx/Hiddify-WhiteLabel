@@ -27,7 +27,7 @@ EXPECTED_TABLES = {
     "tenant_tickets", "tenant_smart_links",
     "tenant_panel_credentials", "tenant_plan_categories",
     "tenant_referral_manual_rewards", "tenant_payment_events",
-    "tenant_payment_receipt_media",
+    "tenant_payment_receipt_media", "tenant_subscription_rotations",
 }
 
 
@@ -64,6 +64,7 @@ def test_migration_is_idempotent(db_path) -> None:
     assert "0024_referral_phase10" in versions
     assert "0025_server_connection_parity" in versions
     assert "0026_payment_phase11" in versions
+    assert "0027_subscription_status" in versions
 
 
 def test_foreign_keys_enforced(conn, factories) -> None:
@@ -102,6 +103,7 @@ def test_checksums_recorded(db_path) -> None:
     assert len(recorded["0024_referral_phase10"]) == 64
     assert len(recorded["0025_server_connection_parity"]) == 64
     assert len(recorded["0026_payment_phase11"]) == 64
+    assert len(recorded["0027_subscription_status"]) == 64
 
 
 def test_checksum_mismatch_detected(db_path, tmp_path) -> None:

@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import random
 import sqlite3
+from html import escape
+from io import BytesIO
+
+from telegram.error import BadRequest, TelegramError
 from contextvars import ContextVar
 from typing import Any
 
@@ -326,22 +330,108 @@ def _subscription_detail_text(
     else:
         remaining_time = f"{days} روز"
 
-    lines = ["📄 اطلاعات اشتراک شما", ""]
+    lines = ["📄 اطلاعات اشتراک شما", "",
+             f"✏️ نام: {escape(_subscription_name(item))}"]
     if bool(settings.get("show_username", True)):
         identity = f"@{username}" if username else (display_name or "-")
-        lines.append(f"👤 کاربر: {identity}")
+        lines.append(f"👤 کاربر: {escape(identity)}")
     lines.extend([
-        f"📦 پلن: {item.get('plan_name') or '-'}",
-        f"📡 سرور: {item.get('server_label') or 'نامشخص'}",
+        f"📦 پلن: {escape(str(item.get('plan_name') or '-'))}",
+        f"📡 سرور: {escape(str(item.get('server_label') or 'نامشخص'))}",
         f"📶 وضعیت: {_subscription_status_label(item)}",
         f"📊 میزان استفاده: {usage_line}",
         f"📥 حجم باقی‌مانده: {remaining_line}",
-        f"📅 تاریخ انقضا: {'نامحدود' if metrics['unlimited_time'] else _local_time_text(item.get('expires_at'))}",
+        f"📅 تاریخ انقضا: {'نامحدود' if metrics['unlimited_time'] else escape(_local_time_text(item.get('expires_at')))}",
         f"⏳ زمان باقی‌مانده: {remaining_time}",
-        f"🕓 آخرین اتصال: {_last_online_text(item.get('last_online'))}",
-        f"🔑 شناسه: {item.get('id')}",
+        f"🕓 آخرین اتصال: {escape(_last_online_text(item.get('last_online')))}",
+        f"💰 قیمت اشتراک: {_subscription_price(item)}",
+        f"🔑 شناسه: <code>{int(item['id'])}</code>",
     ])
+    if item.get("sync_failed"):
+        lines.append("⚠️ ارتباط با برخی پنل‌ها ممکن نیست؛ اطلاعات ذخیره‌شده نمایش داده شده است.")
+    if item.get("last_synced_at"):
+        lines.append(f"🔄 آخرین بروزرسانی: {escape(_local_time_text(item['last_synced_at']))}")
+    if item.get("rotation_pending"):
+        lines.append("⚠️ تغییر لینک نیمه‌تمام است؛ «ادامه تغییر لینک» را بزنید.")
     return "\n".join(lines)
+
+
+def _subscription_name(item: dict[str, Any]) -> str:
+    return str(item.get("service_name") or item.get("plan_name") or f"اشتراک #{item['id']}")
+
+
+def _subscription_price(item: dict[str, Any]) -> str:
+    value = item.get("subscription_price")
+    if value is None:
+        return "نامشخص"
+    currency = str(item.get("subscription_currency") or "").upper()
+    unit = {"IRR": "ریال", "IRT": "تومان", "TMN": "تومان"}.get(currency, currency)
+    return f"{int(value):,} {escape(unit)}"
+
+
+def _subscription_status_rows(business, actor, item, settings):
+    sid = int(item["id"])
+    rows = []
+    provisioned = bool(item.get("external_ref") and item.get("server_id"))
+    pending = bool(item.get("rotation_pending"))
+    if item.get("status") == "active" and not pending and _subscription_config_menu_rows(
+        business, actor, sid, settings
+    ):
+        rows.append([InlineKeyboardButton("کانفیگ ها📝", callback_data=f"shop:configmenu:{sid}")])
+    if provisioned and not pending and bool(settings.get("enable_renew", True)):
+        rows.append([InlineKeyboardButton("تمدید اشتراک♾", callback_data=f"shop:renew:{sid}")])
+    rows.append([InlineKeyboardButton("تغییر نام اشتراک✏️", callback_data=f"shop:subrename:{sid}")])
+    if provisioned:
+        rows.append([InlineKeyboardButton(
+            "ادامه تغییر لینک🚨" if pending else "تغییر لینک اشتراک🚨",
+            callback_data=f"shop:subrotate:{sid}")])
+    rows.extend([
+        [InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"shop:subrefresh:{sid}"),
+         InlineKeyboardButton("🔑 کپی شناسه", callback_data=f"shop:subcopy:{sid}")],
+        [InlineKeyboardButton("📚 راهنمای اتصال", callback_data="shop:guide")],
+        [InlineKeyboardButton("🔙 همه اشتراک‌ها", callback_data="shop:subs")],
+    ])
+    return rows
+
+
+def _subscription_list(business, actor, settings, *, view="all", page=0):
+    statuses = {"active": "🟢 سرویس‌های فعال", "expired": "🔴 سرویس‌های منقضی",
+                "disabled": "🟡 سرویس‌های غیرفعال", "pending_provisioning": "🟠 در انتظار فعال‌سازی"}
+    view = view if view in statuses else "all"
+    page = max(0, int(page))
+    items = business.list_subscriptions(actor, status=None if view == "all" else view,
+                                       limit=13, offset=page * 12)
+    rows = [[InlineKeyboardButton(
+        f"{_subscription_status_label(x).split()[0]} {_subscription_name(x)} · #{x['id']}"[:60],
+        callback_data=f"shop:substatus:{x['id']}")] for x in items[:12]]
+    navigation = []
+    if page:
+        navigation.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"shop:subs:{view}:{page-1}"))
+    if len(items) > 12:
+        navigation.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"shop:subs:{view}:{page+1}"))
+    if navigation:
+        rows.append(navigation)
+    rows.extend([
+        [InlineKeyboardButton("🟢 فعال", callback_data="shop:subs:active"),
+         InlineKeyboardButton("🔴 منقضی", callback_data="shop:subs:expired")],
+        [InlineKeyboardButton("🟡 غیرفعال", callback_data="shop:subs:disabled"),
+         InlineKeyboardButton("🟠 در انتظار", callback_data="shop:subs:pending_provisioning")],
+        [InlineKeyboardButton("📦 همه اشتراک‌ها", callback_data="shop:subs")],
+        [InlineKeyboardButton("👤 پروفایل", callback_data="shop:account"),
+         InlineKeyboardButton("🧾 سفارش‌های من", callback_data="shop:orders")],
+        [InlineKeyboardButton("🔙بازگشت", callback_data="runtime:home")],
+    ])
+    text = statuses.get(view, "📄 وضعیت اشتراک‌های شما") + f" — صفحه {page+1}\n\n"
+    text += "اشتراک موردنظر را انتخاب کنید:" if items else "در این بخش اشتراکی ندارید."
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def _edit_subscription(query, text, **kwargs):
+    try:
+        await query.edit_message_text(text, **kwargs)
+    except BadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
 
 
 def _user_account_text(
@@ -1474,6 +1564,8 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = int(update.effective_user.id) if update.effective_user else 0
     if not await _force_join_allowed(update, context, business):
         return
+    context.user_data.pop("biz_flow", None)
+    context.user_data.pop("subscription_rotation_confirmation", None)
     state = state_store.load(user_id)
     visits = int(state.get("visits") or 0) + 1
     state_store.save(user_id, {**state, "visits": visits, "screen": "home"})
@@ -1569,140 +1661,31 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
         return
 
+    if not await _force_join_allowed(update, context, business):
+        return
+    context.user_data.pop("biz_flow", None)
     state = state_store.load(user_id)
     state_store.save(user_id, {**state, "screen": "status"})
     try:
-        summary = business.customer_account_summary(user_id, refresh=True)
-        subscriptions = business.list_subscriptions(user_id, limit=100)
-        customer = dict(summary.get("customer") or {})
-        subs = dict(summary.get("subscriptions") or {})
-        active_items = [
-            item
-            for item in subscriptions
-            if str(item.get("status") or "") == "active"
-        ]
-
-        lines = [
-            "📊 وضعیت حساب و اشتراک‌ها",
-            "",
-            f"👤 وضعیت کاربر: {_account_status_label(customer.get('status'))}",
-        ]
-        if bool(settings.get("show_username", True)):
-            username = str(customer.get("username") or "").strip().lstrip("@")
-            if username:
-                lines.append(f"🆔 نام کاربری: @{username}")
-        lines.extend([
-            "",
-            "📦 خلاصه سرویس‌ها",
-            f"🟢 فعال: {int(subs.get('active') or 0)}",
-            f"🟡 غیرفعال: {int(subs.get('disabled') or 0)}",
-            f"🔴 منقضی: {int(subs.get('expired') or 0)}",
-            f"🟠 در انتظار فعال‌سازی: {int(subs.get('pending') or 0)}",
-            f"🧾 سفارش باز: {int(summary.get('pending_orders') or 0)}",
-        ])
-
-        if active_items:
-            lines.extend(["", "⚡ سرویس‌های فعال"])
-            for item in active_items[:3]:
-                metrics = _subscription_metrics(item, settings)
-                volume = (
-                    f"{metrics['usage_gb']:.1f} گیگ مصرف"
-                    if metrics["unlimited_volume"]
-                    else (
-                        f"{metrics['usage_gb']:.1f}/"
-                        f"{metrics['limit_gb']:.1f} گیگ"
-                    )
-                )
-                days = metrics["days_left"]
-                remaining = (
-                    "نامحدود"
-                    if metrics["unlimited_time"]
-                    else (
-                        "منقضی"
-                        if days is not None and days <= 0
-                        else f"{days} روز" if days is not None else "نامشخص"
-                    )
-                )
-                lines.append(
-                    f"• #{item['id']} · {item.get('plan_name') or '-'}"
-                    f" · {volume} · {remaining}"
-                )
-            if len(active_items) > 3:
-                lines.append(
-                    f"• و {len(active_items) - 3} سرویس فعال دیگر..."
-                )
-        else:
-            lines.extend(["", "⚪ سرویس فعالی ندارید."])
-        text = "\n".join(lines)
+        text, status_markup = _subscription_list(business, user_id, settings)
     except (TenantBusinessError, ValueError, sqlite3.Error):
-        text = (
-            "📊 وضعیت حساب و اشتراک‌ها\n\n"
-            "⏳ دریافت وضعیت سرویس‌ها موقتاً ممکن نیست."
-        )
-        subs = {}
-
-    status_markup = InlineKeyboardMarkup([
-        [
-            _button(
-                "👤 پروفایل",
-                callback_data="shop:account",
-                settings=settings,
-            ),
-            _button(
-                "🧾 سفارش‌های من",
-                callback_data="shop:orders",
-                settings=settings,
-            ),
-        ],
-        [
-            _button(
-                f"🟢 فعال ({int(subs.get('active') or 0)})",
-                callback_data="shop:subs:active",
-                settings=settings,
-            ),
-            _button(
-                f"🔴 منقضی ({int(subs.get('expired') or 0)})",
-                callback_data="shop:subs:expired",
-                settings=settings,
-            ),
-        ],
-        [
-            _button(
-                "📦 همه اشتراک‌ها",
-                callback_data="shop:subs",
-                settings=settings,
-            ),
-            _button(
-                "🔗 اتصال اشتراک",
-                callback_data="shop:connect",
-                settings=settings,
-            ),
-        ],
-        [
-            _button(
-                "🔙بازگشت",
-                callback_data="runtime:home",
-                settings=settings,
-            )
-        ],
-    ])
+        text = "⏳ دریافت وضعیت اشتراک‌ها موقتاً ممکن نیست."
+        status_markup = InlineKeyboardMarkup([[
+            _button("🔙بازگشت", callback_data="runtime:home", settings=settings)
+        ]])
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(
-            text,
-            reply_markup=status_markup,
-        )
+        await _edit_subscription(update.callback_query, text, reply_markup=status_markup)
     elif update.effective_message:
-        await update.effective_message.reply_text(
-            text,
-            reply_markup=status_markup,
-        )
+        await update.effective_message.reply_text(text, reply_markup=status_markup)
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.callback_query is None:
         return
     data = str(update.callback_query.data or "")
+    if not data.startswith(("shop:subrotate:", "shop:subrotateconfirm:")):
+        context.user_data.pop("subscription_rotation_confirmation", None)
     if data == "runtime:home":
         await show_home(update, context)
         return
@@ -2391,162 +2374,90 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
         if data == "shop:subs" or data.startswith("shop:subs:"):
-            view = (
-                data.split(":", 2)[2]
-                if data.startswith("shop:subs:") and len(data.split(":", 2)) == 3
-                else "all"
-            )
-            refreshed = business.refresh_customer_subscription_statuses(
-                actor,
-                limit=100,
-            )
-            if view == "active":
-                items = [
-                    item for item in refreshed
-                    if str(item.get("status") or "") == "active"
-                ]
-                title = "🟢 سرویس‌های فعال"
-            elif view == "expired":
-                items = [
-                    item for item in refreshed
-                    if str(item.get("status") or "") == "expired"
-                ]
-                title = "🔴 سرویس‌های منقضی"
-            else:
-                items = refreshed
-                view = "all"
-                title = "📦 همه اشتراک‌های من"
-
-            detail_lines = []
-            for x in items[:20]:
-                metrics = _subscription_metrics(x, settings)
-                volume = (
-                    f"{metrics['usage_gb']:.2f} گیگ مصرف"
-                    if metrics["unlimited_volume"]
-                    else (
-                        f"{metrics['usage_gb']:.2f}/"
-                        f"{metrics['limit_gb']:.2f} گیگ"
-                    )
-                )
-                days = metrics["days_left"]
-                time_left = (
-                    "نامحدود"
-                    if metrics["unlimited_time"]
-                    else (
-                        "منقضی"
-                        if days is not None and days <= 0
-                        else f"{days} روز" if days is not None else "نامشخص"
-                    )
-                )
-                detail_lines.append(
-                    f"• #{x['id']} · {x.get('plan_name') or '-'}\n"
-                    f"  {_subscription_status_label(x)} · "
-                    f"مصرف {volume} · {time_left}\n"
-                    f"  آخرین اتصال: {_last_online_text(x.get('last_online'))}"
-                )
-            if len(items) > 20:
-                detail_lines.append(
-                    f"• و {len(items) - 20} سرویس دیگر..."
-                )
-            text = title + "\n\n" + (
-                "\n".join(detail_lines) or "موردی وجود ندارد."
-            )
-
-            rows = [
-                [InlineKeyboardButton(
-                    f"📄 #{item['id']} · {item.get('plan_name') or 'اشتراک'}"[:60],
-                    callback_data=f"shop:substatus:{item['id']}",
-                )]
-                for item in items[:20]
-            ]
-            rows.extend([
-                [
-                    InlineKeyboardButton(
-                        "🟢 فعال",
-                        callback_data="shop:subs:active",
-                    ),
-                    InlineKeyboardButton(
-                        "🔴 منقضی",
-                        callback_data="shop:subs:expired",
-                    ),
-                ],
-                [InlineKeyboardButton(
-                    "📦 همه اشتراک‌ها",
-                    callback_data="shop:subs",
-                )],
-            ])
-            navigation_row = [
-                InlineKeyboardButton(
-                    "👤 پروفایل",
-                    callback_data="shop:account",
-                )
-            ]
-            if bool(settings.get("show_user_status", True)):
-                navigation_row.append(InlineKeyboardButton(
-                    "📊 وضعیت",
-                    callback_data="runtime:status",
-                ))
-            rows.extend([
-                navigation_row,
-                [InlineKeyboardButton("🏠 منو", callback_data="runtime:home")],
-            ])
-            await update.callback_query.edit_message_text(
-                text,
-                reply_markup=InlineKeyboardMarkup(rows),
-            )
+            parts = data.split(":")
+            view = parts[2] if len(parts) > 2 else "all"
+            page = int(parts[3]) if len(parts) > 3 else 0
+            context.user_data.pop("biz_flow", None)
+            text, markup = _subscription_list(business, actor, settings, view=view, page=page)
+            await update.callback_query.answer()
+            await _edit_subscription(update.callback_query, text, reply_markup=markup)
             return
 
-        if data.startswith("shop:substatus:"):
+        if data.startswith(("shop:substatus:", "shop:subrefresh:", "shop:subcopy:",
+                            "shop:subrename:", "shop:subrotate:", "shop:subrotateconfirm:")):
+            action = data.split(":")[1]
             subscription_id = int(data.rsplit(":", 1)[1])
-            item = business.customer_subscription_status(
-                actor,
+            item = business.customer_subscription_status(actor,
                 subscription_id=subscription_id,
-                refresh=True,
-            )
-            rows = []
-            if (
-                str(item.get("status") or "") == "active"
-                and _subscription_config_menu_rows(
-                    business,
-                    actor,
-                    subscription_id,
-                    settings,
-                )
-            ):
-                rows.append([InlineKeyboardButton(
-                    "📝 کانفیگ‌ها و لینک‌ها",
-                    callback_data=f"shop:configmenu:{subscription_id}",
-                )])
-            if (
-                item.get("external_ref")
-                and item.get("server_id")
-                and str(item.get("status") or "")
-                in ("active", "disabled", "expired")
-            ):
-                rows.append([InlineKeyboardButton(
-                    "♻️ تمدید اشتراک",
-                    callback_data=f"shop:renew:{subscription_id}",
-                )])
-            rows.extend([
-                [InlineKeyboardButton(
-                    "🔙 همه اشتراک‌ها",
-                    callback_data="shop:subs",
-                )],
-                [InlineKeyboardButton("🏠 منو", callback_data="runtime:home")],
-            ])
-            await update.callback_query.edit_message_text(
-                _subscription_detail_text(item, settings),
-                reply_markup=InlineKeyboardMarkup(rows),
-            )
+                refresh=action in {"substatus", "subrefresh"})
+            back = InlineKeyboardMarkup([[InlineKeyboardButton(
+                "🔙 بازگشت", callback_data=f"shop:subrefresh:{subscription_id}")]])
+            if action == "subcopy":
+                await update.callback_query.answer()
+                await update.effective_message.reply_text(
+                    f"🔑 شناسه اشتراک: <code>{subscription_id}</code>", parse_mode="HTML")
+                return
+            if action == "subrename":
+                context.user_data["biz_flow"] = {"kind": "subscription_rename", "subscription_id": subscription_id}
+                await update.callback_query.answer()
+                await _edit_subscription(update.callback_query,
+                    "✏️ نام جدید اشتراک را ارسال کنید (۳ تا ۶۴ حرف).\nبرای لغو، دکمه بازگشت را بزنید.",
+                    reply_markup=back)
+                return
+            context.user_data.pop("biz_flow", None)
+            if action != "subrotateconfirm":
+                context.user_data.pop("subscription_rotation_confirmation", None)
+            if action == "subrotate":
+                context.user_data["subscription_rotation_confirmation"] = {
+                    "subscription_id": subscription_id,
+                    "external_ref": item.get("external_ref"),
+                }
+                await update.callback_query.answer()
+                await _edit_subscription(update.callback_query,
+                    "⚠️ هشدار تغییر لینک اشتراک\n\n"
+                    "با تغییر لینک اشتراک، لینک و کانفیگ قبلی از کار می‌افتد و باید لینک جدید را دوباره در برنامه وارد کنید.\n\n"
+                    "مصرف، حجم و تاریخ انقضا حفظ می‌شود.\n"
+                    "اگر مطمئن هستید، تایید تغییر لینک را بزنید.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("تایید تغییر لینک🚨", callback_data=f"shop:subrotateconfirm:{subscription_id}")],
+                        back.inline_keyboard[0]]))
+                return
+            notice = ""
+            if action == "subrotateconfirm":
+                confirmation = context.user_data.pop("subscription_rotation_confirmation", None)
+                if not confirmation or confirmation.get("subscription_id") != subscription_id or confirmation.get("external_ref") != item.get("external_ref"):
+                    await update.callback_query.answer("ابتدا درخواست تغییر لینک را تایید کنید.", show_alert=True)
+                    return
+                await update.callback_query.answer("در حال تغییر لینک…")
+                try:
+                    item = business.rotate_customer_subscription(actor, subscription_id=subscription_id)
+                    notice = "✅ لینک اشتراک تغییر کرد؛ لینک جدید را از «کانفیگ ها» دریافت کنید.\n\n"
+                except TenantBusinessError:
+                    item = business.customer_subscription_status(actor, subscription_id=subscription_id, refresh=False)
+                    notice = (
+                        "⚠️ تغییر لینک کامل نشد. برای ادامه، «ادامه تغییر لینک» را بزنید. در صورت تکرار خطا با پشتیبانی تماس بگیرید.\n\n"
+                        if item.get("rotation_pending") else
+                        "⚠️ تغییر لینک برای این پنل در دسترس نیست یا ارتباط برقرار نشد. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.\n\n"
+                    )
+            else:
+                await update.callback_query.answer()
+            markup = InlineKeyboardMarkup(_subscription_status_rows(business, actor, item, settings))
+            text = notice + _subscription_detail_text(item, settings)
+            if action == "substatus":
+                # Keep the selectable list intact, as in SellBot.
+                await update.effective_message.reply_text(text, reply_markup=markup, parse_mode="HTML")
+            else:
+                await _edit_subscription(update.callback_query, text, reply_markup=markup, parse_mode="HTML")
             return
         if data.startswith("shop:configmenu:"):
             subscription_id = int(data.rsplit(":", 1)[1])
+            business.customer_subscription_status(actor, subscription_id=subscription_id, refresh=False)
             rows = _subscription_config_menu_rows(
                 business, actor, subscription_id, settings
             )
             rows.append([InlineKeyboardButton(
                 "↩️ اشتراک‌های من",
-                callback_data="shop:subs",
+                callback_data=f"shop:subrefresh:{subscription_id}",
             )])
             await update.callback_query.edit_message_text(
                 f"📝 کانفیگ‌ها و لینک‌ها — اشتراک #{subscription_id}\n"
@@ -2626,16 +2537,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     ]]),
                 )
                 return
-            await update.callback_query.edit_message_text(
-                f"{title}:\n{link}",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton(
-                        "🔙 بازگشت",
-                        callback_data=f"shop:configmenu:{subscription_id}",
-                    )
-                ]]),
-                disable_web_page_preview=True,
-            )
+            caption = f"{title}\n\nجهت کپی شدن لینک، متن زیر را لمس کنید 👇\n\n<code>{escape(link)}</code>"
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+                "🔙 بازگشت", callback_data=f"shop:configmenu:{subscription_id}")]])
+            await update.callback_query.answer()
+            if len(caption) < 1000:
+                import qrcode
+                image = BytesIO()
+                try:
+                    qrcode.make(link).save(image, format="PNG")
+                    image.seek(0)
+                    await update.effective_message.reply_photo(image, caption=caption,
+                        parse_mode="HTML", reply_markup=markup)
+                    return
+                except (TelegramError, ValueError, qrcode.exceptions.DataOverflowError):
+                    pass
+            await update.effective_message.reply_text(caption, parse_mode="HTML",
+                reply_markup=markup, disable_web_page_preview=True)
             return
 
         if data.startswith("shop:configs:"):
@@ -3074,6 +2992,23 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if isinstance(flow, dict):
             fields = [part.strip() for part in text.split("|")]
             kind = flow.get("kind")
+            if kind == "subscription_rename":
+                sid = int(flow["subscription_id"])
+                if text in {"لغو", "/cancel", "بازگشت", "🔙بازگشت"}:
+                    context.user_data.pop("biz_flow", None)
+                    await update.effective_message.reply_text("تغییر نام لغو شد.", reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 بازگشت", callback_data=f"shop:subrefresh:{sid}")]]))
+                    return
+                try:
+                    item = business.rename_customer_subscription(actor, subscription_id=sid, name=text)
+                except ValueError:
+                    await update.effective_message.reply_text("نام باید ۳ تا ۶۴ حرف و بدون خط جدید یا نویسه کنترلی باشد. دوباره ارسال کنید.")
+                    return
+                context.user_data.pop("biz_flow", None)
+                settings = business.runtime_userbot_settings()
+                await update.effective_message.reply_text("✅ نام اشتراک تغییر کرد.\n\n" + _subscription_detail_text(item, settings),
+                    parse_mode="HTML", reply_markup=InlineKeyboardMarkup(_subscription_status_rows(business, actor, item, settings)))
+                return
             if kind == "wallet_topup_create":
                 if len(fields) != 2:
                     raise ValueError("invalid wallet topup")

@@ -869,6 +869,44 @@ class XnetPanelAdapter:
                 raise PanelError("X-NET account state change could not be verified")
             return snapshot
 
+    def validate_identity_rotation(self, *, target: PanelTarget, secret: str,
+                                   external_ref: str) -> None:
+        with self._session(target, secret) as session:
+            pairs = _find_pairs(self._inbounds(session), external_ref)
+            if not pairs:
+                raise PanelError("X-NET user was not found")
+            if any(str(i.get("protocol") or "").lower() in {"wireguard", "wg"}
+                   or c.get("wgPublicKey") for i, c in pairs):
+                raise PanelError("WireGuard credential rotation is unsupported")
+
+    def rotate_identity(self, *, target: PanelTarget, secret: str,
+                        external_ref: str, new_ref: str) -> PanelUserResult:
+        with self._session(target, secret) as session:
+            pairs = _find_pairs(self._inbounds(session), external_ref)
+            if any(str(i.get("protocol") or "").lower() in {"wireguard", "wg"}
+                   or c.get("wgPublicKey") for i, c in pairs):
+                raise PanelError("WireGuard credential rotation is unsupported")
+            seen = set()
+            for inbound, client in pairs:
+                client_id = str(client.get("id") or "")
+                if not client_id or client_id in seen:
+                    continue
+                seen.add(client_id)
+                body = self._update_body(client)
+                body["uuid"] = new_ref
+                if client.get("password"):
+                    body["password"] = new_ref
+                session.request("PUT",
+                    f"/api/inbounds/{quote(str(inbound.get('id') or ''), safe='')}/clients/{quote(client_id, safe='')}",
+                    payload=body)
+            refreshed = self._inbounds(session)
+            if _find_pairs(refreshed, external_ref):
+                raise PanelError("X-NET old credentials are still present")
+            result = self._snapshot(session, new_ref, inbounds=refreshed)
+            if result.external_ref != new_ref:
+                raise PanelError("X-NET credential rotation could not be verified")
+            return result
+
     def delete_user(
         self, *, target: PanelTarget, secret: str, external_ref: str
     ) -> None:

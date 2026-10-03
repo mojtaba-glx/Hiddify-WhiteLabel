@@ -13,6 +13,9 @@ import os
 import re
 import secrets
 import sqlite3
+import uuid
+import unicodedata
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -1097,17 +1100,25 @@ class TenantBusinessService:
         usage_bytes: int = 0,
         last_online: str | None = None,
         last_error: str | None = None,
+        reset_usage_offset: bool = False,
+        usage_is_logical: bool = False,
     ) -> None:
+        existing = self.conn.execute(
+            "SELECT usage_offset_bytes FROM tenant_subscription_nodes "
+            "WHERE tenant_id=? AND subscription_id=? AND server_id=?",
+            (self.tenant_id, int(subscription_id), int(server_id))).fetchone()
+        offset = 0 if reset_usage_offset or existing is None else int(existing["usage_offset_bytes"] or 0)
+        effective_usage = max(0, int(usage_bytes)) + (offset if not last_error and not usage_is_logical else 0)
         now = iso_utc(utcnow())
         self.conn.execute(
             "INSERT INTO tenant_subscription_nodes "
             "(tenant_id, subscription_id, server_id, external_ref, is_primary, "
-            "status, usage_bytes, last_online, last_error, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "status, usage_bytes, last_online, last_error, created_at, updated_at, usage_offset_bytes) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(tenant_id, subscription_id, server_id) DO UPDATE SET "
             "external_ref=excluded.external_ref, "
             "is_primary=excluded.is_primary, status=excluded.status, "
-            "usage_bytes=excluded.usage_bytes, last_online=excluded.last_online, "
+            "usage_bytes=excluded.usage_bytes, usage_offset_bytes=excluded.usage_offset_bytes, last_online=excluded.last_online, "
             "last_error=excluded.last_error, "
             "fail_count=CASE WHEN excluded.last_error IS NULL THEN 0 ELSE fail_count END, "
             "frozen_at=CASE WHEN excluded.last_error IS NULL THEN NULL ELSE frozen_at END, "
@@ -1119,11 +1130,12 @@ class TenantBusinessService:
                 _text(external_ref, 255, required=False) or None,
                 1 if is_primary else 0,
                 str(status),
-                max(0, int(usage_bytes)),
+                effective_usage,
                 _text(last_online, 80, required=False) or None,
                 _text(last_error, 300, required=False) or None,
                 now,
                 now,
+                offset,
             ),
         )
 
@@ -1250,6 +1262,7 @@ class TenantBusinessService:
         self, actor_id: int, *, subscription_id: int
     ) -> dict[str, int]:
         subscription = self._admin_subscription(actor_id, subscription_id)
+        self._require_completed_rotation(subscription_id)
         if subscription["status"] not in ("active", "disabled"):
             raise TenantBusinessError("subscription nodes cannot be repaired")
         if not subscription.get("server_id") or not subscription.get("external_ref"):
@@ -1379,6 +1392,7 @@ class TenantBusinessService:
                         is_primary=False,
                         status="disabled",
                         usage_bytes=int(row["usage_bytes"] or 0),
+                        usage_is_logical=True,
                         last_online=row["last_online"],
                     )
                 disabled += 1
@@ -3922,6 +3936,7 @@ class TenantBusinessService:
     ) -> dict[str, Any]:
         """Create a payable renewal with a snapshot of rollover behavior."""
         customer = self._customer(actor_id)
+        self._require_completed_rotation(subscription_id)
         plan = self.plan(plan_id, public=True)
         eligibility = self.renewal_eligibility(
             actor_id, subscription_id=int(subscription_id)
@@ -4394,6 +4409,8 @@ class TenantBusinessService:
         *,
         status: str | None = None,
         limit: int = 100,
+        offset: int = 0,
+        subscription_id: int | None = None,
     ) -> list[dict[str, Any]]:
         query = (
             "SELECT s.*, p.name AS plan_name, "
@@ -4402,7 +4419,21 @@ class TenantBusinessService:
             "p.price AS plan_price, p.currency AS plan_currency, "
             "c.username AS customer_username, "
             "c.display_name AS customer_display_name, "
-            "srv.label AS server_label "
+            "srv.label AS server_label, "
+            "COALESCE((SELECT o.amount FROM tenant_orders o "
+            "JOIN tenant_renewal_orders ro ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
+            "WHERE ro.tenant_id=s.tenant_id AND ro.subscription_id=s.id "
+            "AND o.status='fulfilled' ORDER BY o.id DESC LIMIT 1), "
+            "(SELECT o.amount FROM tenant_orders o WHERE o.id=s.order_id "
+            "AND o.tenant_id=s.tenant_id)) AS subscription_price, "
+            "COALESCE((SELECT o.currency FROM tenant_orders o "
+            "JOIN tenant_renewal_orders ro ON ro.order_id=o.id AND ro.tenant_id=o.tenant_id "
+            "WHERE ro.tenant_id=s.tenant_id AND ro.subscription_id=s.id "
+            "AND o.status='fulfilled' ORDER BY o.id DESC LIMIT 1), "
+            "(SELECT o.currency FROM tenant_orders o WHERE o.id=s.order_id "
+            "AND o.tenant_id=s.tenant_id)) AS subscription_currency, "
+            "EXISTS(SELECT 1 FROM tenant_subscription_rotations r "
+            "WHERE r.tenant_id=s.tenant_id AND r.subscription_id=s.id) AS rotation_pending "
             "FROM tenant_subscriptions s "
             "JOIN tenant_sale_plans p ON p.id=s.plan_id AND p.tenant_id=s.tenant_id "
             "JOIN tenant_customers c ON c.id=s.customer_id AND c.tenant_id=s.tenant_id "
@@ -4413,8 +4444,11 @@ class TenantBusinessService:
         if status is not None:
             query += " AND s.status=?"
             args.append(str(status))
-        query += " ORDER BY s.id DESC LIMIT ?"
-        args.append(max(1, min(int(limit), 500)))
+        if subscription_id is not None:
+            query += " AND s.id=?"
+            args.append(int(subscription_id))
+        query += " ORDER BY s.id DESC LIMIT ? OFFSET ?"
+        args.extend([max(1, min(int(limit), 500)), max(0, int(offset))])
         return [
             dict(row)
             for row in self.conn.execute(query, tuple(args)).fetchall()
@@ -4426,12 +4460,14 @@ class TenantBusinessService:
         *,
         status: str | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         customer = self._customer(actor_id, active=False)
         return self._customer_subscription_rows(
             int(customer["id"]),
             status=status,
             limit=limit,
+            offset=offset,
         )
 
     def customer_subscription_status(
@@ -4451,6 +4487,7 @@ class TenantBusinessService:
         if row is None:
             raise TenantBusinessError("subscription not found")
 
+        sync_failed = False
         if (
             bool(refresh)
             and str(row["status"]) in ("active", "disabled")
@@ -4458,24 +4495,139 @@ class TenantBusinessService:
             and str(row["external_ref"] or "").strip()
         ):
             try:
-                self.sync_subscription_usage(
+                synced = self.sync_subscription_usage(
                     self.owner_telegram_id,
                     subscription_id=int(subscription_id),
                 )
+                sync_failed = bool(synced.get("node_errors"))
             except TenantBusinessError:
                 # Status pages must remain readable during a temporary panel
                 # outage. The last persisted snapshot is safer than inventing
                 # a new state.
-                pass
+                sync_failed = True
 
         items = self._customer_subscription_rows(
             int(customer["id"]),
-            limit=500,
+            limit=1,
+            subscription_id=subscription_id,
         )
         for item in items:
             if int(item["id"]) == int(subscription_id):
+                item["sync_failed"] = sync_failed
                 return item
         raise TenantBusinessError("subscription not found")
+
+    def rename_customer_subscription(self, actor_id: int, *,
+                                     subscription_id: int, name: str) -> dict[str, Any]:
+        self._customer(actor_id)
+        self.customer_subscription_status(actor_id, subscription_id=subscription_id,
+                                          refresh=False)
+        clean = str(name).strip()
+        if not 3 <= len(clean) <= 64 or any(
+            unicodedata.category(char).startswith("C") for char in clean
+        ):
+            raise ValueError("subscription name must contain 3 to 64 printable characters")
+        # This customer-facing alias is independent of panel email/traffic keys.
+        # Renaming an email in X-UI would lose the accounting identity.
+        with transaction(self.conn):
+            self.conn.execute(
+                "UPDATE tenant_subscriptions SET service_name=?, updated_at=? "
+                "WHERE tenant_id=? AND id=?",
+                (clean, iso_utc(utcnow()), self.tenant_id, int(subscription_id)))
+        return self.customer_subscription_status(actor_id,
+            subscription_id=subscription_id, refresh=False)
+
+    def rotate_customer_subscription(self, actor_id: int, *,
+                                     subscription_id: int) -> dict[str, Any]:
+        self._customer(actor_id)
+        subscription = self.customer_subscription_status(actor_id,
+            subscription_id=subscription_id, refresh=False)
+        if not subscription.get("server_id") or not subscription.get("external_ref"):
+            raise TenantBusinessError("subscription is not provisioned")
+        method = getattr(self.panel_adapter, "rotate_identity", None)
+        if not callable(method):
+            raise TenantBusinessError("panel cannot rotate credentials")
+        if not subscription.get("rotation_pending") and subscription["status"] in ("active", "disabled"):
+            self.sync_subscription_usage(self.owner_telegram_id, subscription_id=subscription_id)
+            subscription = self.customer_subscription_status(actor_id,
+                subscription_id=subscription_id, refresh=False)
+        self._ensure_primary_subscription_node(subscription)
+        pending = self.conn.execute(
+            "SELECT new_ref FROM tenant_subscription_rotations "
+            "WHERE tenant_id=? AND subscription_id=?",
+            (self.tenant_id, int(subscription_id))).fetchone()
+        validator = getattr(self.panel_adapter, "validate_identity_rotation", None)
+        if pending is None and callable(validator):
+            # Validate every node before invalidating any existing link.
+            for node in self.conn.execute(
+                "SELECT server_id,external_ref FROM tenant_subscription_nodes "
+                "WHERE tenant_id=? AND subscription_id=? AND external_ref IS NOT NULL",
+                (self.tenant_id, int(subscription_id))).fetchall():
+                secret = ""
+                try:
+                    _, target, secret = self._panel_material(int(node["server_id"]))
+                    validator(target=target, secret=secret, external_ref=str(node["external_ref"]))
+                except (PanelError, TenantBusinessError) as exc:
+                    raise TenantBusinessError("credential rotation is unavailable") from exc
+                finally:
+                    secret = ""
+        new_ref = str(pending["new_ref"]) if pending else str(uuid.uuid4())
+        # Journal the desired identity before any remote mutation. A retry uses
+        # the same UUID and resumes unfinished nodes, including lost responses.
+        with transaction(self.conn):
+            self.conn.execute(
+                "INSERT OR IGNORE INTO tenant_subscription_rotations "
+                "(tenant_id,subscription_id,new_ref,created_at) VALUES (?,?,?,?)",
+                (self.tenant_id, int(subscription_id), new_ref, iso_utc(utcnow())))
+            self.conn.execute(
+                "UPDATE tenant_smart_links SET code=?, updated_at=? "
+                "WHERE tenant_id=? AND target=?",
+                (secrets.token_urlsafe(24), iso_utc(utcnow()), self.tenant_id,
+                 f"subscription:{int(subscription_id)}"))
+        nodes = self.conn.execute(
+            "SELECT * FROM tenant_subscription_nodes WHERE tenant_id=? "
+            "AND subscription_id=? AND external_ref IS NOT NULL ORDER BY is_primary DESC,id",
+            (self.tenant_id, int(subscription_id))).fetchall()
+        for node in nodes:
+            if str(node["external_ref"]) == new_ref:
+                continue
+            secret = ""
+            try:
+                _, target, secret = self._panel_material(int(node["server_id"]))
+                result = method(target=target, secret=secret,
+                    external_ref=str(node["external_ref"]), new_ref=new_ref)
+                if result.external_ref != new_ref:
+                    raise PanelError("credential rotation was not verified")
+            except (PanelError, TenantBusinessError) as exc:
+                raise TenantBusinessError("credential rotation is pending; retry to continue") from exc
+            finally:
+                secret = ""
+            # Commit each verified node immediately; a later outage must not
+            # leave the database pointing at already-invalid credentials.
+            with transaction(self.conn):
+                self.conn.execute(
+                    "UPDATE tenant_subscription_nodes SET external_ref=?,usage_offset_bytes=?,updated_at=? "
+                    "WHERE tenant_id=? AND id=?",
+                    (new_ref, max(int(node["usage_offset_bytes"] or 0),
+                                  int(node["usage_bytes"] or 0) - int(result.usage_bytes)),
+                     iso_utc(utcnow()), self.tenant_id, int(node["id"])))
+                if node["is_primary"]:
+                    self.conn.execute(
+                        "UPDATE tenant_subscriptions SET external_ref=?,updated_at=? "
+                        "WHERE tenant_id=? AND id=?",
+                        (new_ref, iso_utc(utcnow()), self.tenant_id, int(subscription_id)))
+        with transaction(self.conn):
+            self.conn.execute(
+                "DELETE FROM tenant_subscription_rotations WHERE tenant_id=? AND subscription_id=?",
+                (self.tenant_id, int(subscription_id)))
+        return self.customer_subscription_status(actor_id,
+            subscription_id=subscription_id, refresh=False)
+
+    def _require_completed_rotation(self, subscription_id: int) -> None:
+        if self.conn.execute(
+            "SELECT 1 FROM tenant_subscription_rotations WHERE tenant_id=? AND subscription_id=?",
+            (self.tenant_id, int(subscription_id))).fetchone():
+            raise TenantBusinessError("credential rotation is pending")
 
     def refresh_customer_subscription_statuses(
         self,
@@ -4795,6 +4947,8 @@ class TenantBusinessService:
                     secret=secret,
                     external_ref=str(mapping["external_ref"]),
                 )
+                usage = replace(usage, usage_bytes=max(0, int(usage.usage_bytes))
+                                + int(mapping["usage_offset_bytes"] or 0))
                 usage_bytes = max(0, int(usage.usage_bytes))
                 total_usage += usage_bytes
                 snapshots.append((mapping, usage))
@@ -5036,6 +5190,7 @@ class TenantBusinessService:
                     is_primary=bool(mapping["is_primary"]),
                     status="expired",
                     usage_bytes=int(mapping["usage_bytes"] or 0),
+                    usage_is_logical=True,
                     last_online=mapping["last_online"],
                 )
             changed = self.conn.execute(
@@ -5116,6 +5271,7 @@ class TenantBusinessService:
         fulfillment_order_id: int | None = None,
     ) -> dict[str, Any]:
         subscription = self._admin_subscription(actor_id, subscription_id)
+        self._require_completed_rotation(subscription_id)
         if subscription["server_id"] is None or not subscription["external_ref"]:
             raise TenantBusinessError("subscription is not provisioned")
         if int(traffic_gb) <= 0 or int(duration_days) <= 0:
@@ -5226,6 +5382,7 @@ class TenantBusinessService:
                 status="active",
                 usage_bytes=max(0, int(user.usage_bytes)),
                 last_online=user.last_online,
+                reset_usage_offset=True,
             )
             if fulfillment_order_id is not None:
                 order_changed = self.conn.execute(
@@ -5280,6 +5437,7 @@ class TenantBusinessService:
                         status="active",
                         usage_bytes=max(0, int(node_user.usage_bytes)),
                         last_online=node_user.last_online,
+                        reset_usage_offset=True,
                     )
             except (PanelError, TenantBusinessError):
                 with transaction(self.conn):
@@ -5290,6 +5448,7 @@ class TenantBusinessService:
                         is_primary=False,
                         status="error",
                         usage_bytes=int(row["usage_bytes"] or 0),
+                        usage_is_logical=True,
                         last_online=row["last_online"],
                         last_error="renewal failed",
                     )
@@ -5328,6 +5487,7 @@ class TenantBusinessService:
         self, actor_id: int, *, subscription_id: int, enabled: bool
     ) -> dict[str, Any]:
         subscription = self._admin_subscription(actor_id, subscription_id)
+        self._require_completed_rotation(subscription_id)
         if subscription["server_id"] is None or not subscription["external_ref"]:
             raise TenantBusinessError("subscription is not provisioned")
         due = self._subscription_is_due(subscription)
@@ -5408,6 +5568,7 @@ class TenantBusinessService:
         self, actor_id: int, *, subscription_id: int
     ) -> dict[str, Any]:
         subscription = self._admin_subscription(actor_id, subscription_id)
+        self._require_completed_rotation(subscription_id)
         if subscription["server_id"] is None or not subscription["external_ref"]:
             raise TenantBusinessError("subscription is not provisioned")
         self._ensure_primary_subscription_node(subscription)
@@ -5459,6 +5620,7 @@ class TenantBusinessService:
         if row is None:
             raise TenantBusinessError("subscription not found")
         subscription = dict(row)
+        self._require_completed_rotation(subscription_id)
         if subscription["status"] != "active" or self._subscription_is_due(subscription):
             raise TenantBusinessError("subscription is not active")
         self._ensure_primary_subscription_node(subscription)
@@ -5511,6 +5673,7 @@ class TenantBusinessService:
         if row is None:
             raise TenantBusinessError("subscription not found")
         subscription = dict(row)
+        self._require_completed_rotation(subscription_id)
         if subscription["status"] != "active" or self._subscription_is_due(
             subscription
         ):
@@ -5902,6 +6065,7 @@ class TenantBusinessService:
         subscription = self.subscription_admin(
             actor_id, subscription_id=int(subscription_id)
         )
+        self._require_completed_rotation(subscription_id)
         if subscription["server_id"] is None or not subscription["external_ref"]:
             raise TenantBusinessError("subscription is not provisioned")
         if subscription["status"] == "expired" and duration_days is None and not reset_days:
@@ -5998,6 +6162,7 @@ class TenantBusinessService:
                     status=state,
                     usage_bytes=max(0, int(user.usage_bytes)),
                     last_online=user.last_online,
+                    reset_usage_offset=bool(reset_usage),
                 )
             changed = self.conn.execute(
                 "UPDATE tenant_subscriptions SET traffic_bytes=?, usage_bytes=?, "
@@ -6006,7 +6171,10 @@ class TenantBusinessService:
                 "WHERE id=? AND tenant_id=?",
                 (
                     next_traffic,
-                    max(0, int(primary_user.usage_bytes)),
+                    int(self.conn.execute(
+                        "SELECT COALESCE(SUM(usage_bytes),0) FROM tenant_subscription_nodes "
+                        "WHERE tenant_id=? AND subscription_id=?",
+                        (self.tenant_id, int(subscription_id))).fetchone()[0]),
                     iso_utc(next_expiry),
                     state,
                     primary_user.last_online,
