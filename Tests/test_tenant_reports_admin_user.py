@@ -234,8 +234,13 @@ def test_sales_report_separates_purchase_and_renewal_by_paid_at_period(
     service.fulfill_paid_order(7001, order_id=int(reviewed["order_id"]))
     subscription = service.list_subscriptions(7101)[0]
 
-    # This test exercises reporting, not advanced-renewal eligibility.
-    service.set_renewal_policy_admin(7001, policy="default")
+    # This test exercises reporting; make the service eligible under the same
+    # renewal window used by every policy profile.
+    conn.execute(
+        "UPDATE tenant_subscriptions SET usage_bytes=traffic_bytes-? WHERE id=?",
+        (1024 ** 3, int(subscription["id"])),
+    )
+    conn.commit()
     renewal = service.create_renewal_order(
         7101,
         subscription_id=int(subscription["id"]),
