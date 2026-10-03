@@ -1,15 +1,17 @@
 # Hiddify-WhiteLabel
 
-**Current version: `v0.50.0`**
+**Current version: `v1.0.0` — Stable**
 
 White-Label SaaS for selling VPN subscriptions: each customer (tenant) gets
 two dedicated bots (`TenantAdminBot` + `TenantUserBot`). The platform owner
 operates the same `MasterBot` as a role-based PlatformBot: the owner gets
 the management panel and normal Telegram users get the customer portal.
 
-> Scope status: **Phases 0–13 implementation complete through broadcast/channel management** (design, independent infrastructure,
+> Scope status: **Phases 0–16 complete — v1.0.0 Stable** (design, independent infrastructure,
 > owner-only MasterBot, automated license jobs, atomic tenant provisioning,
-> shared sharded TenantRuntime, and production installation/operations).
+> shared sharded TenantRuntime, production installation/operations, full Tenant
+> sales lifecycle, support/broadcast, Force Join/event channels, Backup/Restore
+> v2, shared future agency infrastructure, and the final Stable release gate).
 
 ## Layout
 
@@ -29,14 +31,14 @@ Hiddify-WhiteLabel/
 ├── Ops/                  # Phase 6 - health, encrypted backup, locks, systemd
 ├── Shared/               # settings, redacted logging, crypto, time, access
 ├── Database/             # connection, repositories, migration runner
-├── Migrations/           # versioned SQL (currently 0001 through 0030)
+├── Migrations/           # versioned SQL (currently 0001 through 0031)
 ├── Tests/                # offline pytest suite, fake tokens only
 ├── scripts/              # migrate helper
 ├── install.sh            # English operations menu and systemd installer
 ├── docs/                 # ARCHITECTURE, THREAT_MODEL, ROADMAP, decisions/
 ├── .env.example          # empty template, no secrets
 ├── requirements.txt      # pinned deps
-└── VERSION               # 0.50.0
+└── VERSION               # 1.0.0
 ```
 
 Reference project `Hiddify-SellBot` was used **read-only** to understand
