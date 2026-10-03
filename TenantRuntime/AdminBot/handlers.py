@@ -2728,7 +2728,20 @@ async def _build_admin_debug_report(
     uptime = _debug_fmt_duration(time.time() - started)
     stats = _tenant_debug_stats(business)
     settings = business.runtime_userbot_settings()
-    growth = business.growth_settings(actor)
+    growth_row = business.conn.execute(
+        "SELECT trial_enabled, trial_traffic_gb, trial_duration_days "
+        "FROM tenant_sales_growth_settings WHERE tenant_id=?",
+        (int(business.tenant_id),),
+    ).fetchone()
+    growth = (
+        dict(growth_row)
+        if growth_row is not None
+        else {
+            "trial_enabled": 0,
+            "trial_traffic_gb": 1,
+            "trial_duration_days": 1,
+        }
+    )
 
     telegram_ok, telegram_msg = await _debug_tcp_probe("api.telegram.org", 443)
 
@@ -2737,13 +2750,20 @@ async def _build_admin_debug_report(
         endpoint = str(server.get("endpoint") or "").strip()
         if not endpoint:
             continue
-        parsed = urlsplit(
-            endpoint if "://" in endpoint else f"https://{endpoint}"
-        )
-        host = str(parsed.hostname or "").strip()
-        if not host:
+        try:
+            parsed = urlsplit(
+                endpoint if "://" in endpoint else f"https://{endpoint}"
+            )
+            host = str(parsed.hostname or "").strip()
+            if not host:
+                continue
+            port = parsed.port or (443 if parsed.scheme != "http" else 80)
+        except ValueError:
+            panel_checks.append(
+                f"  #{int(server['id'])} {server.get('label') or 'server'} "
+                "❌ (invalid endpoint)"
+            )
             continue
-        port = parsed.port or (443 if parsed.scheme != "http" else 80)
         ok, message = await _debug_tcp_probe(host, port)
         panel_checks.append(
             f"  #{int(server['id'])} {server.get('label') or 'server'} "
