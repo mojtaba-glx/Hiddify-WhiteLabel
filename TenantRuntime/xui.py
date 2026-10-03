@@ -419,18 +419,15 @@ def _credential(target: PanelTarget, secret: str) -> dict[str, str]:
         stored_flavor = str(parsed.get("flavor") or flavor).strip().lower()
         if stored_flavor != flavor:
             raise PanelError("X-UI credential flavor mismatch")
-        if flavor == "sanaei":
-            token = str(parsed.get("api_token") or "").strip()
-            if not token:
-                raise PanelError("Sanaei API token is unavailable")
-            return {"flavor": flavor, "api_token": token}
         username = str(parsed.get("username") or "").strip()
         password = str(parsed.get("password") or "").strip()
         header = str(parsed.get("secret_header") or "").strip()
-        if not username or not password:
-            raise PanelError("Alireza credentials are unavailable")
+        token = str(parsed.get("api_token") or "").strip()
+        if not (flavor == "sanaei" and token) and (not username or not password):
+            raise PanelError("X-UI credentials are unavailable")
         return {
             "flavor": flavor,
+            "api_token": token,
             "username": username,
             "password": password,
             "secret_header": header,
@@ -462,6 +459,11 @@ class _Session:
         self.credential = credential
         self.base = _clean_base(target.endpoint)
         self.flavor = credential["flavor"]
+        self.token_auth = self.flavor == "sanaei" and bool(credential.get("api_token"))
+
+    @property
+    def modern_clients(self) -> bool:
+        return self.flavor == "sanaei" and self.token_auth
 
     @property
     def api_base(self) -> str:
@@ -479,7 +481,7 @@ class _Session:
         payload: dict[str, Any] | None = None,
     ) -> Any:
         headers = {"Accept": "application/json, text/plain, */*"}
-        if self.flavor == "sanaei":
+        if self.token_auth:
             headers["Authorization"] = f"Bearer {self.credential['api_token']}"
         elif self.credential.get("secret_header"):
             headers[_SECRET_HEADER] = self.credential["secret_header"]
@@ -535,10 +537,18 @@ class XuiPanelAdapter:
         credential: dict[str, str],
     ) -> _Session:
         session = _Session(client=client, target=target, credential=credential)
-        if credential["flavor"] == "sanaei":
-            # Verification also establishes TLS before the session is yielded.
-            session.request("GET", "inbounds/list")
-            return session
+        if session.token_auth:
+            try:
+                data = session.request("GET", "inbounds/list")
+                if not isinstance(data, list):
+                    raise PanelError("X-UI returned an invalid inbound list")
+                return session
+            except _StatusError as exc:
+                if exc.status_code not in {401, 403} or not (
+                    credential.get("username") and credential.get("password")
+                ):
+                    raise
+                session.token_auth = False
         try:
             response = client.post(
                 f"{_clean_base(target.endpoint)}/login",
@@ -550,14 +560,14 @@ class XuiPanelAdapter:
         except httpx.TransportError as exc:
             raise PanelError("X-UI connection failed") from exc
         if response.status_code >= 400:
-            raise PanelError("Alireza authentication failed")
+            raise PanelError("X-UI authentication failed")
         if response.content:
             try:
                 data = response.json()
             except ValueError:
                 data = {}
             if isinstance(data, dict) and data.get("success") is False:
-                raise PanelError("Alireza authentication failed")
+                raise PanelError("X-UI authentication failed")
         return session
 
     @contextmanager
@@ -694,7 +704,7 @@ class XuiPanelAdapter:
         chosen = dict(client) if isinstance(client, dict) else None
         if chosen is None and pairs:
             chosen = dict(pairs[0][1])
-        if chosen is None and session.flavor == "sanaei":
+        if chosen is None and session.modern_clients:
             clients = self._list_sanaei_clients(session)
             chosen = self._find_sanaei_client(clients, external_ref)
         if chosen is None:
@@ -768,7 +778,7 @@ class XuiPanelAdapter:
         self, session: _Session, external_ref: str
     ) -> PanelUserResult | None:
         try:
-            if session.flavor == "sanaei":
+            if session.modern_clients:
                 clients = self._list_sanaei_clients(session)
                 found = self._find_sanaei_client(clients, external_ref)
                 if found is not None:
@@ -783,6 +793,21 @@ class XuiPanelAdapter:
         except PanelError:
             raise
         return None
+
+    def inspect_connection(self, *, target: PanelTarget, secret: str) -> dict:
+        with self._session(target, secret) as session:
+            inbounds = self._list_inbounds(session)
+            selected = _select_inbounds(target, inbounds) if inbounds else []
+            if not inbounds and target.xui_inbound_ids not in {"", "0"}:
+                raise PanelError("configured X-UI inbound is unavailable")
+            self.subscription_link(target=target, external_ref="connection-test")
+            return {"connected": True, "inbounds": [
+                {"id": str(x.get("id") or ""), "protocol": str(x.get("protocol") or ""),
+                 "remark": str(x.get("remark") or ""),
+                 "enabled": bool(x.get("enable", True))} for x in inbounds],
+                "selected_inbound_ids": [str(x["id"]) for x in selected],
+                "users_count": len({str(c.get("email") or c.get("id") or "")
+                    for x in inbounds for c in _clients(x)})}
 
     def provision(
         self,
@@ -802,7 +827,7 @@ class XuiPanelAdapter:
             selected = _select_inbounds(target, inbounds)
             base_email = _safe_email(request)
 
-            if session.flavor == "sanaei":
+            if session.modern_clients:
                 existing = self._existing(session, external_ref)
                 if existing is not None:
                     return ProvisionResult(
@@ -898,7 +923,7 @@ class XuiPanelAdapter:
                         email=email,
                         traffic_bytes=request.traffic_bytes,
                         expires_at=request.expires_at,
-                        sanaei=False,
+                        sanaei=session.flavor == "sanaei",
                     )
                     client["comment"] = (
                         f"WhiteLabel tenant={int(request.tenant_id)} "
@@ -969,7 +994,7 @@ class XuiPanelAdapter:
         with self._session(target, secret) as session:
             inbounds = self._list_inbounds(session)
 
-            if session.flavor == "sanaei":
+            if session.modern_clients:
                 clients = self._list_sanaei_clients(session)
                 client = self._find_sanaei_client(clients, external_ref)
                 if client is None:
@@ -1038,7 +1063,7 @@ class XuiPanelAdapter:
                     try:
                         session.request(
                             "POST",
-                            f"inbounds/{_safe_int(inbound.get('id'))}/resetClientTraffic/{quote(route_id, safe='')}",
+                            f"inbounds/{_safe_int(inbound.get('id'))}/resetClientTraffic/{quote(str(client.get('email') or '') if session.flavor == 'sanaei' else route_id, safe='')}",
                         )
                     except PanelError:
                         pass
@@ -1059,7 +1084,7 @@ class XuiPanelAdapter:
     ) -> PanelUserResult:
         with self._session(target, secret) as session:
             inbounds = self._list_inbounds(session)
-            if session.flavor == "sanaei":
+            if session.modern_clients:
                 clients = self._list_sanaei_clients(session)
                 client = self._find_sanaei_client(clients, external_ref)
                 if client is None:
@@ -1101,7 +1126,7 @@ class XuiPanelAdapter:
         self, *, target: PanelTarget, secret: str, external_ref: str
     ) -> None:
         with self._session(target, secret) as session:
-            if session.flavor == "sanaei":
+            if session.modern_clients:
                 clients = self._list_sanaei_clients(session)
                 client = self._find_sanaei_client(clients, external_ref)
                 if client is None:
