@@ -2871,43 +2871,40 @@ async def handle_callback(
             g = business.growth_settings(actor)
             await _edit_or_send(
                 update,
-                "🎊 مشخصات اشتراک تستی\n"
-                f"وضعیت: {_bool_icon(g.get('trial_enabled'))}\n"
-                f"حجم: {g.get('trial_traffic_gb')}GB\n"
-                f"مدت: {g.get('trial_duration_days')} روز",
-                InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔥 وضعیت اشتراک تستی", callback_data="userbot:settings:trial_spec:enabled")],
-                    [InlineKeyboardButton("📊 حجم اشتراک تستی", callback_data="userbot:settings:trial_spec:usage")],
-                    [InlineKeyboardButton("📆 مدت اشتراک تستی", callback_data="userbot:settings:trial_spec:days")],
-                    [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:subscription")],
-                ]),
+                _trial_settings_text(g),
+                _trial_settings_keyboard(g),
             )
         else:
             s = business.userbot_settings_admin(actor)
             await _edit_or_send(
                 update,
-                "🔔 یادآور وضعیت اشتراک\n"
-                f"وضعیت: {_bool_icon(s.get('reminder_enabled'))}\n"
-                f"یادآوری زمانی: {int(s.get('reminder_days') or 3)} روز مانده\n"
-                f"یادآوری حجمی: {int(s.get('reminder_remaining_gb') or 3)} گیگ مانده",
-                InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔔 روشن/خاموش", callback_data="userbot:settings:sub_status_reminder:enabled")],
-                    [InlineKeyboardButton("📊 یادآور وضعیت مصرف", callback_data="userbot:settings:sub_status_reminder:usage")],
-                    [InlineKeyboardButton("📆 یادآور وضعیت زمان", callback_data="userbot:settings:sub_status_reminder:days")],
-                    [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:subscription")],
-                ]),
+                _reminder_settings_text(s),
+                _reminder_settings_keyboard(s),
             )
         return True
     if data.startswith("userbot:settings:trial:"):
         action = data.rsplit(":", 1)[1]
-        mapped = {"toggle": "enabled", "traffic": "usage", "days": "days"}.get(action)
+        mapped = {
+            "toggle": "enabled",
+            "announce": "announce",
+            "traffic": "usage",
+            "days": "days",
+        }.get(action)
         if mapped is None:
             raise ValueError("invalid trial setting")
-        if mapped == "enabled":
+        if mapped in {"enabled", "announce"}:
             g = business.growth_settings(actor)
-            business.update_growth_settings(
-                actor, trial_enabled=not bool(g.get("trial_enabled"))
-            )
+            if mapped == "enabled":
+                business.update_growth_settings(
+                    actor, trial_enabled=not bool(g.get("trial_enabled"))
+                )
+            else:
+                business.update_growth_settings(
+                    actor,
+                    trial_announce_enabled=not bool(
+                        g.get("trial_announce_enabled", True)
+                    ),
+                )
             await _settings_section(update, business, actor, "subscription")
             return True
         context.user_data[FLOW_KEY] = {
