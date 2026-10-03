@@ -1103,44 +1103,28 @@ async def _handle_main_reply_action(
         growth = business._ensure_growth_settings()
         if not bool(growth.get("referral_enabled")):
             raise TenantBusinessError("referral is disabled")
-        summary = business.referral_summary(actor)
-        referral_settings = dict(summary.get("settings") or {})
-        username = str(getattr(context.bot, "username", None) or "").strip()
-        code = str(summary["referral_code"])
-        invite = (
-            f"https://t.me/{username}?start=ref_{code}"
-            if username
-            else f"/start ref_{code}"
+        referral = _referral_content(
+            business,
+            actor,
+            context,
+            settings,
         )
-        rewards = list(summary.get("rewards") or [])
-        reward_lines = [
-            f"• {x.get('reward_type')}: {int(x.get('amount') or 0):,} "
-            f"{x.get('currency') or ''} ({int(x.get('count') or 0)} مورد)"
-            for x in rewards
-        ] or ["• هنوز پاداشی ثبت نشده است."]
-        body = "\n".join([
-            "🤝 دعوت دوستان",
-            f"وضعیت: {'فعال' if int(referral_settings.get('referral_enabled') or 0) else 'خاموش'}",
-            f"دعوت موفق ثبت‌شده: {int(summary.get('referred_count') or 0)}",
-            f"پاداش تست: {int(referral_settings.get('referral_trial_reward') or 0):,} "
-            f"{referral_settings.get('referral_currency') or ''}",
-            f"پاداش اولین خرید: {int(referral_settings.get('referral_purchase_reward') or 0):,} "
-            f"{referral_settings.get('referral_currency') or ''}",
-            "",
-            "🔗 لینک دعوت شما:",
-            invite,
-            "",
-            "🎁 پاداش‌ها",
-            *reward_lines,
-        ])
         await update.effective_message.reply_text(
-            body,
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    "💰 کیف پول",
-                    callback_data="shop:wallet",
-                )
-            ]]),
+            str(referral["body"]),
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🖼 بنر دعوت",
+                        callback_data="shop:invitebanner",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "💰 کیف پول",
+                        callback_data="shop:wallet",
+                    )
+                ],
+            ]),
             disable_web_page_preview=True,
         )
         return True
@@ -1785,41 +1769,64 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             growth = business._ensure_growth_settings()
             if not bool(growth.get("referral_enabled")):
                 raise TenantBusinessError("referral is disabled")
-            summary = business.referral_summary(actor)
-            settings = dict(summary.get("settings") or {})
-            username = str(getattr(context.bot, "username", None) or "").strip()
-            code = str(summary["referral_code"])
-            invite = (
-                f"https://t.me/{username}?start=ref_{code}"
-                if username
-                else f"/start ref_{code}"
+            referral = _referral_content(
+                business,
+                actor,
+                context,
+                settings,
             )
-            rewards = list(summary.get("rewards") or [])
-            reward_lines = [
-                f"• {x.get('reward_type')}: {int(x.get('amount') or 0):,} "
-                f"{x.get('currency') or ''} ({int(x.get('count') or 0)} مورد)"
-                for x in rewards
-            ] or ["• هنوز پاداشی ثبت نشده است."]
-            text = "\n".join([
-                "🤝 دعوت دوستان",
-                f"وضعیت: {'فعال' if int(settings.get('referral_enabled') or 0) else 'خاموش'}",
-                f"دعوت موفق ثبت‌شده: {int(summary.get('referred_count') or 0)}",
-                f"پاداش تست: {int(settings.get('referral_trial_reward') or 0):,} {settings.get('referral_currency') or ''}",
-                f"پاداش اولین خرید: {int(settings.get('referral_purchase_reward') or 0):,} {settings.get('referral_currency') or ''}",
-                "",
-                "🔗 لینک دعوت شما:",
-                invite,
-                "",
-                "🎁 پاداش‌ها",
-                *reward_lines,
-            ])
             await update.callback_query.edit_message_text(
-                text,
+                str(referral["body"]),
                 reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖼 بنر دعوت", callback_data="shop:invitebanner")],
                     [InlineKeyboardButton("💰 کیف پول", callback_data="shop:wallet")],
                     [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
                 ]),
-            ); return
+                disable_web_page_preview=True,
+            )
+            return
+
+        if data == "shop:invitebanner":
+            growth = business._ensure_growth_settings()
+            if not bool(growth.get("referral_enabled")):
+                raise TenantBusinessError("referral is disabled")
+            referral = _referral_content(
+                business,
+                actor,
+                context,
+                settings,
+            )
+            await update.callback_query.answer()
+            chat_id = int(update.effective_chat.id) if update.effective_chat else actor
+            photo_id = str(referral.get("photo_id") or "").strip()
+            banner_text = str(referral.get("banner_text") or "").strip()
+            if photo_id:
+                try:
+                    if len(banner_text) <= 1000:
+                        await context.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=photo_id,
+                            caption=banner_text,
+                        )
+                    else:
+                        await context.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=photo_id,
+                        )
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=banner_text,
+                            disable_web_page_preview=True,
+                        )
+                    return
+                except Exception:
+                    pass
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=banner_text,
+                disable_web_page_preview=True,
+            )
+            return
         if data == "shop:trial":
             growth = business._ensure_growth_settings()
             if not bool(growth.get("trial_enabled")):
@@ -2762,14 +2769,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ); return
         if data == "shop:tickets":
             items = business.list_tickets(actor)
-            text = "🎫 تیکت‌های من\n" + (
-                "\n".join(
-                    f"• #{x['id']} · {x['subject']} · {x['status']}"
-                    f"{' · پاسخ داده شد' if x.get('admin_reply') else ''}"
-                    for x in items
-                )
-                or "تیکتی ندارید."
-            )
+            text = _ticket_panel_body(settings, items)
             rows = [
                 [InlineKeyboardButton(
                     f"🎫 #{x['id']} · {x['subject']}"[:60],
@@ -2829,8 +2829,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
             ]
             await update.callback_query.edit_message_text(
-                "💡 راهنما\n" + (guide or "انتخاب سیستم عامل ⬇️"),
+                guide or "انتخاب سیستم عامل ⬇️",
                 reply_markup=InlineKeyboardMarkup(rows),
+                disable_web_page_preview=True,
             )
             return
         if data.startswith("shop:guide:"):
@@ -2846,7 +2847,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 raise TenantBusinessError("invalid guide platform")
             body = str(settings.get(f"guide_{platform}_text") or "").strip()
             await update.callback_query.edit_message_text(
-                labels[platform] + "\n\n" + (body or "هنوز متنی تنظیم نشده است."),
+                body or labels[platform],
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔙بازگشت", callback_data="shop:guide")],
                     [InlineKeyboardButton("🏠 منو", callback_data="runtime:home")],
@@ -2855,10 +2856,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
         if data == "shop:faq":
-            faq = str(settings.get("faq_text") or "").strip()
             await update.callback_query.edit_message_text(
-                "📕 سوالات متداول\n" + (faq or "متنی تنظیم نشده است."),
+                _setting_text(
+                    settings,
+                    "faq_text",
+                    "❓ سوالات متداول\n\nهنوز متنی تنظیم نشده است.",
+                ),
                 reply_markup=_home_inline_markup(settings),
+                disable_web_page_preview=True,
             )
             return
     except (ValueError, TenantBusinessError, PermissionError, sqlite3.IntegrityError):
