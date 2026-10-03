@@ -98,7 +98,7 @@ class AutoBackupDelivery:
     slot_key: str
     bot_token: str
     event_target: str
-    artifact: TenantBackupArtifact
+    artifact: TenantBackupArtifact | TenantFullBackupArtifact
 
 
 class AutoBackupSender:
