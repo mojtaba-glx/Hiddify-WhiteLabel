@@ -3158,7 +3158,7 @@ class TenantBusinessService:
         if subscription["server_id"] is None or not subscription["external_ref"]:
             raise TenantBusinessError("subscription is not provisioned")
 
-        # Match the proven SellBot behavior: make the advanced-policy decision
+        # Match the proven SellBot behavior: make the renewal-window decision
         # from fresh panel usage when possible. Provider outages fall back to
         # the last safely persisted counters instead of opening the policy.
         if str(subscription.get("status") or "") in ("active", "disabled"):
@@ -3212,12 +3212,10 @@ class TenantBusinessService:
             and remaining_seconds < (max_days * 86400)
         )
         usage_ok = traffic_bytes > 0 and remaining_gb < max_remaining_gb
-        allowed = (
-            policy in ("default", "fair")
-            or days_ok
-            or usage_ok
-            or str(subscription.get("status") or "") == "expired"
-        )
+        # SellBot applies the same renewal window in every policy profile.
+        # The policy only controls rollover semantics (add/reset), not whether
+        # a subscription may bypass the remaining-time/volume thresholds.
+        allowed = days_ok or usage_ok
         return {
             "allowed": bool(allowed),
             "reason": "" if allowed else "advanced_limits",
@@ -3240,8 +3238,8 @@ class TenantBusinessService:
         )
         return (
             "🛑 در حال حاضر شما امکان تمدید اشتراک خود را ندارید.\n"
-            f"1- کمتر از {max_days} روز تا اتمام اشتراک باقی مانده باشد.\n"
-            f"2- حجم باقی‌مانده اشتراک کمتر از {max_remaining_gb} گیگابایت باشد."
+            f"1- کمتر از {max_days} روز تا اتمام اشتراک شما باقی مانده باشد.\n"
+            f"2- حجم باقی مانده اشتراک شما کمتر از {max_remaining_gb} گیگابایت باشد."
         )
 
     def create_renewal_order(
@@ -4223,31 +4221,41 @@ class TenantBusinessService:
         current_traffic_bytes = max(
             0, int(subscription.get("traffic_bytes") or 0)
         )
+        current_usage_bytes = max(
+            0, int(subscription.get("usage_bytes") or 0)
+        )
+        remaining_traffic_bytes = max(
+            0, current_traffic_bytes - current_usage_bytes
+        )
         traffic_bytes = (
-            current_traffic_bytes + plan_traffic_bytes
+            remaining_traffic_bytes + plan_traffic_bytes
             if clean_volume_mode == "add"
             else plan_traffic_bytes
         )
-        reset_usage = clean_volume_mode == "reset"
+
+        # SellBot starts every renewed period with zero usage. In add mode,
+        # only the unused remainder is carried into the new package.
+        reset_usage = True
 
         now_dt = utcnow()
+        remaining_days = 0
         if clean_time_mode == "add":
             try:
                 current_expiry = parse_utc(str(subscription["expires_at"]))
+                remaining_days = max(
+                    0,
+                    (current_expiry.date() - now_dt.date()).days,
+                )
             except Exception:
-                current_expiry = now_dt
-            expiry_base = max(now_dt, current_expiry)
-        else:
-            expiry_base = now_dt
-        target_expiry = expiry_base + timedelta(days=int(duration_days))
-        expires_at = iso_utc(target_expiry)
+                remaining_days = 0
         panel_duration_days = max(
             1,
-            int(
-                ((target_expiry - now_dt).total_seconds() + 86399)
-                // 86400
+            int(duration_days) + (
+                remaining_days if clean_time_mode == "add" else 0
             ),
         )
+        target_expiry = now_dt + timedelta(days=panel_duration_days)
+        expires_at = iso_utc(target_expiry)
         base_key = str(idempotency_key or "")
         _, target, secret = self._panel_material(int(subscription["server_id"]))
         try:
@@ -4260,7 +4268,7 @@ class TenantBusinessService:
                     duration_days=panel_duration_days,
                     expires_at=expires_at,
                     reset_usage=reset_usage,
-                    reset_time=clean_time_mode == "reset",
+                    reset_time=True,
                     idempotency_key=base_key,
                 ),
             )
@@ -4337,7 +4345,7 @@ class TenantBusinessService:
                         duration_days=panel_duration_days,
                         expires_at=expires_at,
                         reset_usage=reset_usage,
-                        reset_time=clean_time_mode == "reset",
+                        reset_time=True,
                         idempotency_key=(
                             f"{base_key}:server:{int(row['server_id'])}"
                             if base_key
