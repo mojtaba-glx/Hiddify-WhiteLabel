@@ -1335,25 +1335,3 @@ async def handle_document(
         actor=actor,
         admin_main_keyboard=admin_main_keyboard,
     )
-async def handle_document(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    *,
-    business: Any,
-    actor: int,
-    admin_main_keyboard: Any,
-) -> bool:
-    message = update.effective_message
-    document = getattr(message, "document", None) if message else None
-    mime = str(getattr(document, "mime_type", "") or "").lower()
-    if not document or not (
-        mime.startswith("image/") or mime.startswith("video/")
-    ):
-        return False
-    return await handle_media(
-        update,
-        context,
-        business=business,
-        actor=actor,
-        admin_main_keyboard=admin_main_keyboard,
-    )
