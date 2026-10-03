@@ -6,7 +6,7 @@ from datetime import timedelta
 
 import pytest
 
-from Shared.timeutils import iso_utc, utcnow
+from Shared.timeutils import iso_utc, parse_utc, utcnow
 from TenantRuntime.business import TenantBusinessError, TenantBusinessService
 from TenantRuntime.panels import (
     PanelError,
@@ -266,6 +266,39 @@ def test_fixed_coupon_checks_currency_and_limits(
         7101, order_id=int(order["id"]), code="FIX25"
     )
     assert int(applied["amount"]) == 75000
+
+
+def test_trial_volume_and_duration_settings_drive_real_subscription(
+    conn, factories, cipher
+) -> None:
+    _tenant, service, _panel, _plan, _method, user = _setup(
+        conn, factories, cipher
+    )
+    service.update_growth_settings(
+        7001,
+        trial_enabled=True,
+        trial_traffic_gb=3,
+        trial_duration_days=5,
+    )
+    before = utcnow()
+    result = service.claim_free_trial(7101)
+    claim = conn.execute(
+        "SELECT * FROM tenant_trial_claims "
+        "WHERE tenant_id=? AND customer_id=?",
+        (service.tenant_id, int(user["id"])),
+    ).fetchone()
+    assert claim is not None
+    subscription = conn.execute(
+        "SELECT * FROM tenant_subscriptions "
+        "WHERE tenant_id=? AND id=?",
+        (service.tenant_id, int(claim["subscription_id"])),
+    ).fetchone()
+    assert subscription is not None
+    assert int(subscription["traffic_bytes"]) == 3 * 1024**3
+    expires_at = parse_utc(str(subscription["expires_at"]))
+    delta_days = (expires_at - before).total_seconds() / 86400.0
+    assert 4.9 <= delta_days <= 5.1
+    assert result["order_kind"] == "trial"
 
 
 def test_trial_announcement_setting_roundtrips(
