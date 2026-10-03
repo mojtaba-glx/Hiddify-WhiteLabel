@@ -212,6 +212,72 @@ def _bool_icon(value: Any) -> str:
     return "✅" if bool(value) else "❌"
 
 
+def _trial_settings_text(growth: dict[str, Any]) -> str:
+    return (
+        "🎊 مشخصات اشتراک تستی\n"
+        f"وضعیت: {_bool_icon(growth.get('trial_enabled'))}\n"
+        f"اعلان موفقیت تست: {_bool_icon(growth.get('trial_announce_enabled', True))}\n"
+        f"حجم: {growth.get('trial_traffic_gb')}GB\n"
+        f"مدت: {growth.get('trial_duration_days')} روز"
+    )
+
+
+def _trial_settings_keyboard(growth: dict[str, Any]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"🔥 وضعیت اشتراک تستی | {_bool_icon(growth.get('trial_enabled'))}",
+            callback_data="userbot:settings:trial_spec:enabled",
+        )],
+        [InlineKeyboardButton(
+            f"📣 اعلان تست | {_bool_icon(growth.get('trial_announce_enabled', True))}",
+            callback_data="userbot:settings:trial_spec:announce",
+        )],
+        [InlineKeyboardButton(
+            "📊 حجم اشتراک تستی",
+            callback_data="userbot:settings:trial_spec:usage",
+        )],
+        [InlineKeyboardButton(
+            "📆 مدت اشتراک تستی",
+            callback_data="userbot:settings:trial_spec:days",
+        )],
+        [InlineKeyboardButton(
+            "🔙بازگشت",
+            callback_data="userbot:settings:subscription",
+        )],
+    ])
+
+
+def _reminder_settings_text(settings: dict[str, Any]) -> str:
+    return (
+        "🔔 یادآور وضعیت اشتراک\n"
+        f"وضعیت: {_bool_icon(settings.get('reminder_enabled'))}\n"
+        f"یادآوری زمانی: {int(settings.get('reminder_days') or 3)} روز مانده\n"
+        f"یادآوری حجمی: {int(settings.get('reminder_remaining_gb') or 3)} گیگ مانده\n"
+        "ℹ️ این تنظیمات مستقیماً توسط Lifecycle اجرا می‌شوند."
+    )
+
+
+def _reminder_settings_keyboard(settings: dict[str, Any]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"🔔 یادآور وضعیت اشتراک | {_bool_icon(settings.get('reminder_enabled'))}",
+            callback_data="userbot:settings:sub_status_reminder:enabled",
+        )],
+        [InlineKeyboardButton(
+            "📊 یادآور وضعیت مصرف",
+            callback_data="userbot:settings:sub_status_reminder:usage",
+        )],
+        [InlineKeyboardButton(
+            "📆 یادآور وضعیت زمان",
+            callback_data="userbot:settings:sub_status_reminder:days",
+        )],
+        [InlineKeyboardButton(
+            "🔙بازگشت",
+            callback_data="userbot:settings:subscription",
+        )],
+    ])
+
+
 
 def _plan_category_detail_text(category: dict[str, Any]) -> str:
     return (
@@ -1784,8 +1850,27 @@ async def handle_callback(
             context.user_data[FLOW_KEY]={"kind":"wallet_set_currency","customer_id":customer_id}
             await query.message.reply_text(text, reply_markup=userbot_cancel_keyboard()); return True
         if action == "reset_trial":
+            await _edit_or_send(
+                update,
+                "⚠️ بازنشانی تست رایگان این کاربر\n"
+                "بعد از تأیید، کاربر دوباره واجد شرایط دریافت تست می‌شود "
+                "(اگر خرید واقعی قبلی نداشته باشد).",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "✅ تأیید بازنشانی",
+                        callback_data=f"userbot:user:{customer_id}:reset_trial_confirm",
+                    )],
+                    [InlineKeyboardButton(
+                        "❌ لغو",
+                        callback_data=f"userbot:user:{customer_id}",
+                    )],
+                ]),
+            )
+            return True
+        if action == "reset_trial_confirm":
             business.reset_customer_trial_admin(actor, customer_id=customer_id)
-            await _send_user_profile(update,business,actor,customer_id); return True
+            await _send_user_profile(update,business,actor,customer_id)
+            return True
         if action == "ban":
             profile=business.customer_profile_admin(actor,customer_id=customer_id)
             new_status="blocked" if profile["status"]=="active" else "active"
@@ -2530,19 +2615,8 @@ async def handle_callback(
         g = business.growth_settings(actor)
         await _edit_or_send(
             update,
-            "🎊 مشخصات اشتراک تستی\n"
-            f"وضعیت: {_bool_icon(g.get('trial_enabled'))}\n"
-            f"حجم: {g.get('trial_traffic_gb')}GB\n"
-            f"مدت: {g.get('trial_duration_days')} روز",
-            InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    f"🔥 وضعیت اشتراک تستی | {_bool_icon(g.get('trial_enabled'))}",
-                    callback_data="userbot:settings:trial_spec:enabled",
-                )],
-                [InlineKeyboardButton("📊 حجم اشتراک تستی", callback_data="userbot:settings:trial_spec:usage")],
-                [InlineKeyboardButton("📆 مدت اشتراک تستی", callback_data="userbot:settings:trial_spec:days")],
-                [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:subscription")],
-            ]),
+            _trial_settings_text(g),
+            _trial_settings_keyboard(g),
         )
         return True
     if data.startswith("userbot:settings:trial_spec:"):
@@ -2552,23 +2626,25 @@ async def handle_callback(
             business.update_growth_settings(
                 actor, trial_enabled=not bool(g.get("trial_enabled"))
             )
-            # Re-render through the canonical entry callback.
             g = business.growth_settings(actor)
             await _edit_or_send(
                 update,
-                "🎊 مشخصات اشتراک تستی\n"
-                f"وضعیت: {_bool_icon(g.get('trial_enabled'))}\n"
-                f"حجم: {g.get('trial_traffic_gb')}GB\n"
-                f"مدت: {g.get('trial_duration_days')} روز",
-                InlineKeyboardMarkup([
-                    [InlineKeyboardButton(
-                        f"🔥 وضعیت اشتراک تستی | {_bool_icon(g.get('trial_enabled'))}",
-                        callback_data="userbot:settings:trial_spec:enabled",
-                    )],
-                    [InlineKeyboardButton("📊 حجم اشتراک تستی", callback_data="userbot:settings:trial_spec:usage")],
-                    [InlineKeyboardButton("📆 مدت اشتراک تستی", callback_data="userbot:settings:trial_spec:days")],
-                    [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:subscription")],
-                ]),
+                _trial_settings_text(g),
+                _trial_settings_keyboard(g),
+            )
+            return True
+        if action == "announce":
+            business.update_growth_settings(
+                actor,
+                trial_announce_enabled=not bool(
+                    g.get("trial_announce_enabled", True)
+                ),
+            )
+            g = business.growth_settings(actor)
+            await _edit_or_send(
+                update,
+                _trial_settings_text(g),
+                _trial_settings_keyboard(g),
             )
             return True
         if action not in {"usage", "days"}:
@@ -2587,19 +2663,8 @@ async def handle_callback(
         s = business.userbot_settings_admin(actor)
         await _edit_or_send(
             update,
-            "🔔 یادآور وضعیت اشتراک\n"
-            f"وضعیت: {_bool_icon(s.get('reminder_enabled'))}\n"
-            f"یادآوری زمانی: {int(s.get('reminder_days') or 3)} روز مانده\n"
-            f"یادآوری حجمی: {int(s.get('reminder_remaining_gb') or 3)} گیگ مانده",
-            InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    f"🔔 یادآور وضعیت اشتراک | {_bool_icon(s.get('reminder_enabled'))}",
-                    callback_data="userbot:settings:sub_status_reminder:enabled",
-                )],
-                [InlineKeyboardButton("📊 یادآور وضعیت مصرف", callback_data="userbot:settings:sub_status_reminder:usage")],
-                [InlineKeyboardButton("📆 یادآور وضعیت زمان", callback_data="userbot:settings:sub_status_reminder:days")],
-                [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:subscription")],
-            ]),
+            _reminder_settings_text(s),
+            _reminder_settings_keyboard(s),
         )
         return True
     if data.startswith("userbot:settings:sub_status_reminder:"):
@@ -2609,19 +2674,8 @@ async def handle_callback(
             s = business.userbot_settings_admin(actor)
             await _edit_or_send(
                 update,
-                "🔔 یادآور وضعیت اشتراک\n"
-                f"وضعیت: {_bool_icon(s.get('reminder_enabled'))}\n"
-                f"یادآوری زمانی: {int(s.get('reminder_days') or 3)} روز مانده\n"
-                f"یادآوری حجمی: {int(s.get('reminder_remaining_gb') or 3)} گیگ مانده",
-                InlineKeyboardMarkup([
-                    [InlineKeyboardButton(
-                        f"🔔 یادآور وضعیت اشتراک | {_bool_icon(s.get('reminder_enabled'))}",
-                        callback_data="userbot:settings:sub_status_reminder:enabled",
-                    )],
-                    [InlineKeyboardButton("📊 یادآور وضعیت مصرف", callback_data="userbot:settings:sub_status_reminder:usage")],
-                    [InlineKeyboardButton("📆 یادآور وضعیت زمان", callback_data="userbot:settings:sub_status_reminder:days")],
-                    [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:subscription")],
-                ]),
+                _reminder_settings_text(s),
+                _reminder_settings_keyboard(s),
             )
             return True
         if action not in {"usage", "days"}:
@@ -2641,8 +2695,9 @@ async def handle_callback(
     if data == "userbot:settings:subscription:reset_free_trial":
         await _edit_or_send(
             update,
-            "⚠️ بازنشانی تست رایگان\n"
-            "این کار سابقه دریافت تست رایگان همه کاربران همین Tenant را پاک می‌کند. ادامه می‌دهید؟",
+            "⚠️ بازنشانی تست رایگان همه کاربران\n"
+            "این کار سابقه دریافت تست رایگان همه کاربران همین Tenant را پاک می‌کند.\n"
+            "برای یک کاربر، از پروفایل همان کاربر استفاده کنید. ادامه می‌دهید؟",
             InlineKeyboardMarkup([
                 [InlineKeyboardButton("✅ بله، بازنشانی شود", callback_data="userbot:settings:subscription:reset_free_trial:yes")],
                 [InlineKeyboardButton("❌ لغو", callback_data="userbot:settings:subscription")],
