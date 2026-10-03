@@ -247,6 +247,63 @@ def _sibling_admin_bot_token(business: Any) -> str:
     return plain
 
 
+async def _send_purchase_event_report(
+    business: Any,
+    *,
+    telegram_id: int,
+    display_name: str,
+    order: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    """Best-effort SellBot-style purchase/renew event delivery."""
+    settings = business.runtime_userbot_settings()
+    if not bool(settings.get("purchase_event_channel_enabled", False)):
+        return
+    target = str(settings.get("purchase_event_channel_id") or "").strip()
+    if not target:
+        return
+    token = ""
+    try:
+        token = _sibling_admin_bot_token(business)
+        action = (
+            "تمدید اشتراک"
+            if str(result.get("operation") or order.get("operation") or "") == "renewal"
+            else "خرید اشتراک"
+        )
+        plan_name = str(order.get("plan_name") or "-")
+        server_title = str(order.get("selected_server_label") or "-")
+        amount = int(order.get("amount") or 0)
+        currency = str(order.get("currency") or "")
+        service_code = str(
+            result.get("smart_code")
+            or result.get("id")
+            or order.get("id")
+            or "-"
+        )
+        text = (
+            "📣 گزارش رویداد اشتراک\n"
+            f"🔖 نوع عملیات: {action}\n"
+            f"👤 کاربر: {display_name}\n"
+            f"🆔 شناسه تلگرام: {int(telegram_id)}\n"
+            f"🏷 نام اشتراک: {plan_name}\n"
+            f"🛰 سرور: {server_title}\n"
+            f"📊حجم: {float(order.get('traffic_gb') or 0):.1f} گیگابایت\n"
+            f"⏳زمان: {int(order.get('duration_days') or 0)} روز\n"
+            f"💰مبلغ: {amount:,} {currency}\n"
+            f"🔑شناسه اشتراک:{service_code}"
+        )
+        chat_target: Any = (
+            int(target) if target.lstrip("-").isdigit() else target
+        )
+        async with Bot(token=token) as bot:
+            await bot.send_message(chat_id=chat_target, text=text)
+    except Exception:
+        # Event channels are observational only and must never break checkout.
+        return
+    finally:
+        token = ""
+
+
 async def _notify_admin_ticket(
     business: Any,
     *,
@@ -1666,40 +1723,107 @@ async def _handle_main_reply_action(
     return False
 
 
-async def _force_join_allowed(update: Update, context: ContextTypes.DEFAULT_TYPE, business) -> bool:
+def _force_join_config(settings: dict[str, Any]) -> tuple[Any | None, str, str]:
+    username = str(settings.get("force_join_channel_username") or "").strip().lstrip("@")
+    channel_id = str(settings.get("force_join_channel_id") or "").strip()
+    legacy = str(settings.get("force_join_channel") or "").strip()
+    if not username and legacy.startswith("@"):
+        username = legacy.lstrip("@")
+    if not channel_id and legacy.lstrip("-").isdigit():
+        channel_id = legacy
+
+    target: Any | None = None
+    if username:
+        target = f"@{username}"
+    elif channel_id.lstrip("-").isdigit():
+        target = int(channel_id)
+
+    join_url = str(settings.get("force_join_channel_link") or "").strip()
+    if not join_url and username:
+        join_url = f"https://t.me/{username}"
+    guide = (
+        str(settings.get("force_join_guide_text") or "").strip()
+        or "🔒 برای استفاده از ربات، ابتدا در کانال پشتیبانی عضو شوید.\n"
+        "پس از عضویت روی «✅ بررسی عضویت» بزنید."
+    )
+    return target, join_url, guide
+
+
+def _force_join_markup(join_url: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if str(join_url or "").strip():
+        rows.append([
+            InlineKeyboardButton("📢 عضویت در کانال", url=str(join_url).strip())
+        ])
+    rows.append([
+        InlineKeyboardButton("✅ بررسی عضویت", callback_data="forcejoin:check")
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _force_join_membership(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    settings: dict[str, Any],
+) -> bool | None:
+    """True=member, False=definitely not joined, None=misconfigured/API error."""
+    target, _join_url, _guide = _force_join_config(settings)
+    if target is None:
+        return None
+    try:
+        member = await context.bot.get_chat_member(
+            chat_id=target,
+            user_id=int(user_id),
+        )
+        status = str(getattr(member, "status", "") or "").lower()
+        return status in {"member", "administrator", "creator", "owner"}
+    except Exception:
+        # Fail-open: a bad channel id, missing bot permission, Telegram outage,
+        # or private-channel misconfiguration must not lock the whole UserBot.
+        return None
+
+
+async def _force_join_allowed(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    business,
+) -> bool:
     settings = _set_button_settings(business.runtime_userbot_settings())
     if not bool(settings.get("force_join_enabled", False)):
         return True
-    channel = str(settings.get("force_join_channel") or "").strip()
-    if not channel:
-        # Misconfiguration must not lock every customer out.
-        return True
     actor = int(update.effective_user.id) if update.effective_user else 0
-    try:
-        member = await context.bot.get_chat_member(chat_id=channel, user_id=actor)
-        status = str(getattr(member, "status", "") or "")
-        if status in ("creator", "administrator", "member", "restricted"):
-            return True
-    except Exception:
-        # Telegram can only check reliably when the bot can access the target.
-        # Fail open on API/config errors to avoid an accidental global lockout.
+    membership = await _force_join_membership(
+        context,
+        user_id=actor,
+        settings=settings,
+    )
+    if membership is not False:
         return True
 
-    text = "🔒 برای استفاده از ربات ابتدا در کانال اعلام‌شده عضو شوید."
-    rows = []
-    if channel.startswith("@"):
-        rows.append([InlineKeyboardButton("📢 عضویت در کانال", url=f"https://t.me/{channel[1:]}")])
-    rows.append([InlineKeyboardButton("✅ بررسی عضویت", callback_data="runtime:home")])
-    markup = InlineKeyboardMarkup(rows)
+    _target, join_url, guide = _force_join_config(settings)
+    markup = _force_join_markup(join_url)
     if update.callback_query:
-        await update.callback_query.answer("ابتدا عضویت را انجام دهید.", show_alert=True)
+        await update.callback_query.answer(
+            "ابتدا در کانال عضو شوید.",
+            show_alert=True,
+        )
         try:
-            await update.callback_query.edit_message_text(text, reply_markup=markup)
+            await update.callback_query.edit_message_text(
+                guide,
+                reply_markup=markup,
+            )
         except Exception:
             if update.effective_chat:
-                await update.effective_chat.send_message(text, reply_markup=markup)
+                await update.effective_chat.send_message(
+                    guide,
+                    reply_markup=markup,
+                )
     elif update.effective_message:
-        await update.effective_message.reply_text(text, reply_markup=markup)
+        await update.effective_message.reply_text(
+            guide,
+            reply_markup=markup,
+        )
     return False
 
 
@@ -1708,21 +1832,17 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if spec.role != "user":
         raise RuntimeError("UserBot handler registered for non-user role")
     user_id = int(update.effective_user.id) if update.effective_user else 0
-    if not await _force_join_allowed(update, context, business):
-        return
-    context.user_data.pop("biz_flow", None)
-    context.user_data.pop("subscription_rotation_confirmation", None)
-    state = state_store.load(user_id)
-    visits = int(state.get("visits") or 0) + 1
-    state_store.save(user_id, {**state, "visits": visits, "screen": "home"})
     user = update.effective_user
+
+    # Match SellBot: persist the customer/referral before force-join can stop
+    # /start, because the forcejoin:check callback cannot recover the original
+    # Telegram deep-link payload afterwards.
     business.register_customer(
         user_id,
         display_name=str(getattr(user, "full_name", None) or "کاربر"),
         username=getattr(user, "username", None),
     )
     args = list(getattr(context, "args", None) or [])
-    gift_notice = ""
     if args:
         payload = str(args[0] or "").strip()
         if payload.startswith("ref_"):
@@ -1730,7 +1850,19 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 business.register_referral(user_id, referral_code=payload[4:])
             except TenantBusinessError:
                 pass
-        elif payload.startswith("gift_"):
+
+    if not await _force_join_allowed(update, context, business):
+        return
+
+    context.user_data.pop("biz_flow", None)
+    context.user_data.pop("subscription_rotation_confirmation", None)
+    state = state_store.load(user_id)
+    visits = int(state.get("visits") or 0) + 1
+    state_store.save(user_id, {**state, "visits": visits, "screen": "home"})
+    gift_notice = ""
+    if args:
+        payload = str(args[0] or "").strip()
+        if payload.startswith("gift_"):
             try:
                 gift = business.redeem_gift_voucher(
                     user_id, code=payload[5:]
@@ -1901,6 +2033,41 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     data = str(update.callback_query.data or "")
     if not data.startswith(("shop:subrotate:", "shop:subrotateconfirm:")):
         context.user_data.pop("subscription_rotation_confirmation", None)
+
+    if data == "forcejoin:check":
+        spec, _, _, business = _services(context)
+        settings = _set_button_settings(business.runtime_userbot_settings())
+        await update.callback_query.answer()
+        if not bool(settings.get("force_join_enabled", False)):
+            if update.effective_chat:
+                await update.effective_chat.send_message(
+                    "✅ عضویت اجباری غیرفعال است.",
+                    reply_markup=_main_keyboard(spec, business),
+                )
+            return
+        actor = int(update.effective_user.id) if update.effective_user else 0
+        membership = await _force_join_membership(
+            context,
+            user_id=actor,
+            settings=settings,
+        )
+        if membership is not False:
+            if update.effective_chat:
+                await update.effective_chat.send_message(
+                    "✅ عضویت شما تایید شد."
+                    if membership is True
+                    else "✅ دسترسی ربات فعال است.",
+                    reply_markup=_main_keyboard(spec, business),
+                )
+            return
+        _target, join_url, guide = _force_join_config(settings)
+        if update.effective_chat:
+            await update.effective_chat.send_message(
+                guide,
+                reply_markup=_force_join_markup(join_url),
+            )
+        return
+
     if data == "runtime:home":
         await show_home(update, context)
         return
@@ -2472,6 +2639,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data.startswith("shop:walletpay:"):
             order_id = int(data.rsplit(":", 1)[1])
             result = business.pay_order_with_wallet(actor, order_id=order_id)
+            if not result.get("fulfillment_pending"):
+                try:
+                    event_order = business.order(actor, order_id)
+                    tg_user = update.effective_user
+                    await _send_purchase_event_report(
+                        business,
+                        telegram_id=actor,
+                        display_name=str(
+                            getattr(tg_user, "full_name", None)
+                            or getattr(tg_user, "username", None)
+                            or actor
+                        ).strip(),
+                        order=event_order,
+                        result=result,
+                    )
+                except Exception:
+                    pass
             if result.get("fulfillment_pending"):
                 text = (
                     f"✅ مبلغ سفارش #{order_id} از کیف پول پرداخت شد.\n"
