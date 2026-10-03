@@ -1545,20 +1545,13 @@ async def _handle_main_reply_action(
     if text == BTN_SUPPORT:
         items = business.list_tickets(actor)
         body = _ticket_panel_body(settings, items)
-        rows = [
-            [InlineKeyboardButton(
-                f"🎫 #{x['id']} · {x['subject']}"[:60],
-                callback_data=f"shop:ticket:{x['id']}",
-            )]
-            for x in items[:15]
-        ]
-        rows.append([InlineKeyboardButton(
-            "➕ تیکت جدید",
-            callback_data="shop:newticket",
-        )])
         await update.effective_message.reply_text(
             body,
-            reply_markup=InlineKeyboardMarkup(rows),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❗️سوالات متداول", callback_data="shop:faq")],
+                [InlineKeyboardButton("📬تیکت‌های من", callback_data="shop:tickets")],
+                [InlineKeyboardButton("📩ایجاد تیکت", callback_data="shop:newticket")],
+            ]),
         )
         return True
 
