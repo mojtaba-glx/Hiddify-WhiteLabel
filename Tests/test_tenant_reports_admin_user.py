@@ -622,7 +622,7 @@ def test_admin_search_finds_customer_name_through_linked_panel_user(
     activated = service.fulfill_paid_order(
         7001, order_id=int(reviewed["order_id"])
     )
-    server_id = int(activated["server_id"])
+    server_id = int(service.subscription_admin(7001, subscription_id=int(activated["id"]))["server_id"])
     external_ref = str(activated["external_ref"])
     cursor = conn.execute(
         "INSERT INTO tenant_panel_users "
@@ -678,7 +678,7 @@ def test_expired_lists_use_effective_time_and_volume_not_only_db_status(
     assert [int(x["id"]) for x in expired_subscriptions] == [subscription_id]
     assert expired_subscriptions[0]["status"] == "expired"
 
-    server_id = int(activated["server_id"])
+    server_id = int(service.subscription_admin(7001, subscription_id=int(activated["id"]))["server_id"])
     conn.execute(
         "INSERT INTO tenant_panel_users "
         "(tenant_id,server_id,external_ref,name,comment,usage_bytes,traffic_bytes,"
