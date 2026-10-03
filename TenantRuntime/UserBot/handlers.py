@@ -899,10 +899,7 @@ def _main_keyboard(spec: RuntimeBotSpec, business) -> ReplyKeyboardMarkup:
         ])
 
     commerce_row = []
-    if (
-        bool(settings.get("enable_renew", True))
-        and bool(settings.get("show_renew_in_main_menu", True))
-    ):
+    if bool(settings.get("show_renew_in_main_menu", True)):
         commerce_row.append(KeyboardButton(BTN_RENEW, settings=settings))
     if bool(settings.get("enable_buy", True)):
         commerce_row.append(KeyboardButton(BTN_BUY, settings=settings))
