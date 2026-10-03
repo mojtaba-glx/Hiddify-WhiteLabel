@@ -421,6 +421,125 @@ class HiddifyPanelAdapter:
         self._patch(target, secret, external_ref, payload)
         return self.get_user(target=target, secret=secret, external_ref=external_ref)
 
+    def server_stats(self, *, target: PanelTarget, secret: str) -> dict:
+        """SellBot-compatible Hiddify system and traffic statistics."""
+        if str(target.kind or "").strip().lower() != "hiddify":
+            raise PanelError("Hiddify adapter received the wrong panel kind")
+
+        def _number(value: Any, default: float = 0.0) -> float:
+            try:
+                return float(value if value is not None else default)
+            except (TypeError, ValueError):
+                return float(default)
+
+        def _integer(value: Any, default: int = 0) -> int:
+            try:
+                return int(float(value if value is not None else default))
+            except (TypeError, ValueError):
+                return int(default)
+
+        def _bytes_gb(value: Any) -> float:
+            return max(0.0, _number(value, 0.0)) / float(1024 ** 3)
+
+        try:
+            users = self.list_users(target=target, secret=secret)
+        except PanelError:
+            users = []
+
+        now = datetime.now(timezone.utc)
+        total_usage = 0.0
+        online_now = 0
+        active_today = 0
+        active_month = 0
+        for user in users:
+            if not isinstance(user, dict):
+                continue
+            total_usage += max(0, int(user.get("usage_bytes") or 0)) / float(1024 ** 3)
+            seen = _parse_utcish_datetime(user.get("last_online"))
+            if seen is None:
+                continue
+            age = max(0.0, (now - seen).total_seconds())
+            if age < 300:
+                online_now += 1
+            if age < 86400:
+                active_today += 1
+            if age < 30 * 86400:
+                active_month += 1
+
+        out: dict[str, Any] = {
+            "cpu_percent": 0.0,
+            "cpu_cores": 1,
+            "ram_used": 0.0,
+            "ram_total": 1.0,
+            "disk_used": 0.0,
+            "disk_total": 20.0,
+            "users_total": len(users),
+            "users_online": online_now,
+            "users_today": active_today,
+            "users_month": active_month,
+            "usage_today_gb": 0.0,
+            "usage_30days_gb": total_usage,
+            "traffic_dl": 0.0,
+            "traffic_ul": 0.0,
+            "now_net_recv_mb": 0.0,
+            "now_net_sent_mb": 0.0,
+        }
+
+        try:
+            data = self._request(
+                "GET",
+                f"{_admin_base(target)}/api/v2/admin/server_status/",
+                secret,
+            )
+        except PanelError:
+            return out
+        if not isinstance(data, dict):
+            return out
+
+        stats = data.get("stats") if isinstance(data.get("stats"), dict) else {}
+        history = (
+            data.get("usage_history")
+            if isinstance(data.get("usage_history"), dict)
+            else {}
+        )
+        system = stats.get("system") if isinstance(stats.get("system"), dict) else {}
+
+        out["cpu_percent"] = _number(system.get("cpu_percent"), out["cpu_percent"])
+        out["cpu_cores"] = _integer(system.get("num_cpus"), out["cpu_cores"])
+        out["ram_used"] = _number(system.get("ram_used"), out["ram_used"])
+        out["ram_total"] = max(0.0001, _number(system.get("ram_total"), out["ram_total"]))
+        out["disk_used"] = _number(system.get("disk_used"), out["disk_used"])
+        out["disk_total"] = max(0.0001, _number(system.get("disk_total"), out["disk_total"]))
+        out["now_net_recv_mb"] = _number(system.get("bytes_recv"), 0.0) / float(1024 ** 2)
+        out["now_net_sent_mb"] = _number(system.get("bytes_sent"), 0.0) / float(1024 ** 2)
+
+        total_block = history.get("total") if isinstance(history.get("total"), dict) else {}
+        today_block = history.get("today") if isinstance(history.get("today"), dict) else {}
+        month_block = (
+            history.get("last_30_days")
+            if isinstance(history.get("last_30_days"), dict)
+            else {}
+        )
+        m5_block = history.get("m5") if isinstance(history.get("m5"), dict) else {}
+
+        out["users_total"] = _integer(total_block.get("users"), out["users_total"])
+        out["users_online"] = _integer(m5_block.get("online"), out["users_online"])
+        out["users_today"] = _integer(today_block.get("online"), out["users_today"])
+        out["users_month"] = _integer(month_block.get("online"), out["users_month"])
+        out["usage_today_gb"] = _bytes_gb(today_block.get("usage"))
+        month_usage = _bytes_gb(month_block.get("usage"))
+        if month_usage > 0:
+            out["usage_30days_gb"] = month_usage
+
+        sent_gb = _number(system.get("net_sent_cumulative_GB"), 0.0)
+        recv_gb = _bytes_gb(system.get("bytes_recv_cumulative"))
+        out["traffic_ul"] = sent_gb
+        out["traffic_dl"] = recv_gb
+        total_gb = _number(system.get("net_total_cumulative_GB"), 0.0)
+        if recv_gb <= 0 and total_gb > 0:
+            out["traffic_dl"] = max(0.0, total_gb - sent_gb)
+        return out
+
     def inspect_connection(self, *, target: PanelTarget, secret: str) -> dict:
         if target.kind != "hiddify":
             raise PanelError("Hiddify adapter received the wrong panel kind")

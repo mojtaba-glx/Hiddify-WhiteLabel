@@ -640,6 +640,219 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+def _status_servers_view(business) -> tuple[str, InlineKeyboardMarkup] | None:
+    servers = business.list_servers()
+    rows: list[list[InlineKeyboardButton]] = []
+    for server in servers:
+        try:
+            server_id = int(server.get("id") or 0)
+        except (TypeError, ValueError):
+            server_id = 0
+        if server_id <= 0:
+            continue
+        title = str(
+            server.get("label") or f"سرور #{server_id}"
+        ).strip()
+        rows.append([
+            InlineKeyboardButton(
+                title,
+                callback_data=f"status_srv:{server_id}",
+            )
+        ])
+    if not rows:
+        return None
+    rows.append([
+        InlineKeyboardButton("بازگشت🔙", callback_data="status:back")
+    ])
+    return (
+        "📈 **وضعیت سرور**\n\nیکی از سرورهای زیر را انتخاب کنید:",
+        InlineKeyboardMarkup(rows),
+    )
+
+
+def _server_status_detail_text(stats: dict[str, Any]) -> str:
+    def _float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value if value is not None else default)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _int(value: Any, default: int = 0) -> int:
+        try:
+            return int(float(value if value is not None else default))
+        except (TypeError, ValueError):
+            return int(default)
+
+    panel_kind = str(stats.get("panel_kind") or "").strip().lower()
+    is_xui = panel_kind == "xui"
+    is_xnet = panel_kind == "xnet"
+
+    ram_used = _float(stats.get("ram_used"), 0.0)
+    ram_total = _float(stats.get("ram_total"), 1.0)
+    disk_used = _float(stats.get("disk_used"), 0.0)
+    disk_total = _float(stats.get("disk_total"), 20.0)
+    if is_xui:
+        gib = float(1024 ** 3)
+        ram_used /= gib
+        ram_total /= gib
+        disk_used /= gib
+        disk_total /= gib
+
+    ram_percent = (ram_used / ram_total * 100.0) if ram_total else 0.0
+    disk_percent = (disk_used / disk_total * 100.0) if disk_total else 0.0
+    title = str(stats.get("server_label") or "سرور نامشخص").strip()
+
+    return (
+        f"Server: {title}\n"
+        "--------------------------------\n"
+        "SYSTEM INFO\n"
+        f"CPU: {_float(stats.get('cpu_percent')):.2f}% - "
+        f"{_int(stats.get('cpu_cores'), 1)} CORE\n"
+        f"RAM: {ram_used:.2f} GB / {ram_total:.2f} GB "
+        f"({ram_percent:.2f}%)\n"
+        f"DISK: {disk_used:.2f} GB / {disk_total:.2f} GB  "
+        f"({disk_percent:.2f}%)\n\n"
+        "NETWORK INFO\n"
+        f"Total Users: {_int(stats.get('users_total'))} User\n"
+        f"Usage (Today): {_float(stats.get('usage_today_gb')):.2f} GB\n"
+        f"Online (Now): {_int(stats.get('users_online'))} User\n"
+        f"Now Network Received: "
+        f"{_float(stats.get('now_net_recv_mb')):.2f} "
+        f"{'MB/s' if is_xnet else 'MB'}\n"
+        f"Now Network Sent: "
+        f"{_float(stats.get('now_net_sent_mb')):.2f} "
+        f"{'MB/s' if is_xnet else 'MB'}\n"
+        f"Online (Today): {_int(stats.get('users_today'))} User\n"
+        f"Online(30 Days): {_int(stats.get('users_month'))} User\n"
+        f"Usage(30 Days): {_float(stats.get('usage_30days_gb')):.2f} GB\n"
+        f"Total Download (Server): {_float(stats.get('traffic_dl')):.2f} GB\n"
+        f"Total Upload (Server): {_float(stats.get('traffic_ul')):.2f} GB"
+    )
+
+
+async def show_server_status_list(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    edit: bool = False,
+) -> None:
+    spec, policy, state_store, business = _services(context)
+    set_button_settings(business.runtime_userbot_settings())
+    if spec.role != "admin":
+        raise RuntimeError("AdminBot handler registered for non-admin role")
+    actor = int(update.effective_user.id) if update.effective_user else 0
+    decision = policy.check(spec, telegram_user_id=actor)
+    if not decision.allowed:
+        await _deny_update(update, decision.reason)
+        raise ApplicationHandlerStop
+
+    state = state_store.load(actor)
+    state_store.save(actor, {**state, "screen": "server_status"})
+    view = _status_servers_view(business)
+    if view is None:
+        if update.callback_query and update.callback_query.message:
+            await update.callback_query.message.reply_text(
+                "❌ سروری یافت نشد.",
+                reply_markup=admin_main_keyboard(),
+            )
+        elif update.effective_message:
+            await update.effective_message.reply_text(
+                "❌ سروری یافت نشد.",
+                reply_markup=admin_main_keyboard(),
+            )
+        return
+
+    text, keyboard = view
+    if edit and update.callback_query:
+        await update.callback_query.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
+    elif update.effective_message:
+        await update.effective_message.reply_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
+
+
+async def show_server_status_detail(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    server_id: int,
+) -> None:
+    spec, policy, state_store, business = _services(context)
+    set_button_settings(business.runtime_userbot_settings())
+    if spec.role != "admin":
+        raise RuntimeError("AdminBot handler registered for non-admin role")
+    actor = int(update.effective_user.id) if update.effective_user else 0
+    decision = policy.check(spec, telegram_user_id=actor)
+    if not decision.allowed:
+        await _deny_update(update, decision.reason)
+        raise ApplicationHandlerStop
+
+    try:
+        business.server(int(server_id))
+    except TenantBusinessError:
+        if update.callback_query:
+            await update.callback_query.edit_message_text("❌ سرور پیدا نشد.")
+        elif update.effective_message:
+            await update.effective_message.reply_text("❌ سرور پیدا نشد.")
+        return
+
+    if update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(
+                "⏳ در حال دریافت اطلاعات از سرور..."
+            )
+        except Exception:
+            pass
+
+    try:
+        stats = business.server_status_admin(
+            actor,
+            server_id=int(server_id),
+        )
+    except (TenantBusinessError, PanelError, ValueError, sqlite3.Error):
+        server = business.server(int(server_id))
+        stats = {
+            "server_id": int(server_id),
+            "server_label": str(
+                server.get("label") or f"سرور #{int(server_id)}"
+            ).strip(),
+            "panel_kind": str(server.get("panel_kind") or "").strip().lower(),
+        }
+
+    state = state_store.load(actor)
+    state_store.save(
+        actor,
+        {
+            **state,
+            "screen": "server_status_detail",
+            "server_status_id": int(server_id),
+        },
+    )
+    text = _server_status_detail_text(stats)
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "بازگشت🔙",
+            callback_data="status:back_to_list",
+        )
+    ]])
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=keyboard,
+        )
+    elif update.effective_message:
+        await update.effective_message.reply_text(
+            text,
+            reply_markup=keyboard,
+        )
+
+
 async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     spec, policy, state_store, business = _services(context)
     set_button_settings(business.runtime_userbot_settings())
@@ -689,6 +902,37 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if data == "runtime:status":
         await show_status(update, context)
+        return
+    if data == "status:back":
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.message.delete()
+        except Exception:
+            pass
+        if update.effective_chat:
+            await update.effective_chat.send_message(
+                "به منوی اصلی برگشتید.",
+                reply_markup=admin_main_keyboard(),
+            )
+        return
+    if data == "status:back_to_list":
+        await update.callback_query.answer()
+        await show_server_status_list(update, context, edit=True)
+        return
+    if data.startswith("status_srv:"):
+        await update.callback_query.answer()
+        try:
+            server_id = int(data.split(":", 1)[1])
+        except (IndexError, TypeError, ValueError):
+            await update.callback_query.edit_message_text(
+                "❌ شناسه سرور نامعتبر است."
+            )
+            return
+        await show_server_status_detail(
+            update,
+            context,
+            server_id=server_id,
+        )
         return
     spec, _, _, business = _services(context)
     set_button_settings(business.runtime_userbot_settings())
@@ -2078,7 +2322,7 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 return
 
             if text == BTN_STATUS:
-                await show_status(update, context)
+                await show_server_status_list(update, context)
                 return
 
             if text == BTN_USERBOT:
