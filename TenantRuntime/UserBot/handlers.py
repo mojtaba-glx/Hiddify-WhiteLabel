@@ -1849,6 +1849,7 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await _edit_subscription(
                 update.callback_query,
                 _subscription_detail_text(first, settings),
+                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(
                     _subscription_status_rows(
                         business, user_id, first, settings
@@ -1858,6 +1859,7 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             for item in rest:
                 await update.callback_query.message.reply_text(
                     _subscription_detail_text(item, settings),
+                    parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(
                         _subscription_status_rows(
                             business, user_id, item, settings
@@ -1867,7 +1869,8 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         elif update.effective_message:
             for item in direct_items:
                 await update.effective_message.reply_text(
-                    _subscription_menu_text(item if multiple else None),
+                    _subscription_detail_text(item, settings),
+                    parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(
                         _subscription_status_rows(
                             business, user_id, item, settings
