@@ -899,7 +899,10 @@ def _main_keyboard(spec: RuntimeBotSpec, business) -> ReplyKeyboardMarkup:
         ])
 
     commerce_row = []
-    if bool(settings.get("show_renew_in_main_menu", True)):
+    if (
+        bool(settings.get("enable_renew", True))
+        and bool(settings.get("show_renew_in_main_menu", True))
+    ):
         commerce_row.append(KeyboardButton(BTN_RENEW, settings=settings))
     if bool(settings.get("enable_buy", True)):
         commerce_row.append(KeyboardButton(BTN_BUY, settings=settings))
@@ -2624,6 +2627,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if not bool(settings.get("enable_renew", True)):
                 raise TenantBusinessError("renewal is disabled")
             _, _, subscription_id, plan_id = data.split(":", 3)
+            eligibility = business.renewal_eligibility(
+                actor,
+                subscription_id=int(subscription_id),
+            )
+            if not bool(eligibility.get("allowed")):
+                await update.callback_query.edit_message_text(
+                    business.renewal_not_allowed_text(),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "↩️ اشتراک‌های من",
+                            callback_data="shop:subs",
+                        )
+                    ]]),
+                )
+                return
             order = business.create_renewal_order(
                 actor,
                 subscription_id=int(subscription_id),
