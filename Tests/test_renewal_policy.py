@@ -198,26 +198,39 @@ def test_advanced_policy_requires_near_expiry_or_low_remaining_volume(
 
 
 @pytest.mark.parametrize("policy", ["default", "fair"])
-def test_default_and_fair_allow_renewal_without_advanced_limits(
+def test_all_policy_profiles_keep_same_renewal_window(
     conn, factories, cipher, policy
 ) -> None:
     _tenant, service = _service(conn, factories, cipher)
     seeded = _active_subscription(conn, service)
+    subscription_id = int(seeded["subscription_id"])
     service.set_renewal_policy_admin(7001, policy=policy)
 
-    result = service.renewal_eligibility(
+    blocked = service.renewal_eligibility(
         7101,
-        subscription_id=int(seeded["subscription_id"]),
+        subscription_id=subscription_id,
     )
-    assert result["allowed"] is True
-    assert result["policy"] == policy
+    assert blocked["allowed"] is False
+    assert blocked["policy"] == policy
+
+    conn.execute(
+        "UPDATE tenant_subscriptions SET expires_at=? WHERE id=?",
+        (iso_utc(utcnow() + timedelta(days=1)), subscription_id),
+    )
+    conn.commit()
+    allowed = service.renewal_eligibility(
+        7101,
+        subscription_id=subscription_id,
+    )
+    assert allowed["allowed"] is True
+    assert allowed["policy"] == policy
 
 
 def test_renewal_order_snapshots_modes_against_later_admin_changes(
     conn, factories, cipher
 ) -> None:
     _tenant, service = _service(conn, factories, cipher)
-    seeded = _active_subscription(conn, service)
+    seeded = _active_subscription(conn, service, expires_days=1)
     renew_plan = service.add_plan(
         7001,
         name="Renew 20G",
@@ -256,7 +269,7 @@ def test_fulfillment_uses_snapshotted_add_add_modes(
 ) -> None:
     panel = RenewalPanel()
     _tenant, service = _service(conn, factories, cipher, panel=panel)
-    seeded = _active_subscription(conn, service)
+    seeded = _active_subscription(conn, service, expires_days=1)
     old_expiry = parse_utc(str(seeded["expires_at"]))
     renew_plan = service.add_plan(
         7001,
@@ -288,14 +301,15 @@ def test_fulfillment_uses_snapshotted_add_add_modes(
     assert len(panel.renew_requests) == 1
 
     request = panel.renew_requests[0]
-    assert request.traffic_bytes == 70 * GIB
-    assert request.reset_usage is False
-    assert request.reset_time is False
+    assert request.traffic_bytes == 60 * GIB
+    assert request.reset_usage is True
+    assert request.reset_time is True
     target_expiry = parse_utc(request.expires_at)
     assert abs((target_expiry - (old_expiry + timedelta(days=30))).total_seconds()) < 2
 
     subscription = service.list_subscriptions(7101)[0]
-    assert int(subscription["traffic_bytes"]) == 70 * GIB
+    assert int(subscription["traffic_bytes"]) == 60 * GIB
+    assert int(subscription["usage_bytes"]) == 0
     assert service.order(7101, int(order["id"]))["status"] == "fulfilled"
 
 
@@ -329,6 +343,27 @@ def test_unlimited_flags_change_subscription_presentation_only(
     )
     assert usage_text == "12.00/نامحدود"
     assert expiry_text == "نامحدود"
+
+
+def test_main_menu_renew_visibility_is_independent_from_enable_toggle() -> None:
+    source = open(
+        "TenantRuntime/UserBot/handlers.py",
+        encoding="utf-8",
+    ).read()
+    start = source.index("def _main_keyboard")
+    end = source.index("def _home_inline_markup", start)
+    block = source[start:end]
+    assert 'if bool(settings.get("show_renew_in_main_menu", True)):' in block
+    assert 'settings.get("enable_renew"' not in block
+
+
+def test_disabled_renewal_keeps_button_but_blocks_action_with_reference_text() -> None:
+    source = open(
+        "TenantRuntime/UserBot/handlers.py",
+        encoding="utf-8",
+    ).read()
+    assert "🚫 تمدید اشتراک در حال حاضر غیرفعال است." in source
+    assert 'if data.startswith("shop:renew:"):' in source
 
 
 def test_advanced_policy_blocks_order_creation_not_just_ui(
