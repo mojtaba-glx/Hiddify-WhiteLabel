@@ -1299,6 +1299,27 @@ async def handle_text(update, context, *, business, actor):
     next_prompt = None
     result = "✅ ذخیره شد."
     section = "view"
+
+    async def finish_create():
+        report = await service.create_users(
+            actor,
+            sid,
+            name=flow["name"],
+            gb=flow["gb"],
+            days=flow["days"],
+            count=flow["count"],
+            operation_key=flow["operation_key"],
+        )
+        text_result = (
+            f"👥 ساخته‌شده: {len(report['users'])} · خطا: {report['errors']}"
+        )
+        if int(report.get("node_errors") or 0):
+            text_result += (
+                f"\n⚠️ خطای ساخت روی نودها: {int(report['node_errors'])}؛ "
+                "از «همگام‌سازی نودها» برای ترمیم استفاده کنید."
+            )
+        return text_result
+
     try:
         if kind == "search":
             await service.refresh_users(actor, sid)
@@ -1356,9 +1377,9 @@ async def handle_text(update, context, *, business, actor):
             if not 1 <= len(text) <= 64:
                 raise ValueError("name outside bounds")
             flow["name"] = text
-            if "gb" in flow:
-                flow["kind"] = "create_note"
-                next_prompt = "یادداشت را وارد کنید؛ بدون یادداشت «-» بفرستید."
+            if "gb" in flow and "days" in flow:
+                result = await finish_create()
+                section = "users"
             else:
                 flow["kind"] = "create_gb"
                 next_prompt = "حجم اشتراک را به گیگابایت وارد کنید:"
@@ -1372,35 +1393,9 @@ async def handle_text(update, context, *, business, actor):
             days = int(text)
             if not 1 <= days <= 36500:
                 raise ValueError("days outside bounds")
-            flow.update(days=days, kind="create_note")
-            next_prompt = "یادداشت را وارد کنید؛ بدون یادداشت «-» بفرستید."
-        elif kind == "create_note":
-            report = await service.create_users(
-                actor,
-                sid,
-                name=flow["name"],
-                gb=flow["gb"],
-                days=flow["days"],
-                count=flow["count"],
-                operation_key=flow["operation_key"],
-                comment="" if text == "-" else text,
-            )
-            result = f"👥 ساخته‌شده: {len(report['users'])} · خطا: {report['errors']}"
+            flow["days"] = days
+            result = await finish_create()
             section = "users"
-            if report["errors"]:
-                await update.effective_message.reply_text(
-                    result
-                    + "\nبرای ادامه همان عملیات، یادداشت را دوباره بفرستید یا لغو کنید.",
-                    reply_markup=cancel_keyboard(),
-                )
-                return True
-            if business.list_nodes(parent_server_id=sid):
-                for user in report["users"]:
-                    sync = await service.sync_nodes(
-                        actor, sid, "missing", only_user=user["id"]
-                    )
-                    if sync["errors"]:
-                        result += f"\n⚠️ خطای ساخت روی نودها: {sync['errors']}؛ از همگام‌سازی نودها برای ترمیم استفاده کنید."
         elif kind == "user_field":
             uid = int(flow["uid"])
             field = flow["field"]
