@@ -107,7 +107,14 @@ def test_single_subscription_status_opens_four_actions_directly(
 
     assert len(message.sent) == 1
     text, kwargs = message.sent[0]
-    assert text == '📊 وضعیت اشتراک\n\nیکی از گزینه‌های زیر را انتخاب کنید:'
+    assert text.startswith('📄اطلاعات اشتراک شما\n')
+    assert '👤نام:' in text
+    assert '📡سرور:' in text
+    assert '📊میزان استفاده:' in text
+    assert '⏳زمان باقی مانده:' in text
+    assert '💰قیمت اشتراک:' in text
+    assert f'🔑شناسه: <code>{sid}</code>' in text
+    assert kwargs['parse_mode'] == 'HTML'
     assert callbacks(kwargs['reply_markup']) == [
         f'shop:configmenu:{sid}',
         f'shop:renew:{sid}',
@@ -134,16 +141,33 @@ def attach_rotation(service, panel, *, fail_after=None, reset=False):
     panel.rotate_identity = rotate
 
 
-def test_status_menu_hides_detail_fields_and_rename_still_works(conn, factories, cipher):
+def test_status_detail_matches_sellbot_fields_and_rename_still_works(
+    conn, factories, cipher
+):
     service, panel, actor, sid, oid = _service(conn, factories, cipher)
-    item = service.rename_customer_subscription(actor, subscription_id=sid, name='اشتراک <جدید>')
-    text = handlers._subscription_menu_text()
-    assert text == '📊 وضعیت اشتراک\n\nیکی از گزینه‌های زیر را انتخاب کنید:'
+    item = service.rename_customer_subscription(
+        actor,
+        subscription_id=sid,
+        name='اشتراک <جدید>',
+    )
+    text = handlers._subscription_detail_text(
+        item,
+        service.runtime_userbot_settings(),
+    )
+    for shown in (
+        '📄اطلاعات اشتراک شما',
+        '👤نام: اشتراک &lt;جدید&gt;',
+        '📡سرور:',
+        '📊میزان استفاده:',
+        '⏳زمان باقی مانده:',
+        '💰قیمت اشتراک:',
+        f'🔑شناسه: <code>{sid}</code>',
+    ):
+        assert shown in text
     for hidden in (
-        '✏️ نام', '👤 کاربر', '📦 پلن', '📡 سرور', '📶 وضعیت',
-        '📊 میزان استفاده', '📥 حجم باقی‌مانده', '📅 تاریخ انقضا',
-        '⏳ زمان باقی‌مانده', '🕓 آخرین اتصال', '💰 قیمت اشتراک',
-        '🔑 شناسه', '🔄 آخرین بروزرسانی',
+        '👤 کاربر', '📦 پلن', '📶 وضعیت',
+        '📥 حجم باقی‌مانده', '📅 تاریخ انقضا',
+        '🕓 آخرین اتصال', '🔄 آخرین بروزرسانی',
     ):
         assert hidden not in text
     assert service.customer_subscription_status(
@@ -151,7 +175,9 @@ def test_status_menu_hides_detail_fields_and_rename_still_works(conn, factories,
     )['service_name'] == 'اشتراک <جدید>'
     for invalid in ('xx', 'a' * 65, 'نام\nجدید', 'نام\x00جدید'):
         with pytest.raises(ValueError):
-            service.rename_customer_subscription(actor, subscription_id=sid, name=invalid)
+            service.rename_customer_subscription(
+                actor, subscription_id=sid, name=invalid
+            )
 
 
 def test_customer_mutations_cannot_cross_customer_or_tenant(conn, factories, cipher):
@@ -271,7 +297,10 @@ def test_customer_buttons_rename_cancel_and_rotation_confirm_once(monkeypatch, c
             f'shop:subrename:{sid}',
             f'shop:subrotate:{sid}',
         ]
-        assert message.sent[-1][0] == '📊 وضعیت اشتراک\n\nیکی از گزینه‌های زیر را انتخاب کنید:'
+        detail = message.sent[-1][0]
+        assert detail.startswith('📄اطلاعات اشتراک شما')
+        assert '📊میزان استفاده:' in detail
+        assert f'🔑شناسه: <code>{sid}</code>' in detail
         await click(update, context, f'shop:subrename:{sid}')
         update.callback_query = None
         message.text = 'نام جدید'
@@ -451,7 +480,11 @@ def test_unavailable_panel_marks_cached_status_without_inventing_zero(conn, fact
     panel.usage = offline
     result = service.customer_subscription_status(actor, subscription_id=sid, refresh=True)
     assert result['sync_failed'] and result['usage_bytes'] == 1024**3
-    assert handlers._subscription_menu_text().startswith('📊 وضعیت اشتراک')
+    detail = handlers._subscription_detail_text(
+        result,
+        service.runtime_userbot_settings(),
+    )
+    assert '📊میزان استفاده: 1.0 از 10.0 گیگ' in detail
 
 
 def test_detail_lookup_is_not_limited_to_latest_500_subscriptions(conn, factories, cipher):
