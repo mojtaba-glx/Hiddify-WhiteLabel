@@ -1129,6 +1129,172 @@ def _sibling_user_bot_token(business: Any) -> str:
     return plain
 
 
+def _channel_target_from_message(message: Any, text: str = "") -> tuple[str, str, str]:
+    """SellBot-compatible channel target parser: forwarded chat, @name, -100..."""
+    target = ""
+    title = ""
+    link = ""
+    try:
+        fchat = getattr(message, "forward_from_chat", None)
+        if fchat and str(getattr(fchat, "type", "")) in {"channel", "supergroup"}:
+            username = str(getattr(fchat, "username", "") or "").strip().lstrip("@")
+            cid = str(getattr(fchat, "id", "") or "").strip()
+            title = str(getattr(fchat, "title", "") or "").strip()
+            if username:
+                target = f"@{username}"
+                link = f"https://t.me/{username}"
+            elif cid:
+                target = cid
+    except Exception:
+        pass
+
+    if not target:
+        try:
+            origin = getattr(message, "forward_origin", None)
+            chat = getattr(origin, "chat", None) if origin else None
+            if chat and str(getattr(chat, "type", "")) in {"channel", "supergroup"}:
+                username = str(getattr(chat, "username", "") or "").strip().lstrip("@")
+                cid = str(getattr(chat, "id", "") or "").strip()
+                title = str(getattr(chat, "title", "") or "").strip()
+                if username:
+                    target = f"@{username}"
+                    link = f"https://t.me/{username}"
+                elif cid:
+                    target = cid
+        except Exception:
+            pass
+
+    if not target:
+        raw = str(text or "").strip()
+        if raw.startswith("@") and len(raw) > 1:
+            username = raw.lstrip("@")
+            if re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
+                target = f"@{username}"
+                link = f"https://t.me/{username}"
+        elif raw.lstrip("-").isdigit():
+            target = raw
+    return target, title, link
+
+
+async def _send_purchase_event_report_admin(
+    context: ContextTypes.DEFAULT_TYPE,
+    business: Any,
+    actor: int,
+    *,
+    order_id: int,
+    result: dict[str, Any],
+) -> None:
+    settings = business.userbot_settings_admin(actor)
+    if not bool(settings.get("purchase_event_channel_enabled", False)):
+        return
+    target = str(settings.get("purchase_event_channel_id") or "").strip()
+    if not target:
+        return
+    try:
+        order = business.order_admin(actor, order_id=int(order_id))
+        action = (
+            "تمدید اشتراک"
+            if str(result.get("operation") or order.get("operation") or "") == "renewal"
+            else "خرید اشتراک"
+        )
+        username = str(order.get("username") or "").strip().lstrip("@")
+        display_name = str(
+            order.get("display_name") or (f"@{username}" if username else "-")
+        )
+        service_code = str(
+            result.get("smart_code")
+            or result.get("id")
+            or order.get("id")
+            or "-"
+        )
+        text = (
+            "📣 گزارش رویداد اشتراک\n"
+            f"🔖 نوع عملیات: {action}\n"
+            f"👤 کاربر: {display_name}\n"
+            f"🆔 شناسه تلگرام: {order.get('telegram_user_id') or '-'}\n"
+            f"🏷 نام اشتراک: {order.get('plan_name') or '-'}\n"
+            f"🛰 سرور: {order.get('selected_server_label') or '-'}\n"
+            f"📊حجم: {float(order.get('traffic_gb') or 0):.1f} گیگابایت\n"
+            f"⏳زمان: {int(order.get('duration_days') or 0)} روز\n"
+            f"💰مبلغ: {int(order.get('amount') or 0):,} {order.get('currency') or ''}\n"
+            f"🔑شناسه اشتراک:{service_code}"
+        )
+        chat_target: Any = int(target) if target.lstrip("-").isdigit() else target
+        await context.bot.send_message(chat_id=chat_target, text=text)
+    except Exception:
+        return
+
+
+async def _send_payment_event_report(
+    business: Any,
+    actor: int,
+    *,
+    payment_key: str,
+) -> None:
+    settings = business.userbot_settings_admin(actor)
+    if not bool(settings.get("payment_event_channel_enabled", False)):
+        return
+    target = str(settings.get("payment_event_channel_id") or "").strip()
+    if not target:
+        return
+    token = ""
+    try:
+        pay = business.payment_admin(actor, payment_key=payment_key)
+        token = _sibling_user_bot_token(business)
+        username_raw = str(pay.get("username") or "").strip().lstrip("@")
+        username = f"@{username_raw}" if username_raw else "-"
+        text = (
+            "📣 گزارش رویداد پرداخت\n"
+            f"👤 کاربر: {pay.get('display_name') or '-'}\n"
+            f"◈ نام کاربری: {username}\n"
+            f"◈ شناسه کاربر: {pay.get('telegram_user_id') or '-'}\n"
+            f"🔑 شناسه تراکنش: {pay.get('payment_key') or payment_key}\n"
+            f"💰 مبلغ: {int(pay.get('amount') or 0):,} {pay.get('currency') or ''}\n"
+            "✅ وضعیت: تایید شده"
+        )
+        chat_target: Any = int(target) if target.lstrip("-").isdigit() else target
+        async with Bot(token=token) as bot:
+            await bot.send_message(chat_id=chat_target, text=text)
+    except Exception:
+        return
+    finally:
+        token = ""
+
+
+async def _send_system_event(
+    context: ContextTypes.DEFAULT_TYPE,
+    business: Any,
+    actor: int,
+    *,
+    text: str,
+    document: bytes | None = None,
+    filename: str = "",
+    caption: str = "",
+) -> None:
+    settings = business.userbot_settings_admin(actor)
+    if not bool(settings.get("system_event_channel_enabled", False)):
+        return
+    target = str(settings.get("system_event_channel_id") or "").strip()
+    if not target:
+        return
+    try:
+        chat_target: Any = int(target) if target.lstrip("-").isdigit() else target
+        if document is not None:
+            bio = BytesIO(bytes(document))
+            bio.name = filename or "tenant-backup.json"
+            await context.bot.send_document(
+                chat_id=chat_target,
+                document=bio,
+                filename=bio.name,
+                caption=caption or text,
+            )
+        elif text:
+            await context.bot.send_message(chat_id=chat_target, text=text)
+    except Exception:
+        # Event reporting must never break admin operations.
+        return
+
+
 async def _send_via_userbot(
     business: Any,
     chat_id: int | str,
@@ -1594,6 +1760,16 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
                 f"زمان نامحدود∞ | {_bool_icon(s.get('renew_unlimited_time'))}",
                 callback_data="userbot:settings:buy_renew:renew_unlimited_time",
             )],
+            [
+                InlineKeyboardButton(
+                    _bool_icon(s.get("purchase_event_channel_enabled")),
+                    callback_data="userbot:settings:buy_renew:event_channel_enabled",
+                ),
+                InlineKeyboardButton(
+                    "تنظیم کانال رویداد📢",
+                    callback_data="userbot:settings:buy_renew:event_channel_set",
+                ),
+            ],
             [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
         ]
         await _edit_or_send(
@@ -1856,18 +2032,33 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
         return
 
     if section == "force_join":
+        username = str(s.get("force_join_channel_username") or "").strip().lstrip("@")
+        channel_id = str(s.get("force_join_channel_id") or "").strip()
+        legacy = str(s.get("force_join_channel") or "").strip()
+        channel_disp = (
+            f"@{username}"
+            if username
+            else channel_id or legacy or "—"
+        )
         rows = [
             [InlineKeyboardButton(
-                f"🔒 عضویت اجباری | {_bool_icon(s.get('force_join_enabled'))}",
+                "🧩راهنما",
+                callback_data="userbot:settings:force_join:help",
+            )],
+            [InlineKeyboardButton(
+                "عضویت اجباری | " + _bool_icon(s.get("force_join_enabled")),
                 callback_data="userbot:settings:force_join:toggle",
             )],
-            [InlineKeyboardButton("📢 تنظیم کانال", callback_data="userbot:settings:force_join:set_channel")],
-            [InlineKeyboardButton("❓ راهنما", callback_data="userbot:settings:force_join:help")],
+            [InlineKeyboardButton(
+                "📢تنظیم کانال پشتیبانی",
+                callback_data="userbot:settings:force_join:set_channel",
+            )],
             [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
         ]
         await _edit_or_send(
             update,
-            f"🔒 تنظیمات عضویت اجباری\nکانال: {s.get('force_join_channel') or 'تنظیم نشده'}",
+            "🔒تنظیمات عضویت اجباری\n"
+            f"📢 کانال فعلی: {channel_disp}",
             InlineKeyboardMarkup(rows),
         )
         return
@@ -1888,6 +2079,16 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
                 callback_data="userbot:settings:payment:add",
             )
         ])
+        rows.append([
+            InlineKeyboardButton(
+                _bool_icon(s.get("payment_event_channel_enabled")),
+                callback_data="userbot:settings:payment:event_channel_toggle",
+            ),
+            InlineKeyboardButton(
+                "📢تنظیم کانال رویداد",
+                callback_data="userbot:settings:payment:event_channel_set",
+            ),
+        ])
         rows.append([InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")])
         await _edit_or_send(
             update,
@@ -1906,6 +2107,16 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
             InlineKeyboardMarkup([
                 [InlineKeyboardButton("📩دریافت فایل بکاپ", callback_data="userbot:settings:backup:download")],
                 [InlineKeyboardButton("📤بازیابی فایل بکاپ", callback_data="userbot:settings:backup:restore")],
+                [
+                    InlineKeyboardButton(
+                        _bool_icon(s.get("system_event_channel_enabled")),
+                        callback_data="userbot:settings:backup_restore:event_toggle",
+                    ),
+                    InlineKeyboardButton(
+                        "📢تنظیم کانال رویداد",
+                        callback_data="userbot:settings:backup_restore:event_set",
+                    ),
+                ],
                 [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
             ]),
         )
@@ -1930,13 +2141,32 @@ def _tenant_backup_payload(business: Any) -> dict[str, Any]:
     return payload
 
 
-async def _send_backup(update: Update, business: Any) -> None:
-    raw = json.dumps(_tenant_backup_payload(business), ensure_ascii=False, indent=2).encode("utf-8")
+async def _send_backup(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    business: Any,
+    actor: int,
+) -> None:
+    raw = json.dumps(
+        _tenant_backup_payload(business),
+        ensure_ascii=False,
+        indent=2,
+    ).encode("utf-8")
+    filename = f"tenant-{business.tenant_id}-userbot-backup.json"
     bio = BytesIO(raw)
-    bio.name = f"tenant-{business.tenant_id}-userbot-backup.json"
+    bio.name = filename
     await update.effective_chat.send_document(
         document=bio,
-        filename=bio.name,
+        filename=filename,
+        caption="📦 بکاپ Tenant UserBot",
+    )
+    await _send_system_event(
+        context,
+        business,
+        actor,
+        text="📦 بکاپ Tenant UserBot",
+        document=raw,
+        filename=filename,
         caption="📦 بکاپ Tenant UserBot",
     )
 
@@ -2216,9 +2446,25 @@ async def handle_callback(
         result = business.review_payment_admin(
             actor, payment_key=payment_key, approve=approve
         )
+        if approve:
+            await _send_payment_event_report(
+                business,
+                actor,
+                payment_key=payment_key,
+            )
         if approve and result.get("source") == "order" and result.get("status") == "paid":
             try:
-                business.fulfill_paid_order(actor, order_id=int(result["order_id"]))
+                fulfilled = business.fulfill_paid_order(
+                    actor,
+                    order_id=int(result["order_id"]),
+                )
+                await _send_purchase_event_report_admin(
+                    context,
+                    business,
+                    actor,
+                    order_id=int(result["order_id"]),
+                    result=fulfilled,
+                )
             except TenantBusinessError:
                 pass
         await _send_payment_detail(update, business, actor, payment_key)
@@ -2751,6 +2997,7 @@ async def handle_callback(
         "userbot:settings:buy_renew:enable_buy": ("enable_buy", "buy_renew"),
         "userbot:settings:buy_renew:enable_renew": ("enable_renew", "buy_renew"),
         "userbot:settings:buy_renew:show_renew_in_main_menu": ("show_renew_in_main_menu", "buy_renew"),
+        "userbot:settings:buy_renew:event_channel_enabled": ("purchase_event_channel_enabled", "buy_renew"),
         "userbot:settings:tx_plans:plan_categories_enabled": ("plan_categories_enabled", "tx_plans"),
         "userbot:settings:tx_plans:plan_sort_by_priority": ("plan_sort_by_priority", "tx_plans"),
         "userbot:settings:marketing:toggle:enable_discount_code": ("enable_discount_code", "marketing"),
@@ -3300,7 +3547,8 @@ async def handle_callback(
     if data == "userbot:settings:force_join:set_channel":
         context.user_data[FLOW_KEY] = {"kind": "force_join_channel"}
         await query.message.reply_text(
-            "📢 @channel یا -100... را ارسال کنید:",
+            "📢 تنظیم کانال پشتیبانی برای عضویت اجباری\n\n"
+            "یک پیام از کانال فوروارد کنید یا @channel / -100... ارسال کنید.",
             reply_markup=userbot_cancel_keyboard(),
         )
         return True
@@ -3308,11 +3556,60 @@ async def handle_callback(
         s = business.userbot_settings_admin(actor)
         await _edit_or_send(
             update,
-            "❓ راهنمای عضویت اجباری\n\n"
-            + str(s.get("force_join_help_text") or ""),
+            str(s.get("force_join_guide_text") or "").strip()
+            or "راهنما تنظیم نشده است.",
             InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:force_join")
             ]]),
+        )
+        return True
+
+    if data == "userbot:settings:buy_renew:event_channel_set":
+        context.user_data[FLOW_KEY] = {"kind": "purchase_event_channel"}
+        current = str(
+            business.userbot_settings_admin(actor).get(
+                "purchase_event_channel_id"
+            ) or "—"
+        ).strip() or "—"
+        await query.message.reply_text(
+            "📢 تنظیم کانال رویداد\n"
+            f"🔹 کانال فعلی: {current}\n\n"
+            "🔗 ابتدا ربات ادمین را در کانال ادمین کنید، سپس یک پیام از همان کانال "
+            "به اینجا فوروارد کنید.\n"
+            "یا @channel / -100... را مستقیم ارسال کنید.",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+
+    if data == "userbot:settings:payment:event_channel_toggle":
+        business.toggle_userbot_setting_admin(
+            actor,
+            key="payment_event_channel_enabled",
+        )
+        await _settings_section(update, business, actor, "payment")
+        return True
+    if data == "userbot:settings:payment:event_channel_set":
+        context.user_data[FLOW_KEY] = {"kind": "payment_event_channel"}
+        await query.message.reply_text(
+            "📢 تنظیم کانال رویداد پرداخت\n\n"
+            "یک پیام از کانال فوروارد کنید یا @channel / -100... ارسال کنید.",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+
+    if data == "userbot:settings:backup_restore:event_toggle":
+        business.toggle_userbot_setting_admin(
+            actor,
+            key="system_event_channel_enabled",
+        )
+        await _settings_section(update, business, actor, "backup_restore")
+        return True
+    if data == "userbot:settings:backup_restore:event_set":
+        context.user_data[FLOW_KEY] = {"kind": "system_event_channel"}
+        await query.message.reply_text(
+            "📢 تنظیم کانال رویداد بکاپ\n\n"
+            "یک پیام از کانال فوروارد کنید یا @channel / -100... ارسال کنید.",
+            reply_markup=userbot_cancel_keyboard(),
         )
         return True
 
@@ -3478,7 +3775,7 @@ async def handle_callback(
         return True
 
     if data == "userbot:settings:backup:download":
-        await _send_backup(update, business)
+        await _send_backup(update, context, business, actor)
         return True
     if data == "userbot:settings:backup:restore":
         context.user_data[FLOW_KEY] = {"kind": "backup_restore"}
@@ -4096,8 +4393,101 @@ async def handle_text(
             business.set_userbot_setting_admin(actor,key=key,value=value)
             context.user_data.pop(FLOW_KEY,None)
             await update.effective_message.reply_text("✅ تنظیم یادآور ذخیره شد.",reply_markup=admin_main_keyboard()); return True
-        if kind=="force_join_channel":
-            business.set_userbot_setting_admin(actor,key="force_join_channel",value=text); context.user_data.pop(FLOW_KEY,None); await update.effective_message.reply_text("✅ کانال عضویت اجباری ذخیره شد.",reply_markup=admin_main_keyboard()); return True
+        if kind == "force_join_channel":
+            target, _title, link = _channel_target_from_message(
+                update.effective_message,
+                text,
+            )
+            if not target:
+                await update.effective_message.reply_text(
+                    "❌ ورودی معتبر نیست.\n"
+                    "یک پیام از کانال فوروارد کنید یا @channel / -100... بفرستید.",
+                    reply_markup=userbot_cancel_keyboard(),
+                )
+                return True
+            business.set_userbot_setting_admin(
+                actor,
+                key="force_join_channel",
+                value=target,
+            )
+            if target.startswith("@"):
+                business.set_userbot_setting_admin(
+                    actor,
+                    key="force_join_channel_username",
+                    value=target.lstrip("@"),
+                )
+                business.set_userbot_setting_admin(
+                    actor,
+                    key="force_join_channel_id",
+                    value="",
+                )
+            else:
+                business.set_userbot_setting_admin(
+                    actor,
+                    key="force_join_channel_id",
+                    value=target,
+                )
+                business.set_userbot_setting_admin(
+                    actor,
+                    key="force_join_channel_username",
+                    value="",
+                )
+            business.set_userbot_setting_admin(
+                actor,
+                key="force_join_channel_link",
+                value=link,
+            )
+            context.user_data.pop(FLOW_KEY, None)
+            await update.effective_message.reply_text(
+                f"✅ کانال عضویت اجباری ذخیره شد:\n{target}",
+                reply_markup=admin_main_keyboard(),
+            )
+            await _settings_section(update, business, actor, "force_join")
+            return True
+        if kind in {
+            "purchase_event_channel",
+            "payment_event_channel",
+            "system_event_channel",
+        }:
+            target, title, _link = _channel_target_from_message(
+                update.effective_message,
+                text,
+            )
+            if not target:
+                await update.effective_message.reply_text(
+                    "❌ ورودی معتبر نیست.\n"
+                    "لطفاً یک پیام از کانال فوروارد کنید یا @channel / -100... را بفرستید.",
+                    reply_markup=userbot_cancel_keyboard(),
+                )
+                return True
+            key_map = {
+                "purchase_event_channel": "purchase_event_channel_id",
+                "payment_event_channel": "payment_event_channel_id",
+                "system_event_channel": "system_event_channel_id",
+            }
+            section_map = {
+                "purchase_event_channel": "buy_renew",
+                "payment_event_channel": "payment",
+                "system_event_channel": "backup_restore",
+            }
+            business.set_userbot_setting_admin(
+                actor,
+                key=key_map[kind],
+                value=target,
+            )
+            context.user_data.pop(FLOW_KEY, None)
+            title_part = f" ({title})" if title else ""
+            await update.effective_message.reply_text(
+                f"✅ کانال رویداد ذخیره شد:\n{target}{title_part}",
+                reply_markup=admin_main_keyboard(),
+            )
+            await _settings_section(
+                update,
+                business,
+                actor,
+                section_map[kind],
+            )
+            return True
         if kind=="payment_edit":
             field=str(flow["field"])
             mid=int(flow["method_id"])
@@ -4386,5 +4776,18 @@ async def handle_document(
     except Exception:
         await update.effective_message.reply_text("❌ بازیابی انجام نشد؛ فایل نامعتبر یا ناسازگار است.",reply_markup=userbot_cancel_keyboard()); return True
     context.user_data.pop(FLOW_KEY,None)
-    await update.effective_message.reply_text("✅ بکاپ Tenant بازیابی شد.",reply_markup=admin_main_keyboard())
+    await update.effective_message.reply_text(
+        "✅ بکاپ Tenant بازیابی شد.",
+        reply_markup=admin_main_keyboard(),
+    )
+    await _send_system_event(
+        context,
+        business,
+        actor,
+        text=(
+            "♻️ بازیابی بکاپ Tenant انجام شد.\n"
+            f"👤 توسط ادمین: {actor}\n"
+            f"🕐 زمان: {iso_utc(utcnow())}"
+        ),
+    )
     return True
