@@ -622,8 +622,11 @@ def test_admin_search_finds_customer_name_through_linked_panel_user(
     activated = service.fulfill_paid_order(
         7001, order_id=int(reviewed["order_id"])
     )
-    server_id = int(service.subscription_admin(7001, subscription_id=int(activated["id"]))["server_id"])
-    external_ref = str(activated["external_ref"])
+    stored = service.subscription_admin(
+        7001, subscription_id=int(activated["id"])
+    )
+    server_id = int(stored["server_id"])
+    external_ref = str(stored["external_ref"])
     cursor = conn.execute(
         "INSERT INTO tenant_panel_users "
         "(tenant_id,server_id,external_ref,name,comment,usage_bytes,traffic_bytes,"
@@ -636,8 +639,8 @@ def test_admin_search_finds_customer_name_through_linked_panel_user(
             "panel-random-name",
             "code:7654321",
             0,
-            int(activated["traffic_bytes"]),
-            str(activated["expires_at"]),
+            int(stored["traffic_bytes"]),
+            str(stored["expires_at"]),
             iso_utc(datetime.now(timezone.utc)),
         ),
     )
