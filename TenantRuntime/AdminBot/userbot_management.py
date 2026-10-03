@@ -2034,13 +2034,19 @@ async def handle_callback(
     # branches below can answer or mutate state.
     from TenantRuntime.AdminBot import broadcast_channel
     from TenantRuntime.AdminBot.handlers import admin_main_keyboard
-    if await broadcast_channel.handle_callback(
-        update,
-        context,
-        business=business,
-        actor=actor,
-        admin_main_keyboard=admin_main_keyboard,
-    ):
+    try:
+        if await broadcast_channel.handle_callback(
+            update,
+            context,
+            business=business,
+            actor=actor,
+            admin_main_keyboard=admin_main_keyboard,
+        ):
+            return True
+    except (ValueError, TenantBusinessError):
+        await query.message.reply_text(
+            "❌ مقدار یا وضعیت معتبر نیست. دوباره تلاش کنید."
+        )
         return True
 
     if not (data.startswith("userbot:") or data.startswith("channelpost:")):
@@ -3625,13 +3631,20 @@ async def handle_text(
     set_button_settings(business.runtime_userbot_settings())
 
     from TenantRuntime.AdminBot import broadcast_channel
-    if await broadcast_channel.handle_text(
-        update,
-        context,
-        business=business,
-        actor=actor,
-        admin_main_keyboard=admin_main_keyboard,
-    ):
+    try:
+        if await broadcast_channel.handle_text(
+            update,
+            context,
+            business=business,
+            actor=actor,
+            admin_main_keyboard=admin_main_keyboard,
+        ):
+            return True
+    except (ValueError, TenantBusinessError):
+        await update.effective_message.reply_text(
+            "❌ مقدار یا وضعیت معتبر نیست. دوباره تلاش کنید.",
+            reply_markup=userbot_cancel_keyboard(),
+        )
         return True
 
     flow=context.user_data.get(FLOW_KEY)
@@ -4179,13 +4192,20 @@ async def handle_media(
     set_button_settings(business.runtime_userbot_settings())
 
     from TenantRuntime.AdminBot import broadcast_channel
-    if await broadcast_channel.handle_media(
-        update,
-        context,
-        business=business,
-        actor=actor,
-        admin_main_keyboard=admin_main_keyboard,
-    ):
+    try:
+        if await broadcast_channel.handle_media(
+            update,
+            context,
+            business=business,
+            actor=actor,
+            admin_main_keyboard=admin_main_keyboard,
+        ):
+            return True
+    except (ValueError, TenantBusinessError):
+        await update.effective_message.reply_text(
+            "❌ رسانه یا کپشن معتبر نیست. دوباره تلاش کنید.",
+            reply_markup=userbot_cancel_keyboard(),
+        )
         return True
 
     flow=context.user_data.get(FLOW_KEY)
@@ -4312,13 +4332,20 @@ async def handle_document(
     set_button_settings(business.runtime_userbot_settings())
 
     from TenantRuntime.AdminBot import broadcast_channel
-    if await broadcast_channel.handle_document(
-        update,
-        context,
-        business=business,
-        actor=actor,
-        admin_main_keyboard=admin_main_keyboard,
-    ):
+    try:
+        if await broadcast_channel.handle_document(
+            update,
+            context,
+            business=business,
+            actor=actor,
+            admin_main_keyboard=admin_main_keyboard,
+        ):
+            return True
+    except (ValueError, TenantBusinessError):
+        await update.effective_message.reply_text(
+            "❌ فایل معتبر نیست. دوباره تلاش کنید.",
+            reply_markup=userbot_cancel_keyboard(),
+        )
         return True
 
     flow=context.user_data.get(FLOW_KEY)
