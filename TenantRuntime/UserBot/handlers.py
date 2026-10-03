@@ -73,20 +73,12 @@ def _ticket_panel_body(
     settings: dict[str, Any],
     items: list[dict[str, Any]],
 ) -> str:
-    intro = _setting_text(
+    del items
+    return _setting_text(
         settings,
         "ticket_panel_text",
         "📩 برای ارتباط با پشتیبانی، پیام خود را ارسال کنید.",
     )
-    history = (
-        "\n".join(
-            f"• #{x['id']} · {x['subject']} · {x['status']}"
-            f"{' · پاسخ داده شد' if x.get('admin_reply') else ''}"
-            for x in items[:15]
-        )
-        or "تیکتی ندارید."
-    )
-    return f"{intro}\n\n{history}".strip()
 
 
 def _ticket_status_label(status: object) -> str:
