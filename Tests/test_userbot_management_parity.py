@@ -107,7 +107,7 @@ def test_tenant_userbot_settings_roundtrip(conn, factories, cipher) -> None:
     assert defaults["show_user_status"] is True
     assert defaults["plan_categories_enabled"] is True
     assert defaults["plan_sort_by_priority"] is True
-    assert defaults["guide_android_text"] == ""
+    assert "راهنمای اندروید" in defaults["guide_android_text"]
     assert defaults["smart_base_url"] == ""
 
     changed = service.set_userbot_setting_admin(
