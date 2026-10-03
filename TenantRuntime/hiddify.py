@@ -7,13 +7,15 @@ state fields for v13+.
 
 from __future__ import annotations
 
+from dataclasses import asdict, replace
+
 import hashlib
 import math
 import os
 import re
 import ssl
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -66,7 +68,7 @@ def _user_base(target: PanelTarget, external_ref: str) -> str:
     ref = str(external_ref or "").strip()
     if not ref or "/" in ref or "?" in ref or "#" in ref:
         raise PanelError("invalid panel user reference")
-    return f"{_clean_base(target.endpoint)}/{_clean_path(target.user_path, name='user')}/{ref}"
+    return f"{_clean_base(target.public_origin or target.endpoint)}/{_clean_path(target.user_path, name='user')}/{ref}"
 
 
 def _api_timeout() -> float:
@@ -365,6 +367,11 @@ class HiddifyPanelAdapter:
             if data.get(key) not in (None, ""):
                 expires = str(data.get(key))
                 break
+        if expires is None:
+            start = _parse_utcish_datetime(data.get("start_date"))
+            days = int(data.get("package_days") or 0)
+            if start is not None and days > 0:
+                expires = (start + timedelta(days=days)).isoformat().replace("+00:00", "Z")
         last_online = (
             str(data.get("last_online")).strip()
             if data.get("last_online") not in (None, "")
@@ -378,7 +385,41 @@ class HiddifyPanelAdapter:
             expires_at=expires,
             last_online=last_online,
             subscription_url=self.subscription_link(target=target, external_ref=ref),
+            name=str(data.get("name") or ref), comment=str(data.get("comment") or ""),
         )
+
+    def list_users(self, *, target: PanelTarget, secret: str) -> list[dict]:
+        data = self._request("GET", f"{_admin_base(target)}/api/v2/admin/user/", secret)
+        if not isinstance(data, list) or any(not isinstance(x, dict) for x in data):
+            raise PanelError("Hiddify returned an invalid user list")
+        return [asdict(self._snapshot(target, str(x.get("uuid") or x.get("id") or ""), x))
+                | {"duration_days": x.get("package_days"), "start_date": x.get("start_date")}
+                for x in data]
+
+    def update_user(self, *, target: PanelTarget, secret: str,
+                    external_ref: str, changes: dict) -> PanelUserResult:
+        current = self._get(target, secret, external_ref)
+        payload = {key: changes[key] for key in ("name", "comment") if key in changes}
+        if "traffic_bytes" in changes:
+            payload["usage_limit_GB"] = _bytes_to_gb(changes["traffic_bytes"])
+        if "duration_days" in changes:
+            payload["package_days"] = int(changes["duration_days"])
+        if "expires_at" in changes:
+            expiry = _parse_utcish_datetime(changes["expires_at"])
+            start = _parse_utcish_datetime(current.get("start_date"))
+            if expiry is None:
+                raise PanelError("invalid Hiddify expiry")
+            if changes.get("reset_days") or start is None:
+                start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+                payload["start_date"] = start.strftime("%Y-%m-%d")
+            payload["package_days"] = max(1, int(math.ceil((expiry-start).total_seconds()/86400)))
+        if "start_date" in changes:
+            payload["start_date"] = changes["start_date"]
+        if changes.get("reset_usage"):
+            payload["current_usage_GB"] = 0
+            payload["last_reset_time"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        self._patch(target, secret, external_ref, payload)
+        return self.get_user(target=target, secret=secret, external_ref=external_ref)
 
     def inspect_connection(self, *, target: PanelTarget, secret: str) -> dict:
         if target.kind != "hiddify":
@@ -396,12 +437,12 @@ class HiddifyPanelAdapter:
     ) -> ProvisionResult:
         if str(target.kind).strip().lower() != "hiddify":
             raise PanelError("Hiddify adapter received the wrong panel kind")
-        external_ref = str(
+        external_ref = request.external_ref or str(
             uuid.uuid5(_UUID_NAMESPACE, f"whitelabel:{request.idempotency_key}")
         )
         payload = {
             "uuid": external_ref,
-            "name": f"wl-t{int(request.tenant_id)}-s{int(request.subscription_id)}",
+            "name": request.name or f"wl-t{int(request.tenant_id)}-s{int(request.subscription_id)}",
             "usage_limit_GB": _bytes_to_gb(request.traffic_bytes),
             "package_days": max(1, int(request.duration_days)),
             "start_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
@@ -564,7 +605,7 @@ class HiddifyPanelAdapter:
     ) -> str:
         data = self._request(
             "GET",
-            self.subscription_link(target=target, external_ref=external_ref),
+            self.subscription_link(target=replace(target,public_origin=""), external_ref=external_ref),
             secret,
         )
         if isinstance(data, str) and data.strip():

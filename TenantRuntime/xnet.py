@@ -8,6 +8,10 @@ Customer subscription links use X-NET's separate public subscription listener.
 
 from __future__ import annotations
 
+from TenantRuntime.panels import decode_panel_note
+
+from dataclasses import asdict
+
 import base64
 import hashlib
 import json
@@ -553,6 +557,8 @@ class XnetPanelAdapter:
         external_ref: str,
         *,
         inbounds: list[dict[str, Any]] | None = None,
+        online_map: dict | None = None,
+        include_history: bool = True,
     ) -> PanelUserResult:
         rows = inbounds if inbounds is not None else self._inbounds(session)
         pairs = _find_pairs(rows, external_ref)
@@ -565,7 +571,7 @@ class XnetPanelAdapter:
         expiry: datetime | None = None
         last_seen: datetime | None = None
         active = True
-        online_map = self._online_map(session)
+        online_map = self._online_map(session) if online_map is None else online_map
         is_online = False
 
         for _inbound, client in pairs:
@@ -608,7 +614,7 @@ class XnetPanelAdapter:
                 "%Y-%m-%d %H:%M:%S"
             )
         else:
-            if last_seen is None:
+            if last_seen is None and include_history:
                 for client_id in sorted(seen_client_ids):
                     if not client_id or client_id.startswith("anon-"):
                         continue
@@ -640,6 +646,8 @@ class XnetPanelAdapter:
             subscription_url=self.subscription_link(
                 target=session.target, external_ref=ref
             ),
+            name=str(pairs[0][1].get("username") or ref),
+            comment=str(pairs[0][1].get("remark") or ""),
         )
 
     @staticmethod
@@ -691,6 +699,56 @@ class XnetPanelAdapter:
             return ""
         return "wl-renew:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
+    def list_users(self, *, target: PanelTarget, secret: str) -> list[dict]:
+        with self._session(target, secret) as session:
+            inbounds, online = self._inbounds(session), self._online_map(session)
+            refs = {_client_uuid(c) for i in inbounds for c in (i.get("clients") or []) if _client_uuid(c)}
+            result = []
+            for ref in sorted(refs):
+                row = asdict(self._snapshot(session, ref, inbounds=inbounds,
+                                           online_map=online, include_history=False))
+                try:
+                    note = decode_panel_note(row["comment"])
+                    if isinstance(note, dict):
+                        row["name"] = str(note.get("name") or row["name"])
+                        row["comment"] = str(note.get("note") or "")
+                except (ValueError, TypeError):
+                    pass
+                result.append(row)
+            return result
+
+    def update_user(self, *, target: PanelTarget, secret: str,
+                    external_ref: str, changes: dict) -> PanelUserResult:
+        with self._session(target, secret) as session:
+            pairs = _find_pairs(self._inbounds(session), external_ref)
+            if not pairs:
+                raise PanelError("X-NET user was not found")
+            seen = set()
+            for inbound, client in pairs:
+                client_id = str(client.get("id") or "")
+                if not client_id or client_id in seen:
+                    continue
+                seen.add(client_id)
+                body = self._update_body(client,
+                    traffic_bytes=changes.get("traffic_bytes"), expires_at=changes.get("expires_at"))
+                if "comment" in changes or "name" in changes:
+                    current = str(client.get("remark") or "")
+                    try:
+                        note = decode_panel_note(current)
+                        if not isinstance(note, dict):
+                            note = {"note": current}
+                    except ValueError:
+                        note = {"note": current}
+                    for key, field in (("name", "name"), ("comment", "note")):
+                        if key in changes:
+                            note[field] = changes[key]
+                    body["remark"] = json.dumps(note, ensure_ascii=False)
+                path = f"/api/inbounds/{quote(str(inbound.get('id') or ''), safe='')}/clients/{quote(client_id, safe='')}"
+                session.request("PUT", path, payload=body)
+                if changes.get("reset_usage"):
+                    session.request("POST", path + "/reset-traffic")
+            return self._snapshot(session, external_ref, inbounds=self._inbounds(session))
+
     def inspect_connection(self, *, target: PanelTarget, secret: str) -> dict:
         with self._session(target, secret) as session:
             inbounds = self._inbounds(session)
@@ -712,7 +770,7 @@ class XnetPanelAdapter:
         secret: str,
         request: ProvisionRequest,
     ) -> ProvisionResult:
-        external_ref = str(
+        external_ref = request.external_ref or str(
             uuid.uuid5(
                 _UUID_NAMESPACE,
                 f"whitelabel:{request.idempotency_key}",
@@ -733,7 +791,7 @@ class XnetPanelAdapter:
             target_ids = _selected_inbound_ids(target, inbounds)
             expire_date = _iso(request.expires_at)
             body: dict[str, Any] = {
-                "username": f"wl-t{int(request.tenant_id)}-s{int(request.subscription_id)}",
+                "username": request.name or f"wl-t{int(request.tenant_id)}-s{int(request.subscription_id)}",
                 "uuid": external_ref,
                 "status": "active",
                 "trafficLimitBytes": max(0, int(request.traffic_bytes)),

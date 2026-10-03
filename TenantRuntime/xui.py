@@ -9,6 +9,10 @@ routing target:
 
 from __future__ import annotations
 
+from TenantRuntime.panels import decode_panel_note
+
+from dataclasses import asdict
+
 import hashlib
 import json
 import os
@@ -698,6 +702,8 @@ class XuiPanelAdapter:
         *,
         client: dict[str, Any] | None = None,
         inbounds: list[dict[str, Any]] | None = None,
+        online: set | None = None,
+        last_map: dict | None = None,
     ) -> PanelUserResult:
         inbound_rows = inbounds if inbounds is not None else self._list_inbounds(session)
         pairs = _find_pairs(inbound_rows, external_ref)
@@ -726,8 +732,8 @@ class XuiPanelAdapter:
                     chosen.get("down")
                 )
 
-        online = self._online_set(session)
-        last_map = self._last_online_map(session)
+        online = self._online_set(session) if online is None else online
+        last_map = self._last_online_map(session) if last_map is None else last_map
         identities = {
             str(chosen.get(key) or "").strip().lower()
             for key in ("email", "subId", "uuid", "id", "password", "auth")
@@ -772,6 +778,8 @@ class XuiPanelAdapter:
             subscription_url=self.subscription_link(
                 target=session.target, external_ref=ref
             ),
+            name=str(chosen.get("name") or chosen.get("email") or ref),
+            comment=str(chosen.get("comment") or ""),
         )
 
     def _existing(
@@ -793,6 +801,76 @@ class XuiPanelAdapter:
         except PanelError:
             raise
         return None
+
+    def list_users(self, *, target: PanelTarget, secret: str) -> list[dict]:
+        with self._session(target, secret) as session:
+            inbounds = self._list_inbounds(session)
+            clients = (self._list_sanaei_clients(session) if session.modern_clients
+                       else [c for i in inbounds for c in _clients(i)])
+            online, last = self._online_set(session), self._last_online_map(session)
+            refs, result = set(), []
+            for client in clients:
+                ref = str(client.get("subId") or client.get("uuid") or client.get("id") or client.get("password") or "")
+                if not ref or ref in refs:
+                    continue
+                refs.add(ref)
+                row = asdict(self._snapshot(session, ref, client=client,
+                    inbounds=inbounds, online=online, last_map=last))
+                try:
+                    note = decode_panel_note(row["comment"])
+                    if isinstance(note, dict):
+                        row["name"] = str(note.get("name") or row["name"])
+                        row["comment"] = str(note.get("note") or "")
+                except (ValueError, TypeError):
+                    pass
+                result.append(row)
+            return result
+
+    def update_user(self, *, target: PanelTarget, secret: str,
+                    external_ref: str, changes: dict) -> PanelUserResult:
+        with self._session(target, secret) as session:
+            inbounds = self._list_inbounds(session)
+            pairs = _find_pairs(inbounds, external_ref)
+            if session.modern_clients:
+                client = self._find_sanaei_client(self._list_sanaei_clients(session), external_ref)
+                pairs = [(None, client)] if client else []
+            if not pairs:
+                raise PanelError("X-UI user was not found")
+            for inbound, client in pairs:
+                updated = _sanaei_update_payload(client) if session.modern_clients else dict(client)
+                if "traffic_bytes" in changes:
+                    updated["totalGB"] = int(changes["traffic_bytes"])
+                if "expires_at" in changes:
+                    updated["expiryTime"] = _expiry_ms(changes["expires_at"])
+                if "comment" in changes or "name" in changes:
+                    current = str(client.get("comment") or "")
+                    try:
+                        note = decode_panel_note(current)
+                        if not isinstance(note, dict):
+                            note = {"note": current}
+                    except ValueError:
+                        note = {"note": current}
+                    if "name" in changes:
+                        note["name"] = changes["name"]
+                    if "comment" in changes:
+                        note["note"] = changes["comment"]
+                    updated["comment"] = json.dumps(note, ensure_ascii=False)
+                email = str(client.get("email") or "")
+                if session.modern_clients:
+                    session.request("POST", f"clients/update/{quote(email, safe='')}", payload=updated)
+                    if changes.get("reset_usage"):
+                        session.request("POST", f"clients/resetTraffic/{quote(email, safe='')}")
+                else:
+                    route_id = _client_identity(client, str(inbound.get("protocol") or "").lower())
+                    session.request("POST", f"inbounds/updateClient/{quote(route_id, safe='')}",
+                        payload={"id": _safe_int(inbound.get("id")), "settings": json.dumps({"clients": [updated]})})
+                    if changes.get("reset_usage"):
+                        identity = email if session.flavor == "sanaei" else route_id
+                        session.request("POST", f"inbounds/{_safe_int(inbound.get('id'))}/resetClientTraffic/{quote(identity, safe='')}")
+            result = self._existing(session, external_ref)
+            if result is None:
+                raise PanelError("X-UI edit could not be verified")
+            return result
 
     def inspect_connection(self, *, target: PanelTarget, secret: str) -> dict:
         with self._session(target, secret) as session:
@@ -816,7 +894,7 @@ class XuiPanelAdapter:
         secret: str,
         request: ProvisionRequest,
     ) -> ProvisionResult:
-        external_ref = str(
+        external_ref = request.external_ref or str(
             uuid.uuid5(
                 _UUID_NAMESPACE,
                 f"whitelabel:{request.idempotency_key}",

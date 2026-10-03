@@ -29,6 +29,8 @@ EXPECTED_TABLES = {
     "tenant_referral_manual_rewards", "tenant_payment_events",
     "tenant_payment_receipt_media", "tenant_subscription_rotations",
     "tenant_ticket_messages",
+    "tenant_panel_users", "tenant_panel_user_nodes", "tenant_server_domains",
+    "tenant_server_sales_settings",
 }
 
 
@@ -67,6 +69,7 @@ def test_migration_is_idempotent(db_path) -> None:
     assert "0026_payment_phase11" in versions
     assert "0027_subscription_status" in versions
     assert "0028_ticket_phase12" in versions
+    assert "0029_server_management" in versions
 
 
 def test_foreign_keys_enforced(conn, factories) -> None:

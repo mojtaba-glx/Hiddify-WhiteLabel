@@ -160,6 +160,15 @@ def test_xnet_live_create_renew_toggle_usage_delete_and_link() -> None:
     assert snapshot.last_online
     assert snapshot.traffic_bytes == 20 * 1024**3
 
+    inventory=adapter.list_users(target=_target(),secret="api-token")
+    assert len(inventory)==1 and inventory[0]['external_ref']==created.external_ref
+    adapter.update_user(target=_target(),secret="api-token",external_ref=created.external_ref,
+                        changes={'name':'Native alias','comment':'Operator note','traffic_bytes':25*1024**3})
+    current=adapter.get_user(target=_target(),secret="api-token",external_ref=created.external_ref)
+    assert current.usage_bytes==3*1024 and current.active is True and state['reset_calls']==0
+    assert adapter.list_users(target=_target(),secret="api-token")[0]['name']=='Native alias'
+    assert all(c['uuid']==created.external_ref for i in inbounds for c in i['clients'])
+
     renewal = RenewRequest(
         traffic_bytes=50 * 1024**3,
         duration_days=45,

@@ -300,3 +300,36 @@ services. Before migrations, the updater creates a private consistent SQLite +
 `.env` rollback snapshot; any migration/startup/health failure restores the
 previous database, environment and source version automatically. See
 `docs/OPERATIONS.md` for direct commands and recovery details.
+
+
+## Live server administration
+
+The tenant admin server screen follows the SellBot menu: panel users, user
+operations, server plans, public domains, connection editing, removal, child
+nodes, node synchronization, frozen-user repair, and back navigation. Connection
+testing and the default-sales selector remain in the connection editor rather
+than appearing above the server menu.
+
+Hiddify, Sanaei/Alireza X-UI and X-NET expose native panel inventories, including
+users created outside this bot. Inventories are tenant/server scoped, paginated,
+and cached with an explicit stale-data notice on connection failure. Native admin
+users have separate records; importing them does not create customers or paid
+orders. Create/bulk-create, search, configuration delivery, rename, notes, quota,
+expiry, renewal, enable/disable and confirmed removal use actual panel APIs.
+
+Plans can belong to one server or remain shared legacy plans. Fixed, dynamic
+and mixed sales modes use the normal checkout/payment flow; dynamic quotes are
+stored as immutable plans, with volume/tier discounts and independent expiry
+timers. Public subscription domains do not change the protected panel API URL.
+
+Node report and extra-user modes do not mutate panel accounts. Missing/full
+synchronization preserves user identity when creating replicas. Existing-user
+quota/time synchronization preserves names, traffic counters and enable state;
+explicit status synchronization changes enable state. Only related replicas are
+removed with a node, and detached/disabled node consumption remains counted for
+managed subscriptions. Failed node operations expose repairable frozen records;
+clearing freeze metadata does not enable an expired account.
+
+Migration `0029_server_management` upgrades the existing schema without changing
+previous migrations. Provider contracts and UI workflows are exercised offline;
+production panel credentials are needed for deployment-specific live validation.

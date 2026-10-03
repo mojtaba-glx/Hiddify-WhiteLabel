@@ -156,6 +156,15 @@ def test_sanaei_create_renew_state_usage_delete_and_native_link() -> None:
     assert snapshot.active is True
     assert snapshot.last_online  # online endpoint takes precedence
 
+    inventory=adapter.list_users(target=_sanaei_target(),secret="sanaei-token")
+    assert len(inventory)==1 and inventory[0]['external_ref']==created.external_ref
+    adapter.update_user(target=_sanaei_target(),secret="sanaei-token",external_ref=created.external_ref,
+                        changes={'name':'Friendly native name','comment':'Operator note','traffic_bytes':25*1024**3})
+    current=adapter.get_user(target=_sanaei_target(),secret="sanaei-token",external_ref=created.external_ref)
+    assert current.usage_bytes==3072 and current.active is True and state['reset_calls']==0
+    assert state['clients'][0]['id']==991 and state['clients'][0]['uuid']==created.external_ref
+    assert adapter.list_users(target=_sanaei_target(),secret="sanaei-token")[0]['name']=='Friendly native name'
+
     renewal = RenewRequest(
         traffic_bytes=50 * 1024**3,
         duration_days=45,
@@ -437,6 +446,13 @@ def test_alireza_multi_inbound_create_retry_renew_and_delete() -> None:
     assert snapshot.usage_bytes == 3072
     assert snapshot.active is True
     assert snapshot.last_online
+
+    inventory=adapter.list_users(target=_alireza_target(),secret=secret)
+    assert len(inventory)==1 and inventory[0]['external_ref']==created.external_ref
+    adapter.update_user(target=_alireza_target(),secret=secret,external_ref=created.external_ref,
+                        changes={'name':'Legacy alias','traffic_bytes':25*1024**3})
+    current=adapter.get_user(target=_alireza_target(),secret=secret,external_ref=created.external_ref)
+    assert current.usage_bytes==snapshot.usage_bytes and state['reset_calls']==0
 
     renewal = RenewRequest(
         traffic_bytes=40 * 1024**3,
