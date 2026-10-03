@@ -8,7 +8,6 @@ async and use each tenant's own encrypted UserBot credential.
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass
 from typing import Callable
 
@@ -23,6 +22,7 @@ from TenantRuntime.reminders import (
     claim_due_deliveries,
     enqueue_due_reminders,
     finish_delivery,
+    reconcile_reminder_queue_settings,
 )
 
 
@@ -144,47 +144,46 @@ class TenantLifecycleCoordinator:
                     report.enforcement_pending += int(enforcement["pending"])
                     report.errors += int(enforcement["errors"])
 
-                    reminder_rows = conn.execute(
-                        "SELECT key, value FROM tenant_userbot_settings "
-                        "WHERE tenant_id=? AND key IN "
-                        "('reminder_enabled','reminder_days','reminder_remaining_gb')",
-                        (tenant_id,),
-                    ).fetchall()
-                    reminder_values = {}
-                    for setting_row in reminder_rows:
-                        try:
-                            reminder_values[str(setting_row["key"])] = json.loads(
-                                str(setting_row["value"])
-                            )
-                        except Exception:
-                            continue
-                    if bool(reminder_values.get("reminder_enabled", True)):
+                    reminder_values = service.runtime_userbot_settings()
+                    reminder_enabled = bool(
+                        reminder_values.get("reminder_enabled", True)
+                    )
+                    days_threshold = max(
+                        1,
+                        min(
+                            int(
+                                reminder_values.get(
+                                    "reminder_days", self.reminder_days
+                                )
+                            ),
+                            30,
+                        ),
+                    )
+                    remaining_gb_threshold = max(
+                        1,
+                        min(
+                            int(
+                                reminder_values.get(
+                                    "reminder_remaining_gb",
+                                    self.reminder_remaining_gb,
+                                )
+                            ),
+                            1000,
+                        ),
+                    )
+                    report.reminders_skipped += reconcile_reminder_queue_settings(
+                        conn,
+                        tenant_id=tenant_id,
+                        enabled=reminder_enabled,
+                        days_threshold=days_threshold,
+                        remaining_gb_threshold=remaining_gb_threshold,
+                    )
+                    if reminder_enabled:
                         report.reminders_enqueued += enqueue_due_reminders(
                             conn,
                             tenant_id=tenant_id,
-                            days_threshold=max(
-                                1,
-                                min(
-                                    int(
-                                        reminder_values.get(
-                                            "reminder_days", self.reminder_days
-                                        )
-                                    ),
-                                    30,
-                                ),
-                            ),
-                            remaining_gb_threshold=max(
-                                1,
-                                min(
-                                    int(
-                                        reminder_values.get(
-                                            "reminder_remaining_gb",
-                                            self.reminder_remaining_gb,
-                                        )
-                                    ),
-                                    1000,
-                                ),
-                            ),
+                            days_threshold=days_threshold,
+                            remaining_gb_threshold=remaining_gb_threshold,
                         )
                 except Exception:
                     # One tenant must never stop enforcement/reminders for others.
