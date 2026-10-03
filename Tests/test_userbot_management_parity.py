@@ -11,6 +11,7 @@ from TenantRuntime.AdminBot import userbot_management as admin_userbot
 from TenantRuntime.UserBot import handlers as user_handlers
 from TenantRuntime.business import TenantBusinessError, TenantBusinessService
 from TenantRuntime.button_styles import set_button_settings
+from Shared.timeutils import parse_utc, utcnow
 
 
 def _service(conn, factories, cipher):
@@ -797,6 +798,87 @@ def test_real_wallet_gift_is_single_use_per_customer(
         7001, voucher_id=int(voucher["id"])
     )
     assert int(stored["used_count"]) == 1
+
+
+def test_gift_voucher_edits_change_real_redemption_rules(
+    conn, factories, cipher
+) -> None:
+    _tenant, service = _service(conn, factories, cipher)
+    first = service.register_customer(
+        7101, display_name="Gift A", username="gift_a"
+    )
+    service.register_customer(
+        7102, display_name="Gift B", username="gift_b"
+    )
+    voucher = service.add_gift_voucher_admin(
+        7001,
+        code="EDITME",
+        amount=1000,
+        currency="IRR",
+        max_uses=2,
+    )
+
+    renamed = service.rename_gift_voucher_admin(
+        7001, voucher_id=int(voucher["id"]), code="EDITED-GIFT"
+    )
+    assert renamed["code"] == "EDITED-GIFT"
+    changed = service.set_gift_voucher_amount_admin(
+        7001, voucher_id=int(voucher["id"]), amount=2500
+    )
+    assert int(changed["amount"]) == 2500
+    expiring = service.set_gift_voucher_expiry_hours_admin(
+        7001, voucher_id=int(voucher["id"]), hours=24
+    )
+    assert expiring["expires_at"] is not None
+    assert parse_utc(str(expiring["expires_at"])) > utcnow()
+
+    redeemed = service.redeem_gift_voucher(7101, code="edited-gift")
+    assert int(redeemed["amount"]) == 2500
+    assert int(redeemed["resulting_balance"]) == 2500
+
+    full = service.set_gift_voucher_max_uses_admin(
+        7001, voucher_id=int(voucher["id"]), max_uses=1
+    )
+    assert full["status"] == "disabled"
+    with pytest.raises(TenantBusinessError):
+        service.redeem_gift_voucher(7102, code="EDITED-GIFT")
+
+    reopened = service.set_gift_voucher_max_uses_admin(
+        7001, voucher_id=int(voucher["id"]), max_uses=3
+    )
+    assert reopened["status"] == "active"
+    second = service.redeem_gift_voucher(7102, code="EDITED-GIFT")
+    assert int(second["resulting_balance"]) == 2500
+
+    unlimited = service.set_gift_voucher_expiry_hours_admin(
+        7001, voucher_id=int(voucher["id"]), hours=0
+    )
+    assert unlimited["expires_at"] is None
+    assert int(first["tenant_id"]) == service.tenant_id
+
+
+def test_bulk_gift_codes_are_unique_one_time_and_expiring(
+    conn, factories, cipher
+) -> None:
+    _tenant, service = _service(conn, factories, cipher)
+    items = service.create_gift_vouchers_bulk_admin(
+        7001,
+        prefix="FEST",
+        count=12,
+        amount=40000,
+        currency="IRR",
+        expiry_hours=48,
+    )
+    assert len(items) == 12
+    assert len({str(item["code"]) for item in items}) == 12
+    assert all(str(item["code"]).startswith("FEST-") for item in items)
+    assert all(int(item["max_uses"]) == 1 for item in items)
+    assert all(int(item["amount"]) == 40000 for item in items)
+    assert all(
+        item["expires_at"] is not None
+        and parse_utc(str(item["expires_at"])) > utcnow()
+        for item in items
+    )
 
 
 def test_gift_voucher_is_tenant_scoped(conn, factories, cipher) -> None:
