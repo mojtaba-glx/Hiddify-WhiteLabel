@@ -190,7 +190,10 @@ def test_customer_buttons_rename_cancel_and_rotation_confirm_once(monkeypatch, c
         update.callback_query = None
         message.text = 'نام جدید'
         await handlers.unknown_text(update, context)
-        assert 'نام جدید' in message.sent[-1][0]
+        assert message.sent[-1][0].startswith('✅ نام اشتراک تغییر کرد.')
+        assert service.customer_subscription_status(
+            actor, subscription_id=sid, refresh=False
+        )['service_name'] == 'نام جدید'
         await click(update, context, f'shop:subrename:{sid}')
         await click(update, context, f'shop:subrefresh:{sid}')
         assert 'biz_flow' not in context.user_data
