@@ -415,6 +415,19 @@ def _json_dict(value: Any) -> dict[str, Any]:
     return dict(parsed) if isinstance(parsed, dict) else {}
 
 
+def _legacy_comment_value(value: Any, key: str) -> str:
+    wanted = str(key or "").strip().lower()
+    if not wanted:
+        return ""
+    for part in str(value or "").split("|"):
+        if ":" not in part:
+            continue
+        raw_key, raw_value = part.split(":", 1)
+        if raw_key.strip().lower() == wanted:
+            return raw_value.strip()
+    return ""
+
+
 def _iso(value: Any, *, fallback: str) -> str:
     text = str(value or "").strip()
     if not text:
@@ -1385,6 +1398,8 @@ def _build_snapshot(
         external_ref = str(
             primary.get("panel_user_uuid")
             or primary.get("panel_user_id")
+            or primary.get("marzban_username")
+            or _legacy_comment_value(service.get("comment"), "uuid")
             or ""
         ).strip() or None
         row = {
@@ -1438,20 +1453,76 @@ def _build_snapshot(
         )
 
     # ---------- Subscription nodes + panel inventory ----------
+    # SellBot also stores AdminBot-created panel users in userbot_services with
+    # user_id=0. They are not UserBot subscriptions and must not get a fake
+    # customer/order. They do, however, map exactly to WhiteLabel's native
+    # tenant_panel_users + tenant_panel_user_nodes inventory.
+    legacy_services_by_id = {
+        _int(item.get("id"), 0): item
+        for item in legacy.get("userbot_services", [])
+        if _int(item.get("id"), 0) > 0
+    }
+    admin_service_ids = {
+        old_id
+        for old_id, item in legacy_services_by_id.items()
+        if _int(item.get("user_id"), 0) == 0
+    }
     panel_user_map: dict[tuple[int, str], int] = {}
     primary_panel_user: dict[int, int] = {}
-    for old_service, nodes in legacy_nodes_by_service.items():
+    for old_service, service in legacy_services_by_id.items():
         sub_id = service_map.get(old_service)
-        if not sub_id:
+        is_admin_inventory = old_service in admin_service_ids
+        if not sub_id and not is_admin_inventory:
             continue
-        service = next(
-            (
-                item for item in legacy.get("userbot_services", [])
-                if _int(item.get("id"), 0) == old_service
-            ),
-            {},
-        )
+
         old_primary = _int(service.get("server_id"), 0)
+        nodes = list(legacy_nodes_by_service.get(old_service, []))
+        primary_node = next(
+            (
+                node
+                for node in nodes
+                if _int(node.get("server_id"), 0) == old_primary
+            ),
+            None,
+        )
+        comment_ref = _legacy_comment_value(service.get("comment"), "uuid")
+        primary_ref = str(
+            (primary_node or {}).get("panel_user_uuid")
+            or (primary_node or {}).get("panel_user_id")
+            or (primary_node or {}).get("marzban_username")
+            or comment_ref
+            or ""
+        ).strip()
+
+        # Older SellBot admin services can carry the primary UUID only inside
+        # comment=uuid:...|admin:1. Synthesize only the inventory view; the raw
+        # source row remains preserved byte-for-byte in the encrypted asset.
+        if (
+            primary_ref
+            and old_primary > 0
+            and not any(
+                _int(node.get("server_id"), 0) == old_primary
+                and str(
+                    node.get("panel_user_uuid")
+                    or node.get("panel_user_id")
+                    or node.get("marzban_username")
+                    or ""
+                ).strip()
+                for node in nodes
+            )
+        ):
+            nodes.insert(
+                0,
+                {
+                    "server_id": old_primary,
+                    "panel_user_uuid": primary_ref,
+                    "is_active": 1,
+                    "usage_current": service.get("usage_current"),
+                    "days_left": service.get("days_left"),
+                    "created_at": backup_time,
+                },
+            )
+
         seen_server: set[int] = set()
         for node in nodes:
             old_server = _int(node.get("server_id"), 0)
@@ -1463,6 +1534,7 @@ def _build_snapshot(
                 node.get("panel_user_uuid")
                 or node.get("panel_user_id")
                 or node.get("marzban_username")
+                or (primary_ref if old_server == old_primary else "")
                 or ""
             ).strip()
             if not ref:
@@ -1478,33 +1550,42 @@ def _build_snapshot(
                 else "active"
             )
             usage = max(
-                0, int(_float(node.get("usage_current"), 0) * 1024**3)
+                0,
+                int(
+                    _float(
+                        node.get("usage_current"),
+                        _float(service.get("usage_current"), 0),
+                    )
+                    * 1024**3
+                ),
             )
-            tables["tenant_subscription_nodes"].append(
-                _fit_row(
-                    conn,
-                    "tenant_subscription_nodes",
-                    {
-                        "id": ids.one("tenant_subscription_nodes"),
-                        "tenant_id": tid,
-                        "subscription_id": sub_id,
-                        "server_id": new_server,
-                        "external_ref": ref,
-                        "is_primary": is_primary,
-                        "status": status,
-                        "usage_bytes": usage,
-                        "usage_offset_bytes": 0,
-                        "last_online": (
-                            _iso(service.get("last_online"), fallback=backup_time)
-                            if is_primary and str(service.get("last_online") or "").strip()
-                            else None
-                        ),
-                        "last_error": None,
-                        "created_at": _iso(node.get("created_at"), fallback=backup_time),
-                        "updated_at": now,
-                    },
+
+            if sub_id:
+                tables["tenant_subscription_nodes"].append(
+                    _fit_row(
+                        conn,
+                        "tenant_subscription_nodes",
+                        {
+                            "id": ids.one("tenant_subscription_nodes"),
+                            "tenant_id": tid,
+                            "subscription_id": sub_id,
+                            "server_id": new_server,
+                            "external_ref": ref,
+                            "is_primary": is_primary,
+                            "status": status,
+                            "usage_bytes": usage,
+                            "usage_offset_bytes": 0,
+                            "last_online": (
+                                _iso(service.get("last_online"), fallback=backup_time)
+                                if is_primary and str(service.get("last_online") or "").strip()
+                                else None
+                            ),
+                            "last_error": None,
+                            "created_at": _iso(node.get("created_at"), fallback=backup_time),
+                            "updated_at": now,
+                        },
+                    )
                 )
-            )
 
             key = (new_server, ref)
             if key not in panel_user_map:
@@ -1514,14 +1595,22 @@ def _build_snapshot(
                     1,
                     int(max(0.001, _float(service.get("usage_limit"), 1)) * 1024**3),
                 )
-                expires_at = next(
-                    (
-                        row["expires_at"]
-                        for row in tables["tenant_subscriptions"]
-                        if int(row["id"]) == int(sub_id)
-                    ),
-                    backup_time,
-                )
+                if sub_id:
+                    expires_at = next(
+                        (
+                            row["expires_at"]
+                            for row in tables["tenant_subscriptions"]
+                            if int(row["id"]) == int(sub_id)
+                        ),
+                        backup_time,
+                    )
+                else:
+                    days_left = _int(service.get("days_left"), -1)
+                    expires_at = (
+                        iso_utc(backup_dt + timedelta(days=days_left))
+                        if days_left >= 0
+                        else _iso(service.get("expired_at"), fallback=backup_time)
+                    )
                 tables["tenant_panel_users"].append(
                     _fit_row(
                         conn,
@@ -1544,7 +1633,10 @@ def _build_snapshot(
                             "active": 1 if active else 0,
                             "state": "deleted" if deleted else "active",
                             "extra_json": json.dumps(
-                                {"legacy_service_id": old_service},
+                                {
+                                    "legacy_service_id": old_service,
+                                    "legacy_admin_inventory": bool(is_admin_inventory),
+                                },
                                 separators=(",", ":"),
                             ),
                             "last_synced_at": now,
@@ -1554,20 +1646,12 @@ def _build_snapshot(
             if is_primary:
                 primary_panel_user[old_service] = panel_user_map[key]
 
-    for old_service, nodes in legacy_nodes_by_service.items():
+    for old_service, service in legacy_services_by_id.items():
         source_user = primary_panel_user.get(old_service)
         if not source_user:
             continue
-        old_primary = 0
-        service = next(
-            (
-                item for item in legacy.get("userbot_services", [])
-                if _int(item.get("id"), 0) == old_service
-            ),
-            {},
-        )
         old_primary = _int(service.get("server_id"), 0)
-        for node in nodes:
+        for node in legacy_nodes_by_service.get(old_service, []):
             old_server = _int(node.get("server_id"), 0)
             if old_server == old_primary:
                 continue
@@ -1596,6 +1680,16 @@ def _build_snapshot(
                     },
                 )
             )
+
+    admin_services_mapped = len(admin_service_ids.intersection(primary_panel_user))
+    admin_services_unmapped = len(admin_service_ids) - admin_services_mapped
+    counts["admin_services"] = admin_services_mapped
+    counts["services"] = len(service_map) + admin_services_mapped
+    if admin_services_unmapped:
+        warnings.append(
+            f"{admin_services_unmapped} سرویس ادمینی SellBot شناسه/سرور قابل تبدیل نداشت؛ "
+            "نسخه خام آن‌ها به‌صورت رمزنگاری‌شده حفظ شد."
+        )
 
     # ---------- Tickets ----------
     ticket_map: dict[int, int] = {}

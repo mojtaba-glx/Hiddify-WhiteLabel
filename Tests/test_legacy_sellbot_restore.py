@@ -47,7 +47,7 @@ def _sqlite_bytes(script: str, inserts: list[tuple[str, tuple]]) -> bytes:
             pass
 
 
-def _legacy_main_db() -> bytes:
+def _legacy_main_db(*, include_admin_service: bool = False) -> bytes:
     script = """
     CREATE TABLE userbot_users (
       id INTEGER PRIMARY KEY, telegram_id INTEGER, username TEXT, full_name TEXT,
@@ -165,6 +165,21 @@ def _legacy_main_db() -> bytes:
       ("INSERT INTO userbot_settings VALUES (?,?)",
        ("managed_sub_base_url", "https://sub.example")),
     ]
+    if include_admin_service:
+        rows.extend([
+          ("INSERT INTO userbot_services VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+           (11, 0, "admin-inventory", 1, "Main Germany",
+            1.25, 20.0, 12, "2026-09-30 21:00:00",
+            "uuid:admin-main-ref|admin:1", "")),
+          ("INSERT INTO userbot_service_nodes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+           (3, 11, 1, "Main Germany", "admin-main-ref", "", 1,
+            "2026-09-11 12:05:00", "2026-10-01 00:00:00", "",
+            1.25, 12, 0, 0, "2026-10-01 00:00:00", 0, "", "")),
+          ("INSERT INTO userbot_service_nodes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+           (4, 11, 2, "France Node", "admin-node-ref", "", 1,
+            "2026-09-11 12:05:00", "2026-10-01 00:00:00", "",
+            1.25, 12, 0, 1, "2026-10-01 00:00:00", 0, "", "")),
+        ])
     return _sqlite_bytes(script, rows)
 
 
@@ -175,7 +190,11 @@ def _simple_db(table: str) -> bytes:
     )
 
 
-def _sellbot_zip(*, tamper_manifest: bool = False) -> bytes:
+def _sellbot_zip(
+    *,
+    tamper_manifest: bool = False,
+    include_admin_service: bool = False,
+) -> bytes:
     servers = {
       "servers": [
         {
@@ -217,7 +236,9 @@ def _sellbot_zip(*, tamper_manifest: bool = False) -> bytes:
       }
     }
     files = {
-      "Shared/hiddify_sellbot.db": _legacy_main_db(),
+      "Shared/hiddify_sellbot.db": _legacy_main_db(
+          include_admin_service=include_admin_service
+      ),
       "Shared/servers.json": json.dumps(servers, ensure_ascii=False).encode(),
       "Shared/plans.json": json.dumps(plans, ensure_ascii=False).encode(),
       "Shared/agency.db": _simple_db("agent_users"),
@@ -431,6 +452,50 @@ def test_sellbot_restore_is_tenant_scoped_operational_and_lossless(
         "SELECT COUNT(*) AS n FROM tenant_referrals WHERE tenant_id=?",
         (int(tenant["id"]),),
     ).fetchone()["n"] == 1
+
+
+def test_admin_sellbot_service_becomes_native_panel_inventory_without_fake_customer(
+    conn, factories, cipher
+) -> None:
+    tenant, _business, *_ = _service(conn, factories, cipher)
+    report = restore_sellbot_backup(
+        conn,
+        tenant_id=int(tenant["id"]),
+        owner_telegram_id=int(tenant["owner_telegram_id"]),
+        cipher=cipher,
+        data=_sellbot_zip(include_admin_service=True),
+    )
+
+    # One customer-owned subscription + one SellBot AdminBot inventory service.
+    assert report.services == 2
+    assert conn.execute(
+        "SELECT COUNT(*) FROM tenant_customers WHERE tenant_id=?",
+        (int(tenant["id"]),),
+    ).fetchone()[0] == 2
+    assert conn.execute(
+        "SELECT COUNT(*) FROM tenant_subscriptions WHERE tenant_id=?",
+        (int(tenant["id"]),),
+    ).fetchone()[0] == 1
+
+    primary = conn.execute(
+        "SELECT id,extra_json FROM tenant_panel_users "
+        "WHERE tenant_id=? AND external_ref='admin-main-ref'",
+        (int(tenant["id"]),),
+    ).fetchone()
+    assert primary is not None
+    assert json.loads(primary["extra_json"])["legacy_admin_inventory"] is True
+
+    replica = conn.execute(
+        "SELECT n.external_ref,n.fail_count,s.label "
+        "FROM tenant_panel_user_nodes n "
+        "JOIN tenant_servers s ON s.id=n.server_id "
+        "WHERE n.tenant_id=? AND n.source_user_id=?",
+        (int(tenant["id"]), int(primary["id"])),
+    ).fetchone()
+    assert (replica["external_ref"], replica["label"]) == (
+        "admin-node-ref", "France Node"
+    )
+    assert int(replica["fail_count"]) == 1
 
 
 def test_tampered_sellbot_manifest_fails_before_current_tenant_mutation(
