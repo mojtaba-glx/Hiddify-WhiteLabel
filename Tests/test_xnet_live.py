@@ -162,6 +162,7 @@ def test_xnet_live_create_renew_toggle_usage_delete_and_link() -> None:
 
     inventory=adapter.list_users(target=_target(),secret="api-token")
     assert len(inventory)==1 and inventory[0]['external_ref']==created.external_ref
+    assert inventory[0]['online'] is True
     adapter.update_user(target=_target(),secret="api-token",external_ref=created.external_ref,
                         changes={'name':'Native alias','comment':'Operator note','traffic_bytes':25*1024**3})
     current=adapter.get_user(target=_target(),secret="api-token",external_ref=created.external_ref)

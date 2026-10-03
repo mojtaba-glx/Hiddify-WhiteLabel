@@ -643,6 +643,7 @@ class XnetPanelAdapter:
             if expiry is not None
             else None,
             last_online=last_online,
+            online=is_online,
             subscription_url=self.subscription_link(
                 target=session.target, external_ref=ref
             ),

@@ -775,6 +775,7 @@ class XuiPanelAdapter:
             traffic_bytes=max(0, _safe_int(chosen.get("totalGB"))),
             expires_at=_expiry_iso(chosen.get("expiryTime")),
             last_online=last_online,
+            online=is_online,
             subscription_url=self.subscription_link(
                 target=session.target, external_ref=ref
             ),

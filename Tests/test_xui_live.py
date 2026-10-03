@@ -158,6 +158,7 @@ def test_sanaei_create_renew_state_usage_delete_and_native_link() -> None:
 
     inventory=adapter.list_users(target=_sanaei_target(),secret="sanaei-token")
     assert len(inventory)==1 and inventory[0]['external_ref']==created.external_ref
+    assert inventory[0]['online'] is True
     adapter.update_user(target=_sanaei_target(),secret="sanaei-token",external_ref=created.external_ref,
                         changes={'name':'Friendly native name','comment':'Operator note','traffic_bytes':25*1024**3})
     current=adapter.get_user(target=_sanaei_target(),secret="sanaei-token",external_ref=created.external_ref)
