@@ -6766,6 +6766,225 @@ class TenantBusinessService:
             raise TenantBusinessError("receipt not found")
         return dict(row)
 
+    def _payment_rows(
+        self, *, customer_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        customer_filter = ""
+        args_order: list[Any] = [self.tenant_id]
+        args_topup: list[Any] = [self.tenant_id]
+        args_wallet: list[Any] = [self.tenant_id]
+        if customer_id is not None:
+            customer_filter = " AND c.id=?"
+            args_order.append(int(customer_id))
+            args_topup.append(int(customer_id))
+            args_wallet.append(int(customer_id))
+
+        order_rows = self.conn.execute(
+            "SELECT r.id, r.order_id AS subject_id, r.payment_method_id, "
+            "r.reference, r.telegram_file_id, r.status, r.reviewed_by, "
+            "r.review_note, r.provider_event_id, r.created_at, r.reviewed_at, "
+            "o.amount, o.currency, o.customer_id, o.order_kind AS operation, "
+            "o.status AS subject_status, c.display_name, c.username, "
+            "c.telegram_user_id, m.kind AS payment_kind, m.title AS payment_title, "
+            "m.provider_key, m.network, m.destination "
+            "FROM tenant_receipts r "
+            "JOIN tenant_orders o ON o.id=r.order_id AND o.tenant_id=r.tenant_id "
+            "JOIN tenant_customers c ON c.id=o.customer_id AND c.tenant_id=o.tenant_id "
+            "JOIN tenant_payment_methods m ON m.id=r.payment_method_id "
+            "AND m.tenant_id=r.tenant_id "
+            "WHERE r.tenant_id=?" + customer_filter + " ORDER BY r.id DESC LIMIT 400",
+            tuple(args_order),
+        ).fetchall()
+
+        topup_rows = self.conn.execute(
+            "SELECT r.id, r.topup_id AS subject_id, r.payment_method_id, "
+            "r.reference, r.telegram_file_id, r.status, r.reviewed_by, "
+            "r.review_note, r.provider_event_id, r.created_at, r.reviewed_at, "
+            "w.amount, w.currency, w.customer_id, 'wallet_topup' AS operation, "
+            "w.status AS subject_status, c.display_name, c.username, "
+            "c.telegram_user_id, m.kind AS payment_kind, m.title AS payment_title, "
+            "m.provider_key, m.network, m.destination "
+            "FROM tenant_wallet_topup_receipts r "
+            "JOIN tenant_wallet_topups w ON w.id=r.topup_id AND w.tenant_id=r.tenant_id "
+            "JOIN tenant_customers c ON c.id=w.customer_id AND c.tenant_id=w.tenant_id "
+            "JOIN tenant_payment_methods m ON m.id=r.payment_method_id "
+            "AND m.tenant_id=r.tenant_id "
+            "WHERE r.tenant_id=?" + customer_filter + " ORDER BY r.id DESC LIMIT 400",
+            tuple(args_topup),
+        ).fetchall()
+
+        wallet_rows = self.conn.execute(
+            "SELECT o.id, o.id AS subject_id, NULL AS payment_method_id, "
+            "NULL AS reference, NULL AS telegram_file_id, 'approved' AS status, "
+            "NULL AS reviewed_by, '' AS review_note, NULL AS provider_event_id, "
+            "COALESCE(o.paid_at,o.updated_at,o.created_at) AS created_at, "
+            "o.paid_at AS reviewed_at, o.wallet_amount AS amount, o.currency, "
+            "o.customer_id, o.order_kind AS operation, o.status AS subject_status, "
+            "c.display_name, c.username, c.telegram_user_id, 'wallet' AS payment_kind, "
+            "'کیف پول' AS payment_title, 'wallet' AS provider_key, "
+            "NULL AS network, NULL AS destination "
+            "FROM tenant_orders o "
+            "JOIN tenant_customers c ON c.id=o.customer_id AND c.tenant_id=o.tenant_id "
+            "WHERE o.tenant_id=? AND o.wallet_amount>0 "
+            "AND o.status IN ('paid','fulfilled')" + customer_filter
+            + " ORDER BY o.id DESC LIMIT 400",
+            tuple(args_wallet),
+        ).fetchall()
+
+        items: list[dict[str, Any]] = []
+        for source, rows in (
+            ("order", order_rows),
+            ("wallet_topup", topup_rows),
+            ("wallet_order", wallet_rows),
+        ):
+            for row in rows:
+                item = dict(row)
+                item["source"] = source
+                item["payment_key"] = f"{source}:{int(item['id'])}"
+                if source == "wallet_order":
+                    item["provider_title"] = "کیف پول"
+                    item["provider_icon"] = "💰"
+                else:
+                    view = payment_method_view(
+                        {
+                            "kind": item.get("payment_kind"),
+                            "provider_key": item.get("provider_key"),
+                        }
+                    )
+                    item["provider_key"] = view["provider_key"]
+                    item["provider_title"] = view["provider_title"]
+                    item["provider_icon"] = view["provider_icon"]
+                items.append(item)
+        items.sort(
+            key=lambda item: (
+                str(item.get("created_at") or ""),
+                int(item.get("id") or 0),
+            ),
+            reverse=True,
+        )
+        return items
+
+    def list_payments_admin(
+        self,
+        actor_id: int,
+        *,
+        status: str | None = None,
+        kind: str | None = None,
+        source: str | None = None,
+        provider_key: str | None = None,
+        customer_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        items = self._payment_rows(customer_id=customer_id)
+        if status is not None:
+            normalized = str(status or "").strip().lower()
+            if normalized not in ("pending", "approved", "rejected"):
+                raise ValueError("invalid payment status")
+            items = [item for item in items if item.get("status") == normalized]
+        if kind is not None:
+            normalized_kind = str(kind or "").strip().lower()
+            items = [
+                item for item in items
+                if str(item.get("payment_kind") or "").lower() == normalized_kind
+            ]
+        if source is not None:
+            clean_source = str(source or "").strip().lower()
+            items = [item for item in items if item.get("source") == clean_source]
+        if provider_key is not None:
+            clean_provider = str(provider_key or "").strip().lower()
+            items = [
+                item for item in items
+                if str(item.get("provider_key") or "").lower() == clean_provider
+            ]
+        return items[:500]
+
+    def customer_payment_history(self, actor_id: int) -> list[dict[str, Any]]:
+        customer = self._customer(actor_id, active=False)
+        return self._payment_rows(customer_id=int(customer["id"]))[:50]
+
+    @staticmethod
+    def _parse_payment_key(payment_key: str | int) -> tuple[str, int]:
+        raw = str(payment_key or "").strip()
+        if raw.isdigit():
+            return "order", int(raw)
+        if ":" not in raw:
+            raise ValueError("invalid payment key")
+        source, raw_id = raw.split(":", 1)
+        if source not in ("order", "wallet_topup", "wallet_order"):
+            raise ValueError("invalid payment source")
+        payment_id = int(raw_id)
+        if payment_id <= 0:
+            raise ValueError("invalid payment id")
+        return source, payment_id
+
+    def payment_admin(
+        self, actor_id: int, *, payment_key: str | int
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        source, payment_id = self._parse_payment_key(payment_key)
+        key = f"{source}:{payment_id}"
+        item = next(
+            (row for row in self._payment_rows() if row["payment_key"] == key),
+            None,
+        )
+        if item is None:
+            raise TenantBusinessError("payment not found")
+        return item
+
+    def review_payment_admin(
+        self,
+        actor_id: int,
+        *,
+        payment_key: str | int,
+        approve: bool,
+        note: str = "",
+        external_event_id: str | None = None,
+    ) -> dict[str, Any]:
+        self._admin(actor_id)
+        source, payment_id = self._parse_payment_key(payment_key)
+        if source == "order":
+            result = self.review_receipt(
+                actor_id,
+                payment_id,
+                approve=approve,
+                note=note,
+                external_event_id=external_event_id,
+            )
+        elif source == "wallet_topup":
+            result = self.review_wallet_topup_receipt(
+                actor_id,
+                receipt_id=payment_id,
+                approve=approve,
+                note=note,
+                external_event_id=external_event_id,
+            )
+        else:
+            raise TenantBusinessError("wallet payment is already final")
+        result["payment_key"] = f"{source}:{payment_id}"
+        result["source"] = source
+        return result
+
+    def search_payments_admin(
+        self, actor_id: int, query: str
+    ) -> list[dict[str, Any]]:
+        self._admin(actor_id)
+        term = str(query or "").strip().lower().lstrip("#")
+        if not term:
+            return []
+        matches: list[dict[str, Any]] = []
+        for item in self._payment_rows():
+            haystack = " ".join(
+                str(item.get(key) or "")
+                for key in (
+                    "payment_key", "id", "display_name", "username",
+                    "telegram_user_id", "reference", "amount", "payment_title",
+                    "provider_title",
+                )
+            ).lower()
+            if term in haystack:
+                matches.append(item)
+        return matches[:100]
+
     def update_coupon_admin(
         self,
         actor_id: int,
