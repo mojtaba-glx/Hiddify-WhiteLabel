@@ -2730,10 +2730,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     "↩️ اشتراک‌های من", callback_data="shop:subs"
                 )
             ])
+            renew_intro = (
+                str(settings.get("plans_list_text") or "").strip()
+                or "🛒 لطفاً پلن مورد نظر خود را انتخاب کنید:"
+            )
             await update.callback_query.edit_message_text(
-                f"♻️ پلن تمدید اشتراک #{subscription_id} را انتخاب کنید.",
+                f"{renew_intro}\n\n♻️ تمدید اشتراک #{subscription_id}",
                 reply_markup=InlineKeyboardMarkup(rows),
-            ); return
+            )
+            return
         if data.startswith("shop:renewplan:"):
             if not bool(settings.get("enable_renew", True)):
                 raise TenantBusinessError("renewal is disabled")
