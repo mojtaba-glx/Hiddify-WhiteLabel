@@ -121,11 +121,40 @@ def _referral_content(
         "purchase_reward": purchase_reward,
         "referred_count": int(summary.get("referred_count") or 0),
     }
-    referral_template = str(
-        referral_settings.get("referral_invite_text")
-        or DEFAULT_REFERRAL_INVITE_TEXT
-    )
-    intro = _format_text_template(referral_template, **variables).strip()
+
+    # Phase 10 adds an optional referral-specific page text.  When it is not
+    # configured, preserve the Phase 7 invite_info_text + invite_text behavior
+    # exactly so existing tenant customizations remain live.
+    custom_referral_text = str(
+        referral_settings.get("referral_invite_text") or ""
+    ).strip()
+    if custom_referral_text:
+        intro = _format_text_template(
+            custom_referral_text,
+            **variables,
+        ).strip()
+    else:
+        invite_info_text = _setting_text(
+            settings,
+            "invite_info_text",
+            "🎁 دوستان خود را دعوت کنید و از پاداش‌های فعال بهره‌مند شوید.",
+            **variables,
+        )
+        invite_text = _setting_text(
+            settings,
+            "invite_text",
+            "💌 لینک دعوت شما:\n{invite_link}",
+            **variables,
+        )
+        intro = "\n\n".join(
+            item for item in (invite_info_text, invite_text) if item
+        ).strip()
+        if not intro:
+            intro = _format_text_template(
+                DEFAULT_REFERRAL_INVITE_TEXT,
+                **variables,
+            ).strip()
+
     banner_text = _setting_text(
         settings,
         "invite_banner_text",
