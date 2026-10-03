@@ -16,6 +16,7 @@ from dataclasses import asdict
 import hashlib
 import json
 import os
+import re
 import ssl
 import uuid
 from contextlib import contextmanager
@@ -905,10 +906,10 @@ class XuiPanelAdapter:
                 raise PanelError("X-UI backup is empty")
             disposition = str(response.headers.get("content-disposition") or "")
             filename = ""
-            match = __import__("re").search(
+            match = re.search(
                 r"filename\*?=(?:UTF-8''|\")?([^\";]+)",
                 disposition,
-                flags=__import__("re").IGNORECASE,
+                flags=re.IGNORECASE,
             )
             if match:
                 filename = str(match.group(1) or "").strip().strip("'\"")
