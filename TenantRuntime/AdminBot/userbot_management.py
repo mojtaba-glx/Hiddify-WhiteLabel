@@ -978,7 +978,12 @@ def _ticket_thread_admin_text(
         lines.append("")
     if not messages:
         lines.append("پیامی ثبت نشده است.")
-    return "\n".join(lines).strip()
+    result = "\n".join(lines).strip()
+    if len(result) > 3800:
+        header = "\n".join(lines[:7]).strip()
+        tail_size = max(500, 3800 - len(header) - 16)
+        result = header + "\n\n…\n" + result[-tail_size:]
+    return result
 
 
 def ticket_reply_skip_cancel_keyboard() -> InlineKeyboardMarkup:
@@ -4205,14 +4210,14 @@ async def handle_media(
             await context.bot.send_photo(
                 chat_id=message.chat_id,
                 photo=file_id,
-                caption=preview,
-                reply_markup=ticket_reply_confirm_keyboard(),
+                caption="🖼 پیش‌نمایش تصویر پاسخ تیکت",
             )
         except Exception:
-            await message.reply_text(
-                preview,
-                reply_markup=ticket_reply_confirm_keyboard(),
-            )
+            pass
+        await message.reply_text(
+            preview,
+            reply_markup=ticket_reply_confirm_keyboard(),
+        )
         return True
 
     if kind=="broadcast" and str(flow.get("step") or "")=="wait_photo":
