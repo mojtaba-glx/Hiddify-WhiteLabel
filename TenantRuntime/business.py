@@ -5977,8 +5977,12 @@ class TenantBusinessService:
         self._admin(actor_id)
         now = iso_utc(utcnow())
         row = self.conn.execute(
-            "SELECT COUNT(*) FROM tenant_customers "
-            "WHERE tenant_id=? AND trial_used_at IS NOT NULL",
+            "SELECT COUNT(*) FROM tenant_customers c "
+            "WHERE c.tenant_id=? AND ("
+            "c.trial_used_at IS NOT NULL OR EXISTS ("
+            "SELECT 1 FROM tenant_trial_claims tc "
+            "WHERE tc.tenant_id=c.tenant_id AND tc.customer_id=c.id"
+            "))",
             (self.tenant_id,),
         ).fetchone()
         affected = int(row[0] or 0) if row is not None else 0
