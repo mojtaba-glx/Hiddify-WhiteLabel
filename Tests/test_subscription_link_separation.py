@@ -39,6 +39,11 @@ def _service(conn, factories, cipher):
         endpoint="https://panel.example",
         user_path="user",
     )
+    service.set_panel_credential(
+        7001,
+        server_id=int(server["id"]),
+        secret="panel-key",
+    )
     plan = service.add_plan(
         7001,
         name="50G",
