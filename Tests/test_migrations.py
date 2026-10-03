@@ -27,7 +27,8 @@ EXPECTED_TABLES = {
     "tenant_tickets", "tenant_smart_links",
     "tenant_panel_credentials", "tenant_plan_categories",
     "tenant_referral_manual_rewards", "tenant_payment_events",
-    "tenant_payment_receipt_media", "tenant_ticket_messages",
+    "tenant_payment_receipt_media", "tenant_subscription_rotations",
+    "tenant_ticket_messages",
 }
 
 
@@ -63,8 +64,9 @@ def test_migration_is_idempotent(db_path) -> None:
     assert "0023_trial_reminder_lifecycle" in versions
     assert "0024_referral_phase10" in versions
     assert "0025_server_connection_parity" in versions
-    assert "0027_ticket_phase12" in versions
     assert "0026_payment_phase11" in versions
+    assert "0027_subscription_status" in versions
+    assert "0028_ticket_phase12" in versions
 
 
 def test_foreign_keys_enforced(conn, factories) -> None:
@@ -102,8 +104,9 @@ def test_checksums_recorded(db_path) -> None:
     assert len(recorded["0023_trial_reminder_lifecycle"]) == 64
     assert len(recorded["0024_referral_phase10"]) == 64
     assert len(recorded["0025_server_connection_parity"]) == 64
-    assert len(recorded["0027_ticket_phase12"]) == 64
     assert len(recorded["0026_payment_phase11"]) == 64
+    assert len(recorded["0027_subscription_status"]) == 64
+    assert len(recorded["0028_ticket_phase12"]) == 64
 
 
 def test_checksum_mismatch_detected(db_path, tmp_path) -> None:
