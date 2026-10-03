@@ -27,6 +27,7 @@ EXPECTED_TABLES = {
     "tenant_tickets", "tenant_smart_links",
     "tenant_panel_credentials", "tenant_plan_categories",
     "tenant_referral_manual_rewards", "tenant_payment_events",
+    "tenant_payment_receipt_media",
 }
 
 
