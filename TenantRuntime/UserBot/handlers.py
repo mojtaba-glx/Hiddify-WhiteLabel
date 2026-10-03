@@ -44,6 +44,117 @@ def _money_lines(items: list[dict]) -> list[str]:
     ]
 
 
+def _format_text_template(template: object, **kwargs: Any) -> str:
+    """Format admin-managed text without allowing a bad placeholder to break UI."""
+    try:
+        return str(template or "").format(**kwargs)
+    except (KeyError, ValueError, IndexError):
+        return str(template or "")
+
+
+def _setting_text(
+    settings: dict[str, Any],
+    key: str,
+    fallback: str,
+    **kwargs: Any,
+) -> str:
+    raw = str(settings.get(key) or "").strip() or str(fallback)
+    return _format_text_template(raw, **kwargs).strip()
+
+
+def _ticket_panel_body(
+    settings: dict[str, Any],
+    items: list[dict[str, Any]],
+) -> str:
+    intro = _setting_text(
+        settings,
+        "ticket_panel_text",
+        "📩 برای ارتباط با پشتیبانی، پیام خود را ارسال کنید.",
+    )
+    history = (
+        "\n".join(
+            f"• #{x['id']} · {x['subject']} · {x['status']}"
+            f"{' · پاسخ داده شد' if x.get('admin_reply') else ''}"
+            for x in items[:15]
+        )
+        or "تیکتی ندارید."
+    )
+    return f"{intro}\n\n{history}".strip()
+
+
+def _referral_content(
+    business: Any,
+    actor: int,
+    context: ContextTypes.DEFAULT_TYPE,
+    settings: dict[str, Any],
+) -> dict[str, Any]:
+    summary = business.referral_summary(actor)
+    referral_settings = dict(summary.get("settings") or {})
+    bot_username = str(getattr(context.bot, "username", None) or "").strip()
+    code = str(summary.get("referral_code") or "").strip()
+    invite_link = (
+        f"https://t.me/{bot_username}?start=ref_{code}"
+        if bot_username and code
+        else (f"/start ref_{code}" if code else "—")
+    )
+    currency = str(referral_settings.get("referral_currency") or "IRR")
+    trial_amount = int(referral_settings.get("referral_trial_reward") or 0)
+    purchase_amount = int(
+        referral_settings.get("referral_purchase_reward") or 0
+    )
+    trial_reward = f"{trial_amount:,} {currency}"
+    purchase_reward = f"{purchase_amount:,} {currency}"
+
+    variables = {
+        "invite_link": invite_link,
+        "trial_reward": trial_reward,
+        "purchase_reward": purchase_reward,
+        "referred_count": int(summary.get("referred_count") or 0),
+    }
+    intro = _setting_text(
+        settings,
+        "invite_info_text",
+        "🎁 دوستان خود را دعوت کنید و از پاداش‌های فعال بهره‌مند شوید.",
+        **variables,
+    )
+    invite_text = _setting_text(
+        settings,
+        "invite_text",
+        "💌 لینک دعوت شما:\n{invite_link}",
+        **variables,
+    )
+    banner_text = _setting_text(
+        settings,
+        "invite_banner_text",
+        "🎁 بنر دعوت اختصاصی شما\n\n🔗 لینک دعوت شما:\n{invite_link}",
+        **variables,
+    )
+    rewards = list(summary.get("rewards") or [])
+    reward_lines = [
+        f"• {x.get('reward_type')}: {int(x.get('amount') or 0):,} "
+        f"{x.get('currency') or ''} ({int(x.get('count') or 0)} مورد)"
+        for x in rewards
+    ] or ["• هنوز پاداشی ثبت نشده است."]
+    body = "\n".join([
+        intro,
+        "",
+        invite_text,
+        "",
+        f"👥 دعوت موفق ثبت‌شده: {variables['referred_count']}",
+        f"🔥 پاداش تست: {trial_reward}",
+        f"🛒 پاداش اولین خرید: {purchase_reward}",
+        "",
+        "🎁 پاداش‌های دریافت‌شده",
+        *reward_lines,
+    ]).strip()
+    return {
+        "body": body,
+        "banner_text": banner_text,
+        "photo_id": str(settings.get("invite_banner_photo_id") or "").strip(),
+        "invite_link": invite_link,
+    }
+
+
 def _account_status_label(value: object) -> str:
     return {
         "active": "🟢 فعال",
@@ -1172,18 +1283,7 @@ async def _handle_main_reply_action(
 
     if text == BTN_SUPPORT:
         items = business.list_tickets(actor)
-        body = (
-            str(settings.get("ticket_panel_text") or "").strip()
-            or "🎫 تیکت‌های من"
-        )
-        body += "\n" + (
-            "\n".join(
-                f"• #{x['id']} · {x['subject']} · {x['status']}"
-                f"{' · پاسخ داده شد' if x.get('admin_reply') else ''}"
-                for x in items
-            )
-            or "تیکتی ندارید."
-        )
+        body = _ticket_panel_body(settings, items)
         rows = [
             [InlineKeyboardButton(
                 f"🎫 #{x['id']} · {x['subject']}"[:60],
@@ -1230,15 +1330,20 @@ async def _handle_main_reply_action(
             )],
         ]
         await update.effective_message.reply_text(
-            "💡 راهنما\n" + (guide or "انتخاب سیستم عامل ⬇️"),
+            guide or "انتخاب سیستم عامل ⬇️",
             reply_markup=InlineKeyboardMarkup(rows),
+            disable_web_page_preview=True,
         )
         return True
 
     if text == BTN_FAQ:
-        faq = str(settings.get("faq_text") or "").strip()
         await update.effective_message.reply_text(
-            "📕 سوالات متداول\n" + (faq or "متنی تنظیم نشده است.")
+            _setting_text(
+                settings,
+                "faq_text",
+                "❓ سوالات متداول\n\nهنوز متنی تنظیم نشده است.",
+            ),
+            disable_web_page_preview=True,
         )
         return True
 
@@ -1321,14 +1426,16 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             except TenantBusinessError:
                 gift_notice = "\n\n❌ کد هدیه نامعتبر، منقضی یا قبلاً استفاده شده است."
     settings = business.runtime_userbot_settings()
-    custom_welcome = str(settings.get("welcome_message") or "").strip()
-    text = (
-        custom_welcome
-        or (
-            f"👋 به {spec.tenant_name} خوش آمدید.\n\n"
-            "ربات فروشگاهی فعال است.\n"
-            f"تعداد ورود: {visits}"
-        )
+    username = str(getattr(user, "username", None) or "").strip()
+    text = _setting_text(
+        settings,
+        "welcome_message",
+        "سلام {full_name} عزیز 👋\nبه ربات ما خوش آمدید.",
+        full_name=str(getattr(user, "full_name", None) or "کاربر"),
+        username=f"@{username}" if username else "",
+        id=user_id,
+        tenant_name=spec.tenant_name,
+        visits=visits,
     ) + gift_notice
     keyboard = _main_keyboard(spec, business)
     if update.callback_query:
