@@ -1380,6 +1380,43 @@ def _purchase_server_rows(
     )
 
 
+def _trial_server_rows(
+    servers: list[dict[str, Any]],
+    settings: dict[str, Any],
+) -> list[list[TelegramInlineKeyboardButton]]:
+    """SellBot-style location chooser dedicated to free-trial provisioning."""
+    items = list(servers)
+    if bool(settings.get("shuffle_server_layout", True)) and len(items) > 1:
+        random.shuffle(items)
+    buttons = [
+        _button(
+            str(server.get("label") or f"سرور #{server['id']}"),
+            callback_data=f"shop:trialserver:{int(server['id'])}",
+            settings=settings,
+        )
+        for server in items
+    ]
+    return _column_rows(
+        buttons,
+        int(settings.get("server_columns") or 1),
+    )
+
+
+def _trial_state_message(state: dict[str, Any]) -> str:
+    if not bool(state.get("enabled")):
+        return "🚫 دریافت تست رایگان در حال حاضر غیرفعال است."
+    if bool(state.get("used")):
+        return "🚫 شما قبلا اکانت تست رایگان خود را دریافت نموده‌اید!"
+    return ""
+
+
+def _trial_location_text(settings: dict[str, Any]) -> str:
+    return (
+        str(settings.get("servers_list_text") or "").strip()
+        or "📡 لیست سرورها\nلطفاً لوکیشن مورد نظر خود را انتخاب کنید:"
+    )
+
+
 BTN_STATUS = "📊وضعیت اشتراک"
 BTN_RENEW = "♾تمدید اشتراک"
 BTN_BUY = "💳خرید اشتراک"
@@ -1523,27 +1560,28 @@ async def _handle_main_reply_action(
         return True
 
     if text == BTN_TRIAL:
-        growth = business._ensure_growth_settings()
-        if not bool(growth.get("trial_enabled")):
-            raise TenantBusinessError("free trial is disabled")
-        result = business.claim_free_trial(actor)
+        state = business.free_trial_state(actor)
+        unavailable = _trial_state_message(state)
+        if unavailable:
+            await update.effective_message.reply_text(
+                unavailable,
+                reply_markup=_main_keyboard(spec, business),
+            )
+            return True
+        servers = business.list_purchase_servers()
+        if not servers:
+            await update.effective_message.reply_text(
+                "❌ سروری برای ارائه تست رایگان در دسترس نیست.",
+                reply_markup=_main_keyboard(spec, business),
+            )
+            return True
+        rows = _trial_server_rows(servers, settings)
+        rows.append([
+            InlineKeyboardButton("بازگشت", callback_data="runtime:home")
+        ])
         await update.effective_message.reply_text(
-            _trial_delivery_text(
-                business,
-                actor,
-                result,
-                settings,
-                announce_enabled=bool(
-                    growth.get("trial_announce_enabled", True)
-                ),
-            ),
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    "📦 اشتراک‌های من",
-                    callback_data="shop:subs",
-                )
-            ]]),
-            disable_web_page_preview=True,
+            _trial_location_text(settings),
+            reply_markup=InlineKeyboardMarkup(rows),
         )
         return True
 
@@ -2336,25 +2374,78 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
         if data == "shop:trial":
-            growth = business._ensure_growth_settings()
-            if not bool(growth.get("trial_enabled")):
-                raise TenantBusinessError("free trial is disabled")
-            result = business.claim_free_trial(actor)
+            state = business.free_trial_state(actor)
+            unavailable = _trial_state_message(state)
+            if unavailable:
+                await update.callback_query.edit_message_text(
+                    unavailable,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("↩️ منو", callback_data="runtime:home")
+                    ]]),
+                )
+                return
+            servers = business.list_purchase_servers()
+            if not servers:
+                await update.callback_query.edit_message_text(
+                    "❌ سروری برای ارائه تست رایگان در دسترس نیست.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("↩️ منو", callback_data="runtime:home")
+                    ]]),
+                )
+                return
+            rows = _trial_server_rows(servers, settings)
+            rows.append([
+                InlineKeyboardButton("↩️ منو", callback_data="runtime:home")
+            ])
             await update.callback_query.edit_message_text(
-                _trial_delivery_text(
-                    business,
-                    actor,
-                    result,
-                    settings,
-                    announce_enabled=bool(
-                        growth.get("trial_announce_enabled", True)
-                    ),
-                ),
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📦 اشتراک‌های من", callback_data="shop:subs")],
-                    [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
-                ]),
-            ); return
+                _trial_location_text(settings),
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+        if data.startswith("shop:trialserver:"):
+            server_id = int(data.rsplit(":", 1)[1])
+            state = business.free_trial_state(actor)
+            unavailable = _trial_state_message(state)
+            if unavailable:
+                context.user_data.pop("biz_flow", None)
+                await update.callback_query.edit_message_text(
+                    unavailable,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("↩️ منو", callback_data="runtime:home")
+                    ]]),
+                )
+                return
+            servers = business.list_purchase_servers()
+            selected = next(
+                (item for item in servers if int(item["id"]) == server_id),
+                None,
+            )
+            if selected is None:
+                await update.callback_query.answer(
+                    "این سرور برای تست در دسترس نیست.",
+                    show_alert=True,
+                )
+                return
+            context.user_data["biz_flow"] = {
+                "kind": "trial_service_name",
+                "server_id": server_id,
+            }
+            await update.callback_query.edit_message_text(
+                "⬇️ لطفا نام خود را ارسال کنید:",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌لغو", callback_data="shop:trialcancel")
+                ]]),
+            )
+            return
+        if data == "shop:trialcancel":
+            context.user_data.pop("biz_flow", None)
+            await update.callback_query.edit_message_text(
+                "عملیات لغو شد.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("↩️ منو", callback_data="runtime:home")
+                ]]),
+            )
+            return
         if data == "shop:buy":
             if not bool(settings.get("enable_buy", True)):
                 raise TenantBusinessError("purchase is disabled")
@@ -3582,6 +3673,82 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if isinstance(flow, dict):
             fields = [part.strip() for part in text.split("|")]
             kind = flow.get("kind")
+            if kind == "trial_service_name":
+                if text in {"لغو", "/cancel", "بازگشت", "❌لغو", "🔙بازگشت"}:
+                    context.user_data.pop("biz_flow", None)
+                    await update.effective_message.reply_text(
+                        "عملیات لغو شد.",
+                        reply_markup=_main_keyboard(spec, business),
+                    )
+                    return
+                service_name = text.strip()
+                if not service_name:
+                    await update.effective_message.reply_text(
+                        "❌ لطفاً نام خود را ارسال کنید:"
+                    )
+                    return
+                state = business.free_trial_state(actor)
+                unavailable = _trial_state_message(state)
+                if unavailable:
+                    context.user_data.pop("biz_flow", None)
+                    await update.effective_message.reply_text(
+                        unavailable,
+                        reply_markup=_main_keyboard(spec, business),
+                    )
+                    return
+                try:
+                    result = business.claim_free_trial(
+                        actor,
+                        server_id=int(flow["server_id"]),
+                        service_name=service_name,
+                    )
+                except TenantBusinessError as exc:
+                    message = str(exc)
+                    if "already used" in message:
+                        context.user_data.pop("biz_flow", None)
+                        await update.effective_message.reply_text(
+                            "🚫 شما قبلا اکانت تست رایگان خود را دریافت نموده‌اید!",
+                            reply_markup=_main_keyboard(spec, business),
+                        )
+                        return
+                    if "disabled" in message:
+                        context.user_data.pop("biz_flow", None)
+                        await update.effective_message.reply_text(
+                            "🚫 دریافت تست رایگان در حال حاضر غیرفعال است.",
+                            reply_markup=_main_keyboard(spec, business),
+                        )
+                        return
+                    await update.effective_message.reply_text(
+                        "❌ ساخت اکانت تست رایگان انجام نشد. "
+                        "لطفاً وضعیت سرور را بررسی کرده و دوباره تلاش کنید.",
+                        reply_markup=_main_keyboard(spec, business),
+                    )
+                    return
+                context.user_data.pop("biz_flow", None)
+                fresh_state = business.free_trial_state(actor)
+                await update.effective_message.reply_text(
+                    _trial_delivery_text(
+                        business,
+                        actor,
+                        result,
+                        settings,
+                        announce_enabled=bool(
+                            fresh_state.get("announce_enabled", True)
+                        ),
+                    ),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "📦 اشتراک‌های من",
+                            callback_data="shop:subs",
+                        )],
+                        [InlineKeyboardButton(
+                            "↩️ منو",
+                            callback_data="runtime:home",
+                        )],
+                    ]),
+                    disable_web_page_preview=True,
+                )
+                return
             if kind == "subscription_rename":
                 sid = int(flow["subscription_id"])
                 if text in {"لغو", "/cancel", "بازگشت", "🔙بازگشت"}:

@@ -63,8 +63,8 @@ def test_userbot_trial_enable_and_announce_are_enforced_in_runtime() -> None:
         "TenantRuntime/UserBot/handlers.py",
         encoding="utf-8",
     ).read()
-    assert 'growth.get("trial_enabled")' in source
-    assert 'growth.get("trial_announce_enabled", True)' in source
+    assert "free_trial_state" in source
+    assert 'fresh_state.get("announce_enabled", True)' in source
     assert "_trial_delivery_text(" in source
 
 

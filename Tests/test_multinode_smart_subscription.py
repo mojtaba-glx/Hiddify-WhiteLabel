@@ -488,3 +488,131 @@ def test_admin_panel_user_smart_link_aggregates_primary_and_node_configs(
     encoded = aggregator.build(str(link["code"]), base64_output=True)
     decoded = base64.b64decode(encoded.body).decode()
     assert decoded == result.body
+
+
+def test_free_trial_uses_selected_server_name_and_does_not_require_default(
+    conn, factories, cipher
+) -> None:
+    owner = 7001
+    customer = 7101
+    tenant = factories.tenant(owner_telegram_id=owner)
+    panel = MultiPanel()
+    service = TenantBusinessService(
+        conn,
+        tenant_id=int(tenant["id"]),
+        owner_telegram_id=owner,
+        secret_cipher=cipher,
+        panel_adapter=panel,
+    )
+    primary = service.add_server(
+        owner,
+        label="Turkey",
+        panel_kind="hiddify",
+        endpoint="https://trial-tr.example",
+        admin_path="admin",
+        user_path="user",
+    )
+    child = service.add_server(
+        owner,
+        label="Germany",
+        panel_kind="hiddify",
+        endpoint="https://trial-de.example",
+        admin_path="admin",
+        user_path="user",
+    )
+    service.set_panel_credential(
+        owner, server_id=int(primary["id"]), secret="trial-primary-secret"
+    )
+    service.set_panel_credential(
+        owner, server_id=int(child["id"]), secret="trial-child-secret"
+    )
+    service.add_node(
+        owner,
+        label="Germany",
+        server_id=int(child["id"]),
+        parent_server_id=int(primary["id"]),
+        location="DE",
+    )
+    service.register_customer(
+        customer, display_name="Trial Buyer", username="trial_buyer"
+    )
+
+    # A real prior purchase must not make the free-trial button fail: SellBot
+    # gates the trial by its one-time trial flag, not by purchase history.
+    paid_plan = service.add_plan(
+        owner,
+        name="Paid 5",
+        traffic_gb=5,
+        duration_days=30,
+        price=100000,
+        currency="IRR",
+    )
+    method = service.add_payment_method(
+        owner,
+        kind="card",
+        title="Card",
+        currency="IRR",
+        destination="1111",
+    )
+    order = service.create_order(
+        customer,
+        int(paid_plan["id"]),
+        server_id=int(primary["id"]),
+    )
+    receipt = service.submit_receipt(
+        customer,
+        order_id=int(order["id"]),
+        method_id=int(method["id"]),
+        reference="paid-before-trial",
+    )
+    approved = service.review_receipt(owner, int(receipt["id"]), approve=True)
+    service.fulfill_paid_order(owner, order_id=int(approved["order_id"]))
+
+    # Deliberately keep both servers non-default. The selected trial location
+    # must be enough to provision successfully.
+    service.update_growth_settings(
+        owner,
+        trial_enabled=True,
+        trial_traffic_gb=1,
+        trial_duration_days=1,
+    )
+    state = service.free_trial_state(customer)
+    assert state["enabled"] is True
+    assert state["used"] is False
+
+    result = service.claim_free_trial(
+        customer,
+        server_id=int(primary["id"]),
+        service_name="تستی",
+    )
+    assert result["status"] == "active"
+    assert result["selected_server_id"] == int(primary["id"])
+    assert result["service_name"] == "تستی"
+
+    trial_order = conn.execute(
+        "SELECT selected_server_id,status FROM tenant_orders "
+        "WHERE tenant_id=? AND customer_id=? AND order_kind='trial'",
+        (int(tenant["id"]), int(service._customer(customer)["id"])),
+    ).fetchone()
+    assert int(trial_order["selected_server_id"]) == int(primary["id"])
+    assert trial_order["status"] == "fulfilled"
+
+    trial_sub = conn.execute(
+        "SELECT service_name,status,server_id FROM tenant_subscriptions "
+        "WHERE tenant_id=? AND order_id=?",
+        (int(tenant["id"]), int(result["order_id"])),
+    ).fetchone()
+    assert trial_sub["service_name"] == "تستی"
+    assert trial_sub["status"] == "active"
+    assert int(trial_sub["server_id"]) == int(primary["id"])
+
+    # Primary + attached node get the same requested service name.
+    trial_calls = [
+        request for _endpoint, request in panel.provision_calls
+        if int(request.subscription_id) == int(result["id"])
+    ]
+    assert len(trial_calls) == 2
+    assert {request.name for request in trial_calls} == {"تستی"}
+
+    after = service.free_trial_state(customer)
+    assert after["used"] is True

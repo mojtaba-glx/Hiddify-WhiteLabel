@@ -1588,6 +1588,7 @@ class TenantBusinessService:
                             f"tenant:{self.tenant_id}:subscription:"
                             f"{int(subscription_id)}:server:{server_id}"
                         ),
+                        name=str(subscription.get("service_name") or ""),
                     ),
                 )
                 if subscription["status"] == "disabled":
@@ -3394,76 +3395,173 @@ class TenantBusinessService:
         assert row is not None
         return dict(row)
 
-    def claim_free_trial(self, actor_id: int) -> dict[str, Any]:
-        customer = self._customer(actor_id)
+    def free_trial_state(self, actor_id: int) -> dict[str, Any]:
+        """Return SellBot-style free-trial eligibility without creating anything."""
+        customer = self._customer(actor_id, active=False)
         settings = self._ensure_growth_settings()
-        if not bool(settings["trial_enabled"]):
-            raise TenantBusinessError("free trial is disabled")
         existing = self.conn.execute(
             "SELECT * FROM tenant_trial_claims "
             "WHERE tenant_id=? AND customer_id=?",
             (self.tenant_id, int(customer["id"])),
         ).fetchone()
-        if existing is not None:
-            if str(existing["status"]) == "failed":
-                try:
-                    result = self.fulfill_paid_order(
-                        self.owner_telegram_id,
-                        order_id=int(existing["order_id"]),
-                    )
-                except TenantBusinessError:
-                    raise TenantBusinessError("free trial provisioning is still pending")
-                with transaction(self.conn):
-                    now_retry = iso_utc(utcnow())
+        existing_dict = dict(existing) if existing is not None else None
+        used = bool(customer.get("trial_used_at")) or bool(
+            existing_dict and str(existing_dict.get("status") or "") == "issued"
+        )
+        retryable = bool(
+            existing_dict
+            and str(existing_dict.get("status") or "") in ("pending", "failed")
+            and not used
+        )
+        return {
+            "enabled": bool(settings.get("trial_enabled")),
+            "used": used,
+            "retryable": retryable,
+            "customer_id": int(customer["id"]),
+            "claim": existing_dict,
+            "traffic_gb": int(settings.get("trial_traffic_gb") or 1),
+            "duration_days": int(settings.get("trial_duration_days") or 1),
+            "announce_enabled": bool(
+                settings.get("trial_announce_enabled", True)
+            ),
+        }
+
+    def claim_free_trial(
+        self,
+        actor_id: int,
+        *,
+        server_id: int | None = None,
+        service_name: str = "",
+    ) -> dict[str, Any]:
+        """Issue one free trial using the server/name selected in UserBot.
+
+        SellBot lets the customer choose a location and service name before
+        provisioning.  Keeping that selection on the trial order also avoids
+        the old WhiteLabel failure where a multi-server tenant required an
+        unrelated default server.
+        """
+        customer = self._customer(actor_id)
+        settings = self._ensure_growth_settings()
+        if not bool(settings["trial_enabled"]):
+            raise TenantBusinessError("free trial is disabled")
+
+        clean_name = str(service_name or "").strip()
+        if clean_name:
+            if not 1 <= len(clean_name) <= 64 or any(
+                unicodedata.category(char).startswith("C")
+                for char in clean_name
+            ):
+                raise ValueError("invalid free trial service name")
+
+        selected_server_id: int | None = None
+        if server_id is not None:
+            selected = self._purchase_server(int(server_id))
+            selected_server_id = int(selected["id"])
+
+        existing = self.conn.execute(
+            "SELECT * FROM tenant_trial_claims "
+            "WHERE tenant_id=? AND customer_id=?",
+            (self.tenant_id, int(customer["id"])),
+        ).fetchone()
+        existing_dict = dict(existing) if existing is not None else None
+
+        if bool(customer.get("trial_used_at")):
+            raise TenantBusinessError("free trial already used")
+
+        if existing_dict is not None:
+            status = str(existing_dict.get("status") or "")
+            if status not in ("pending", "failed"):
+                raise TenantBusinessError("free trial already used")
+            order_id = int(existing_dict["order_id"])
+            subscription_id = int(existing_dict.get("subscription_id") or 0)
+            now_retry = iso_utc(utcnow())
+            with transaction(self.conn):
+                if selected_server_id is not None:
                     self.conn.execute(
-                        "UPDATE tenant_trial_claims "
-                        "SET status='issued', updated_at=? "
-                        "WHERE id=? AND tenant_id=? AND status='failed'",
-                        (now_retry, int(existing["id"]), self.tenant_id),
-                    )
-                    self.conn.execute(
-                        "UPDATE tenant_customers SET trial_used_at=?, updated_at=? "
-                        "WHERE id=? AND tenant_id=?",
+                        "UPDATE tenant_orders SET selected_server_id=?, updated_at=? "
+                        "WHERE id=? AND tenant_id=? AND status='paid'",
                         (
+                            selected_server_id,
                             now_retry,
-                            now_retry,
-                            int(customer["id"]),
+                            order_id,
                             self.tenant_id,
                         ),
                     )
-                    self._grant_referral_reward_tx(
-                        invitee_customer_id=int(customer["id"]),
-                        reward_type="trial",
+                if clean_name and subscription_id > 0:
+                    self.conn.execute(
+                        "UPDATE tenant_subscriptions SET service_name=?, updated_at=? "
+                        "WHERE id=? AND tenant_id=? "
+                        "AND status='pending_provisioning'",
+                        (
+                            clean_name,
+                            now_retry,
+                            subscription_id,
+                            self.tenant_id,
+                        ),
                     )
-                result.update(
-                    {
-                        "order_kind": "trial",
-                        "order_id": int(existing["order_id"]),
-                    }
+            try:
+                result = self.fulfill_paid_order(
+                    self.owner_telegram_id,
+                    order_id=order_id,
                 )
-                return result
-            raise TenantBusinessError("free trial already used")
-        paid = self.conn.execute(
-            "SELECT 1 FROM tenant_orders WHERE tenant_id=? AND customer_id=? "
-            "AND order_kind IN ('purchase','renewal') "
-            "AND status IN ('paid','fulfilled') LIMIT 1",
-            (self.tenant_id, int(customer["id"])),
-        ).fetchone()
-        if paid is not None:
-            raise TenantBusinessError("free trial is only for new customers")
+            except TenantBusinessError as exc:
+                with transaction(self.conn):
+                    self.conn.execute(
+                        "UPDATE tenant_trial_claims "
+                        "SET status='failed', updated_at=? "
+                        "WHERE id=? AND tenant_id=?",
+                        (iso_utc(utcnow()), int(existing_dict["id"]), self.tenant_id),
+                    )
+                raise TenantBusinessError(
+                    "free trial provisioning is still pending"
+                ) from exc
+            with transaction(self.conn):
+                now_done = iso_utc(utcnow())
+                self.conn.execute(
+                    "UPDATE tenant_trial_claims "
+                    "SET status='issued', updated_at=? "
+                    "WHERE id=? AND tenant_id=?",
+                    (now_done, int(existing_dict["id"]), self.tenant_id),
+                )
+                self.conn.execute(
+                    "UPDATE tenant_customers SET trial_used_at=?, updated_at=? "
+                    "WHERE id=? AND tenant_id=?",
+                    (
+                        now_done,
+                        now_done,
+                        int(customer["id"]),
+                        self.tenant_id,
+                    ),
+                )
+                self._grant_referral_reward_tx(
+                    invitee_customer_id=int(customer["id"]),
+                    reward_type="trial",
+                )
+            result.update(
+                {
+                    "order_kind": "trial",
+                    "order_id": order_id,
+                    "service_name": clean_name,
+                    "selected_server_id": selected_server_id,
+                }
+            )
+            return result
+
         plan = self._trial_plan(settings)
         now = iso_utc(utcnow())
         with transaction(self.conn):
             cursor = self.conn.execute(
                 "INSERT INTO tenant_orders "
-                "(tenant_id, customer_id, plan_id, amount, currency, status, "
-                "created_at, updated_at, paid_at, order_kind, original_amount, "
-                "discount_amount, wallet_amount) "
-                "VALUES (?, ?, ?, 0, ?, 'paid', ?, ?, ?, 'trial', 0, 0, 0)",
+                "(tenant_id, customer_id, plan_id, selected_server_id, "
+                "amount, currency, status, created_at, updated_at, paid_at, "
+                "order_kind, original_amount, discount_amount, wallet_amount) "
+                "VALUES (?, ?, ?, ?, 0, ?, 'paid', ?, ?, ?, "
+                "'trial', 0, 0, 0)",
                 (
                     self.tenant_id,
                     int(customer["id"]),
                     int(plan["id"]),
+                    selected_server_id,
                     str(plan["currency"]),
                     now,
                     now,
@@ -3473,13 +3571,24 @@ class TenantBusinessService:
             order_id = int(cursor.lastrowid or 0)
             paid_order = dict(
                 self.conn.execute(
-                    "SELECT * FROM tenant_orders WHERE id=?",
-                    (order_id,),
+                    "SELECT * FROM tenant_orders WHERE id=? AND tenant_id=?",
+                    (order_id, self.tenant_id),
                 ).fetchone()
             )
             subscription_id = self._create_paid_subscription_tx(
                 order=paid_order, now=now
             )
+            if clean_name and subscription_id:
+                self.conn.execute(
+                    "UPDATE tenant_subscriptions SET service_name=?, updated_at=? "
+                    "WHERE id=? AND tenant_id=?",
+                    (
+                        clean_name,
+                        now,
+                        int(subscription_id),
+                        self.tenant_id,
+                    ),
+                )
             self.conn.execute(
                 "INSERT INTO tenant_trial_claims "
                 "(tenant_id, customer_id, order_id, subscription_id, status, "
@@ -3512,11 +3621,12 @@ class TenantBusinessService:
                 )
             raise
         with transaction(self.conn):
+            now_done = iso_utc(utcnow())
             self.conn.execute(
                 "UPDATE tenant_trial_claims SET status='issued', updated_at=? "
                 "WHERE tenant_id=? AND customer_id=? AND order_id=?",
                 (
-                    iso_utc(utcnow()),
+                    now_done,
                     self.tenant_id,
                     int(customer["id"]),
                     order_id,
@@ -3526,8 +3636,8 @@ class TenantBusinessService:
                 "UPDATE tenant_customers SET trial_used_at=?, updated_at=? "
                 "WHERE id=? AND tenant_id=?",
                 (
-                    iso_utc(utcnow()),
-                    iso_utc(utcnow()),
+                    now_done,
+                    now_done,
                     int(customer["id"]),
                     self.tenant_id,
                 ),
@@ -3536,7 +3646,14 @@ class TenantBusinessService:
                 invitee_customer_id=int(customer["id"]),
                 reward_type="trial",
             )
-        result.update({"order_kind": "trial", "order_id": order_id})
+        result.update(
+            {
+                "order_kind": "trial",
+                "order_id": order_id,
+                "service_name": clean_name,
+                "selected_server_id": selected_server_id,
+            }
+        )
         return result
 
     def list_plan_categories(
@@ -5075,6 +5192,7 @@ class TenantBusinessService:
                     idempotency_key=(
                         f"tenant:{self.tenant_id}:subscription:{int(subscription_id)}"
                     ),
+                    name=str(subscription.get("service_name") or ""),
                 ),
             )
         except PanelError as exc:
