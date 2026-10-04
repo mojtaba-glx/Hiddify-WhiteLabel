@@ -615,6 +615,18 @@ def cancel_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def confirm_add_user_keyboard() -> ReplyKeyboardMarkup:
+    """Exact SellBot confirmation keyboard for AdminBot user creation."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("✅ تایید")],
+            [KeyboardButton("❌ لغو")],
+        ],
+        resize_keyboard=True,
+        selective=True,
+    )
+
+
 def _server_cancel_keyboard() -> ReplyKeyboardMarkup:
     # Backward-compatible alias for existing server wizards.
     return cancel_keyboard()

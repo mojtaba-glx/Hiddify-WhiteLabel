@@ -331,6 +331,9 @@ def test_button_wizards_create_edit_search_and_cancel(
         await click(update, context, f'srv:useradd:{source["id"]}:single')
         for text in ("New customer", "15", "20"):
             await send(update, context, text)
+        assert context.user_data[server_actions.FLOW]["kind"] == "create_confirm"
+        assert any("لطفاً اطلاعات را تایید کنید" in str(sent[0]) for sent in message.sent)
+        await send(update, context, "✅ تایید")
         assert server_actions.FLOW not in context.user_data
         assert not any(
             "یادداشت را وارد کنید" in str(sent[0])
@@ -375,6 +378,8 @@ def test_plan_user_creation_finishes_after_name_without_note(
         )
         assert context.user_data[server_actions.FLOW]["kind"] == "create_name"
         await send(update, context, "Plan user")
+        assert context.user_data[server_actions.FLOW]["kind"] == "create_confirm"
+        await send(update, context, "✅ تایید")
         assert server_actions.FLOW not in context.user_data
         assert not any(
             "یادداشت را وارد کنید" in str(sent[0])
@@ -746,6 +751,7 @@ def test_fresh_and_upgrade_migrations_preserve_subscription_data(tmp_path):
         "0031_backup_agency_infra",
         "0032_server_status_daily",
         "0033_legacy_sellbot_restore",
+        "0034_admin_panel_smart_subscription",
     ]
     conn = connect(db)
     assert (
@@ -1303,5 +1309,94 @@ def test_admin_create_recovers_panel_generated_uuid_by_remote_marker(
             report["users"][0]["external_ref"]
             == "panel-generated-after-error"
         )
+
+    asyncio.run(run())
+
+
+def test_create_delivery_matches_sellbot_confirmation_detail_and_config_menu(
+    monkeypatch, conn, factories, cipher
+):
+    b, p, s, source, child, _, _ = setup(conn, factories, cipher)
+    s.attach_node(7001, source["id"], child["id"])
+    update, context, message = ui(monkeypatch, b)
+
+    class PhotoBot:
+        def __init__(self):
+            self.photos = []
+
+        async def send_photo(self, **kwargs):
+            self.photos.append(kwargs)
+
+    context.bot = PhotoBot()
+
+    async def run():
+        await click(update, context, f'srv:useradd:{source["id"]}:single')
+        await send(update, context, "تستی")
+        await send(update, context, "1")
+        await send(update, context, "1")
+
+        assert context.user_data[server_actions.FLOW]["kind"] == "create_confirm"
+        confirm_text, confirm_kwargs = message.sent[-1]
+        assert "لطفاً اطلاعات را تایید کنید" in confirm_text
+        assert "👤 کاربر: تستی" in confirm_text
+        assert "📊 مصرف: 1 گیگابایت" in confirm_text
+        assert "📅 مدت: 1 روز" in confirm_text
+        labels = [
+            button.text
+            for row in confirm_kwargs["reply_markup"].keyboard
+            for button in row
+        ]
+        assert labels == ["✅ تایید", "❌ لغو"]
+
+        await send(update, context, "✅ تایید")
+        texts = [str(item[0]) for item in message.sent]
+        assert any("✅ کاربر جدید با موفقیت ساخته شد." in item for item in texts)
+        assert any("👤 نام: تستی" in item for item in texts)
+        assert any("✅ ساخته شد روی نودها:" in item for item in texts)
+        detail_index = next(
+            i for i, item in enumerate(texts)
+            if "❖⬩╍╍" in item and "تستی" in item
+        )
+        detail_markup = message.sent[detail_index][1]["reply_markup"]
+        detail_labels = [
+            button.text
+            for row in detail_markup.inline_keyboard
+            for button in row
+        ]
+        assert detail_labels == [
+            "کانفیگ ها📄",
+            "ویرایش کاربر✏️",
+            "تمدید اشتراک♾️",
+            "حذف کاربر🗑️",
+            "بازگشت به لیست کاربران",
+        ]
+
+        row = next(x for x in s.users(7001, source["id"]) if x["name"] == "تستی")
+        await click(update, context, f'srv:pconfigs:{source["id"]}:{row["id"]}')
+        cfg_markup = message.sent[-1][1]["reply_markup"]
+        cfg_labels = [
+            button.text
+            for line in cfg_markup.inline_keyboard
+            for button in line
+        ]
+        assert cfg_labels == [
+            "📄 کانفیگ‌های مستقیم",
+            "🔄 اشتراک خودکار",
+            "🔗 لینک اشتراک اصلی",
+            "🧬 لینک اشتراک Base64",
+            "🌐 اشتراک هوشمند",
+            "🌐 اشتراک هوشمند Base64",
+            "🚪 ورود به پنل کاربر",
+            "🔙 برگشت به جزئیات کاربر",
+        ]
+
+        await click(
+            update,
+            context,
+            f'srv:pconfigs:{source["id"]}:{row["id"]}:sub',
+        )
+        assert len(context.bot.photos) == 1
+        assert "لینک اشتراک" in context.bot.photos[0]["caption"]
+        assert context.bot.photos[0]["photo"].name == "qr.png"
 
     asyncio.run(run())

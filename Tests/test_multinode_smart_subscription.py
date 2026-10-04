@@ -400,3 +400,91 @@ def test_foreign_tenant_cannot_attach_its_subscription_to_another_tenants_node(
         pass
     else:
         raise AssertionError("cross-tenant server mapping must be rejected")
+
+
+def test_admin_panel_user_smart_link_aggregates_primary_and_node_configs(
+    conn, db_path, factories, cipher, monkeypatch
+) -> None:
+    state = _setup(conn, factories, cipher)
+    monkeypatch.setenv("SMART_SUB_PUBLIC_BASE_URL", "https://smart.example")
+    expires = iso_utc(utcnow() + timedelta(days=30))
+    cursor = conn.execute(
+        "INSERT INTO tenant_panel_users "
+        "(tenant_id,server_id,external_ref,name,comment,usage_bytes,traffic_bytes,"
+        "expires_at,active,state,extra_json,last_synced_at) "
+        "VALUES (?,?,?,?,?,0,?,?,1,'active','{}',?)",
+        (
+            int(state["tenant"]["id"]),
+            int(state["primary"]["id"]),
+            "admin-primary-ref",
+            "Admin native",
+            "",
+            20 * 1024**3,
+            expires,
+            iso_utc(utcnow()),
+        ),
+    )
+    panel_user_id = int(cursor.lastrowid)
+    for server, ref in (
+        (state["xui"], "admin-xui-ref"),
+        (state["xnet"], "admin-xnet-ref"),
+    ):
+        conn.execute(
+            "INSERT INTO tenant_panel_user_nodes "
+            "(tenant_id,source_user_id,server_id,external_ref,updated_at) "
+            "VALUES (?,?,?,?,?)",
+            (
+                int(state["tenant"]["id"]),
+                panel_user_id,
+                int(server["id"]),
+                ref,
+                iso_utc(utcnow()),
+            ),
+        )
+    conn.commit()
+
+    state["panel"].contents["https://tr.example"] = (
+        "vless://aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee@tr.example:443?type=tcp#TR"
+    )
+    state["panel"].contents["https://de.example"] = (
+        "trojan://pass@de.example:443?type=grpc#DE"
+    )
+    state["panel"].contents["https://fr.example"] = (
+        "anytls://secret@fr.example:443?sni=fr.example#FR"
+    )
+
+    plain_url = state["service"].admin_panel_smart_subscription_link(
+        state["owner"],
+        panel_user_id=panel_user_id,
+        base64_output=False,
+    )
+    b64_url = state["service"].admin_panel_smart_subscription_link(
+        state["owner"],
+        panel_user_id=panel_user_id,
+        base64_output=True,
+    )
+    assert plain_url.startswith("https://smart.example/sub/")
+    assert plain_url.endswith("/all.txt")
+    assert b64_url.endswith("/all.b64")
+
+    link = conn.execute(
+        "SELECT code,target FROM tenant_smart_links "
+        "WHERE tenant_id=? AND target=?",
+        (
+            int(state["tenant"]["id"]),
+            f"paneluser:{panel_user_id}",
+        ),
+    ).fetchone()
+    assert link is not None
+    aggregator = SmartSubscriptionService(
+        db_path=db_path,
+        cipher=cipher,
+        panel_adapter_factory=lambda: state["panel"],
+    )
+    result = aggregator.build(str(link["code"]), base64_output=False)
+    assert "tr.example" in result.body
+    assert "de.example" in result.body
+    assert "fr.example" in result.body
+    encoded = aggregator.build(str(link["code"]), base64_output=True)
+    decoded = base64.b64decode(encoded.body).decode()
+    assert decoded == result.body

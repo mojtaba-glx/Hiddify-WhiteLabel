@@ -1401,6 +1401,84 @@ class TenantBusinessService:
         assert row is not None
         return dict(row)
 
+    def _ensure_panel_user_smart_link(
+        self, *, panel_user_id: int, label: str = ""
+    ) -> dict[str, Any]:
+        uid = int(panel_user_id)
+        row = self.conn.execute(
+            "SELECT * FROM tenant_panel_users "
+            "WHERE id=? AND tenant_id=? AND state!='deleted'",
+            (uid, self.tenant_id),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("panel user not found")
+        target = f"paneluser:{uid}"
+        existing = self.conn.execute(
+            "SELECT * FROM tenant_smart_links "
+            "WHERE tenant_id=? AND target=? ORDER BY id LIMIT 1",
+            (self.tenant_id, target),
+        ).fetchone()
+        if existing is not None:
+            return dict(existing)
+        now = iso_utc(utcnow())
+        code = secrets.token_urlsafe(24)
+        try:
+            with transaction(self.conn):
+                cursor = self.conn.execute(
+                    "INSERT INTO tenant_smart_links "
+                    "(tenant_id, code, label, target, status, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, 'active', ?, ?)",
+                    (
+                        self.tenant_id,
+                        code,
+                        _text(label or str(row["name"] or f"Panel user {uid}"), 80),
+                        target,
+                        now,
+                        now,
+                    ),
+                )
+            link_id = int(cursor.lastrowid or 0)
+        except sqlite3.IntegrityError:
+            existing = self.conn.execute(
+                "SELECT * FROM tenant_smart_links "
+                "WHERE tenant_id=? AND target=? ORDER BY id LIMIT 1",
+                (self.tenant_id, target),
+            ).fetchone()
+            if existing is None:
+                raise
+            return dict(existing)
+        created = self.conn.execute(
+            "SELECT * FROM tenant_smart_links WHERE id=? AND tenant_id=?",
+            (link_id, self.tenant_id),
+        ).fetchone()
+        assert created is not None
+        return dict(created)
+
+    def _panel_smart_url(
+        self,
+        *,
+        panel_user_id: int,
+        label: str = "",
+        base64_output: bool = False,
+    ) -> str:
+        link = self._ensure_panel_user_smart_link(
+            panel_user_id=int(panel_user_id), label=label
+        )
+        settings = self.runtime_userbot_settings()
+        public_base = str(
+            settings.get("smart_base_url")
+            or os.getenv("SMART_SUB_PUBLIC_BASE_URL", "")
+            or ""
+        ).strip()
+        if not public_base:
+            return ""
+        from TenantRuntime.smart_subscription import smart_subscription_url
+        return smart_subscription_url(
+            public_base,
+            str(link["code"]),
+            base64_output=bool(base64_output),
+        )
+
     def _smart_url(
         self,
         *,
@@ -6365,6 +6443,30 @@ class TenantBusinessService:
             raise TenantBusinessError("smart subscription link is unavailable")
         return link
 
+    def admin_panel_smart_subscription_link(
+        self,
+        actor_id: int,
+        *,
+        panel_user_id: int,
+        base64_output: bool = False,
+    ) -> str:
+        self._admin(actor_id)
+        row = self.conn.execute(
+            "SELECT * FROM tenant_panel_users "
+            "WHERE id=? AND tenant_id=? AND state!='deleted'",
+            (int(panel_user_id), self.tenant_id),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("panel user not found")
+        link = self._panel_smart_url(
+            panel_user_id=int(panel_user_id),
+            label=str(row["name"] or ""),
+            base64_output=bool(base64_output),
+        )
+        if not link:
+            raise TenantBusinessError("smart subscription link is unavailable")
+        return link
+
     def cleanup_unstarted_subscription_admin(
         self, actor_id: int, *, subscription_id: int
     ) -> dict[str, Any]:
@@ -8682,7 +8784,7 @@ class TenantBusinessService:
             (self.tenant_id,),
         ).fetchall():
             item = dict(row)
-            if str(item["target"]).startswith("subscription:"):
+            if str(item["target"]).startswith(("subscription:", "paneluser:")):
                 item["public_url"] = smart_subscription_url(
                     public_base,
                     str(item["code"]),

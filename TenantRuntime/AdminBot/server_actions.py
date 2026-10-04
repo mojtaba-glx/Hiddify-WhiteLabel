@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from datetime import timedelta
 from html import escape
 from io import BytesIO
 
+import qrcode
 from telegram import InlineKeyboardMarkup
 from telegram.error import BadRequest
 from TenantRuntime.button_styles import inline_button as Button
 from TenantRuntime.server_admin import ServerAdminService, user_status, DEFAULT_SALES
 from TenantRuntime.business import TenantBusinessError
+from TenantRuntime.panels import PanelError
+from TenantRuntime.smart_subscription import decode_subscription_lines
 from Shared.timeutils import iso_utc, utcnow, format_tehran, parse_utc
 
 FLOW = "server_admin_flow"
@@ -106,6 +110,183 @@ def local_time(raw):
         return format_tehran(parse_utc(raw))
     except (ValueError, TypeError):
         return str(raw)
+
+
+def _format_gb(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "0"
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.2f}".rstrip("0").rstrip(".")
+
+
+def _qr_image(data: str) -> BytesIO:
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M)
+    qr.add_data(str(data))
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    bio = BytesIO()
+    bio.name = "qr.png"
+    img.save(bio, "PNG")
+    bio.seek(0)
+    return bio
+
+
+def _expiry_text(raw) -> str:
+    if not raw:
+        return "نامشخص"
+    try:
+        seconds = (parse_utc(raw) - utcnow()).total_seconds()
+    except (ValueError, TypeError):
+        return local_time(raw)
+    if seconds < 0:
+        days = max(0, math.ceil(abs(seconds) / 86400))
+        return f"منقضی شده ({days} روز پیش)"
+    days = max(1, math.ceil(seconds / 86400))
+    return f"{days} روز دیگر"
+
+
+def _panel_native_link(business, sid: int, external_ref: str) -> str:
+    try:
+        server = business.server(int(sid))
+        target = business._panel_target(server)
+        return str(
+            business.panel_adapter.subscription_link(
+                target=target, external_ref=str(external_ref)
+            )
+            or ""
+        ).strip()
+    except (TenantBusinessError, PanelError, ValueError, TypeError):
+        return ""
+
+
+def _panel_user_page_link(business, sid: int, external_ref: str) -> str:
+    link = _panel_native_link(business, sid, external_ref)
+    if not link:
+        return ""
+    kind = str(business.server(int(sid)).get("panel_kind") or "").lower()
+    if kind == "hiddify" and link.rstrip("/").endswith("/all.txt"):
+        return link.rstrip("/")[:-len("all.txt")].rstrip("/") + "/"
+    return link
+
+
+def _cluster_labels(service, actor: int, sid: int, uid: int) -> list[str]:
+    try:
+        _, targets = service.related_targets(actor, sid, uid)
+    except (TenantBusinessError, ValueError, TypeError):
+        targets = [(int(sid), "")]
+    labels: list[str] = []
+    for target_sid, _ in targets:
+        try:
+            label = str(service.b.server(int(target_sid)).get("label") or "").strip()
+        except TenantBusinessError:
+            continue
+        if label and label not in labels:
+            labels.append(label)
+    return labels
+
+
+def _user_detail_text(service, actor: int, sid: int, uid: int, row: dict) -> str:
+    limit = int(row.get("traffic_bytes") or 0) / 1024**3
+    usage = int(row.get("usage_bytes") or 0) / 1024**3
+    labels = _cluster_labels(service, actor, sid, uid)
+    name = escape(str(row.get("name") or row.get("external_ref") or "کاربر"))
+    user_page = _panel_user_page_link(service.b, sid, str(row.get("external_ref") or ""))
+    header = (
+        f'👤 کاربر: <a href="{escape(user_page, quote=True)}">{name}</a>'
+        if user_page
+        else f"👤 کاربر: {name}"
+    )
+    location_line = (
+        "◇ سرویس لوکیشن: " + "، ".join(escape(x) for x in labels)
+        if labels
+        else f"⬖ سرور: {escape(str(service.b.server(sid).get('label') or 'نامشخص'))}"
+    )
+    return "\n".join(
+        [
+            header,
+            "❖⬩╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍⬩❖",
+            location_line,
+            (
+                f"📊مصرف: {usage:.1f} از {limit:.1f} گیگابایت"
+                if limit
+                else f"📊مصرف: {usage:.1f} گیگابایت (نامحدود)"
+            ),
+            f"📆انقضا: {escape(_expiry_text(row.get('expires_at')))}",
+            f"📶 وضعیت حساب: {STATUS_LABELS.get(user_status(row),'در انتظار')}",
+            f"📶 آخرین اتصال: {escape(local_time(row.get('last_online')))}",
+            f"📝یادداشت: {escape(row.get('comment') or '—')}",
+        ]
+    )
+
+
+def _user_detail_rows(sid: int, uid: int):
+    return [
+        [Button("کانفیگ ها📄", callback_data=f"srv:pconfigs:{sid}:{uid}")],
+        [Button("ویرایش کاربر✏️", callback_data=f"srv:pedit:{sid}:{uid}")],
+        [Button("تمدید اشتراک♾️", callback_data=f"srv:prenew:{sid}:{uid}")],
+        [Button("حذف کاربر🗑️", callback_data=f"srv:pdelete:{sid}:{uid}")],
+        [Button("بازگشت به لیست کاربران", callback_data=f"srv:users:{sid}")],
+    ]
+
+
+def _config_menu_rows(business, sid: int, uid: int, row: dict):
+    kind = str(business.server(int(sid)).get("panel_kind") or "").lower()
+    ref = str(row.get("external_ref") or "")
+    rows = [
+        [Button("📄 کانفیگ‌های مستقیم", callback_data=f"srv:pconfigs:{sid}:{uid}:direct", style="primary")],
+    ]
+    if kind == "xnet":
+        rows.extend(
+            [
+                [Button("🔗 لینک اشتراک X-NET", callback_data=f"srv:pconfigs:{sid}:{uid}:sub", style="primary")],
+                [Button("🌐 اشتراک هوشمند", callback_data=f"srv:pconfigs:{sid}:{uid}:multi", style="success")],
+                [Button("🌐 اشتراک هوشمند Base64", callback_data=f"srv:pconfigs:{sid}:{uid}:multi_b64", style="success")],
+            ]
+        )
+    else:
+        rows.extend(
+            [
+                [Button("🔄 اشتراک خودکار", callback_data=f"srv:pconfigs:{sid}:{uid}:auto_sub", style="primary")],
+                [Button("🔗 لینک اشتراک اصلی", callback_data=f"srv:pconfigs:{sid}:{uid}:sub", style="primary")],
+                [Button("🧬 لینک اشتراک Base64", callback_data=f"srv:pconfigs:{sid}:{uid}:sub_b64", style="primary")],
+                [Button("🌐 اشتراک هوشمند", callback_data=f"srv:pconfigs:{sid}:{uid}:multi", style="success")],
+                [Button("🌐 اشتراک هوشمند Base64", callback_data=f"srv:pconfigs:{sid}:{uid}:multi_b64", style="success")],
+            ]
+        )
+        panel_link = _panel_user_page_link(business, sid, ref)
+        if panel_link:
+            rows.append(
+                [Button("🚪 ورود به پنل کاربر", url=panel_link, style="success")]
+            )
+        else:
+            rows.append(
+                [Button("🚪 ورود به پنل کاربر", callback_data=f"srv:pconfigs:{sid}:{uid}:bot_link", style="success")]
+            )
+    rows.append(
+        [Button("🔙 برگشت به جزئیات کاربر", callback_data=f"srv:puser:{sid}:{uid}", style="primary")]
+    )
+    return rows
+
+
+def _creation_summary(flow: dict) -> str:
+    count = int(flow.get("count") or 1)
+    if count == 1:
+        return (
+            "لطفاً اطلاعات را تایید کنید:\n"
+            f"👤 کاربر: {flow['name']}\n"
+            f"📊 مصرف: {_format_gb(flow['gb'])} گیگابایت\n"
+            f"📅 مدت: {int(flow['days'])} روز"
+        )
+    return (
+        "لطفاً اطلاعات را تایید کنید:\n"
+        f"👥 تعداد کاربران: {count}\n"
+        f"👤 پیشوند نام: {flow['name']}\n"
+        f"📊 حجم هر کاربر: {_format_gb(flow['gb'])} گیگابایت\n"
+        f"📅 مدت: {int(flow['days'])} روز"
+    )
 
 
 async def edit(query, text, rows, *, html=False):
@@ -252,6 +433,7 @@ async def send_list(query, service, actor, sid, *, page=0, status="all"):
 
 
 def user_text(row, server):
+    """Compatibility formatter for list/search callers without service context."""
     limit = int(row.get("traffic_bytes") or 0) / 1024**3
     usage = int(row.get("usage_bytes") or 0) / 1024**3
     return "\n".join(
@@ -259,13 +441,15 @@ def user_text(row, server):
             f"👤 کاربر: {escape(row['name'])}",
             "❖⬩╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍⬩❖",
             f"⬖ سرور: {escape(server['label'])}",
-            f"📊مصرف: {usage:.2f} از {f'{limit:.2f}' if limit else 'نامحدود'} گیگابایت",
-            f"📆انقضا: {escape(local_time(row.get('expires_at')))}",
-            f"🕓 آخرین اتصال: {escape(local_time(row.get('last_online')))}",
+            (
+                f"📊مصرف: {usage:.1f} از {limit:.1f} گیگابایت"
+                if limit
+                else f"📊مصرف: {usage:.1f} گیگابایت (نامحدود)"
+            ),
+            f"📆انقضا: {escape(_expiry_text(row.get('expires_at')))}",
             f"📶 وضعیت حساب: {STATUS_LABELS.get(user_status(row),'در انتظار')}",
-            f"📝 یادداشت: {escape(row.get('comment') or '—')}",
-            f"🔑 UUID: <code>{escape(row['external_ref'])}</code>",
-            f"🔄 آخرین بروزرسانی: {escape(local_time(row.get('last_synced_at')))}",
+            f"📶 آخرین اتصال: {escape(local_time(row.get('last_online')))}",
+            f"📝یادداشت: {escape(row.get('comment') or '—')}",
         ]
     )
 
@@ -302,14 +486,30 @@ async def user_detail(query, service, actor, sid, uid, *, refresh=True, editing=
             button("بازگشت🔙", f"srv:puser:{sid}:{uid}"),
         ]
     else:
-        rows = [
-            button("کانفیگ ها📄", f"srv:pconfigs:{sid}:{uid}"),
-            button("ویرایش کاربر✏️", f"srv:pedit:{sid}:{uid}"),
-            button("تمدید اشتراک♾️", f"srv:prenew:{sid}:{uid}"),
-            button("حذف کاربر🗑️", f"srv:pdelete:{sid}:{uid}"),
-            back(sid, "users"),
-        ]
-    await edit(query, warning + user_text(row, service.b.server(sid)), rows, html=True)
+        rows = _user_detail_rows(sid, uid)
+    await edit(
+        query,
+        warning + _user_detail_text(service, actor, sid, uid, row),
+        rows,
+        html=True,
+    )
+
+
+async def _send_created_user_detail(message, service, actor, sid, uid):
+    warning = ""
+    try:
+        row = await service.live_user(actor, sid, uid)
+    except TenantBusinessError:
+        row = service.user(actor, sid, uid)
+        warning = (
+            "⚠️ دریافت اطلاعات زنده ممکن نیست؛ اطلاعات ذخیره‌شده نمایش داده می‌شود.\n\n"
+        )
+    await message.reply_text(
+        warning + _user_detail_text(service, actor, sid, uid, row),
+        reply_markup=markup(_user_detail_rows(sid, uid)),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
 
 
 async def plan_list(query, context, service, actor, sid, category=None):
@@ -598,50 +798,177 @@ async def handle_callback(update, context, *, business, actor):
     elif action == "pconfigs":
         uid = int(parts[3])
         row = service.user(actor, sid, uid)
-        targets = service.related_targets(actor, sid, uid)[1]
-        rows = [
-            button("🔗 لینک اشتراک", f"srv:pconfigs:{sid}:{uid}:link"),
-            button("📄 کانفیگ مستقیم", f"srv:pconfigs:{sid}:{uid}:direct"),
-            button("بازگشت🔙", f"srv:puser:{sid}:{uid}"),
-        ]
-        if len(parts) > 4 and parts[4] == "link":
-            _, target, _ = business._panel_material(sid)
-            link = business.panel_adapter.subscription_link(
-                target=target, external_ref=row["external_ref"]
-            )
+        scoped_row, targets = service.related_targets(actor, sid, uid)
+        rows = _config_menu_rows(business, sid, uid, row)
+        cfg_type = parts[4] if len(parts) > 4 else ""
+
+        if not cfg_type:
             await show(
-                f"🔗 لینک اشتراک\n\n<code>{escape(link)}</code>", rows, html=True
+                _user_detail_text(service, actor, sid, uid, row),
+                rows,
+                html=True,
             )
-        elif len(parts) > 4 and parts[4] == "direct":
-            payload = []
+        elif cfg_type == "direct" and len(parts) == 5:
+            await show(
+                "📄 کانفیگ مستقیم\n"
+                f"👤 کاربر: {escape(str(row.get('name') or 'کاربر'))}\n"
+                "━━━━━━━━━━━━━━\n"
+                "پروتکل موردنظر را انتخاب کنید:",
+                [
+                    [Button("🟢 VLESS", callback_data=f"srv:pconfigs:{sid}:{uid}:direct:vless")],
+                    [Button("🔵 VMESS", callback_data=f"srv:pconfigs:{sid}:{uid}:direct:vmess")],
+                    [Button("🟠 TROJAN", callback_data=f"srv:pconfigs:{sid}:{uid}:direct:trojan")],
+                    [Button("🔙 بازگشت", callback_data=f"srv:pconfigs:{sid}:{uid}")],
+                ],
+                html=True,
+            )
+        elif cfg_type == "direct" and len(parts) >= 6:
+            proto = str(parts[5] or "").lower()
+            if proto not in {"vless", "vmess", "trojan"}:
+                raise ValueError("invalid direct protocol")
+            links: list[str] = []
+            seen: set[str] = set()
             errors = 0
-            for target, ref in targets:
+            for target_sid, ref in targets:
                 try:
-                    payload.append(
-                        str(
-                            await service.call(
-                                target, "subscription_content", external_ref=ref
-                            )
+                    raw = str(
+                        await service.call(
+                            target_sid,
+                            "subscription_content",
+                            external_ref=ref,
                         )
                     )
                 except TenantBusinessError:
                     errors += 1
-            if not payload:
-                raise TenantBusinessError("configs unavailable")
-            text = "\n".join(payload)
-            if errors:
-                text += f"\n\n⚠️ دریافت کانفیگ از {errors} سرور ممکن نشد."
-            if len(text) < 3000:
+                    continue
+                for line in decode_subscription_lines(raw):
+                    low = line.lower()
+                    if not low.startswith(proto + "://") or line in seen:
+                        continue
+                    seen.add(line)
+                    links.append(line)
+            if not links:
                 await show(
-                    "📄 کانفیگ‌ها\n<pre>" + escape(text) + "</pre>", rows, html=True
+                    f"❌ کانفیگ مستقیم {proto.upper()} یافت نشد.\n"
+                    "برای این کاربر هیچ کانفیگ مناسبی یافت نشد.",
+                    [[Button("🔙 بازگشت به منوی کانفیگ‌ها", callback_data=f"srv:pconfigs:{sid}:{uid}")]],
                 )
             else:
-                await update.effective_message.reply_document(
-                    BytesIO(text.encode()), filename=f"configs-{uid}.txt"
+                payload = "\n".join(links)
+                body = (
+                    f"🔗 کانفیگ‌های {proto.upper()}\n"
+                    "برای کپی، کل باکس زیر را یکجا کپی کنید:\n"
+                    f"<pre><code>{escape(payload)}</code></pre>"
                 )
-                await show("📄 کانفیگ‌ها در فایل ارسال شدند.", rows)
+                back_rows = [[Button("🔙 بازگشت به منوی کانفیگ‌ها", callback_data=f"srv:pconfigs:{sid}:{uid}")]]
+                if errors:
+                    body += f"\n⚠️ دریافت کانفیگ از {errors} سرور ممکن نشد."
+                if len(body) <= 3900:
+                    await show(body, back_rows, html=True)
+                else:
+                    await update.effective_message.reply_document(
+                        BytesIO(payload.encode()),
+                        filename=f"{proto}-configs-{uid}.txt",
+                    )
+                    await show("📄 کانفیگ‌ها در فایل ارسال شدند.", back_rows)
         else:
-            await show(user_text(row, business.server(sid)), rows, html=True)
+            kind = str(business.server(int(sid)).get("panel_kind") or "").lower()
+            native = _panel_native_link(
+                business, sid, str(row.get("external_ref") or "")
+            )
+            panel_page = _panel_user_page_link(
+                business, sid, str(row.get("external_ref") or "")
+            )
+            url = ""
+            caption = ""
+
+            if cfg_type == "auto_sub":
+                if not native:
+                    raise TenantBusinessError("subscription link is unavailable")
+                url = (
+                    panel_page.rstrip("/") + "/sub/?asn=unknown"
+                    if kind == "hiddify" and panel_page
+                    else native
+                )
+                caption = "لینک اشتراک خودکار"
+            elif cfg_type in {"sub", "link"}:
+                if not native:
+                    raise TenantBusinessError("subscription link is unavailable")
+                url = native
+                caption = "لینک اشتراک X-NET" if kind == "xnet" else "لینک اشتراک"
+            elif cfg_type == "sub_b64":
+                if not native:
+                    raise TenantBusinessError("subscription link is unavailable")
+                sep = "&" if "?" in native else "?"
+                url = native + sep + "base64=1"
+                caption = "لینک اشتراک b64"
+            elif cfg_type in {"multi", "multi_b64"}:
+                base64_output = cfg_type == "multi_b64"
+                try:
+                    if scoped_row.get("subscription_id"):
+                        url = business.admin_smart_subscription_link(
+                            actor,
+                            subscription_id=int(scoped_row["subscription_id"]),
+                            base64_output=base64_output,
+                        )
+                    else:
+                        source_uid = int(scoped_row.get("_source_user_id") or uid)
+                        url = business.admin_panel_smart_subscription_link(
+                            actor,
+                            panel_user_id=source_uid,
+                            base64_output=base64_output,
+                        )
+                except TenantBusinessError:
+                    fallback_rows = []
+                    if panel_page:
+                        fallback_rows.append(
+                            [Button("🚪 ورود به پنل کاربر", url=panel_page, style="success")]
+                        )
+                    fallback_rows.append(
+                        [Button("🔙 برگشت به منوی لینک‌ها", callback_data=f"srv:pconfigs:{sid}:{uid}")]
+                    )
+                    await show(
+                        (
+                            "❌ لینک اشتراک هوشمند برای این کاربر هنوز آماده نیست.\n"
+                            "آدرس عمومی Smart Subscription را در تنظیمات سرور WhiteLabel ثبت کنید."
+                        ),
+                        fallback_rows,
+                    )
+                    return True
+                caption = (
+                    "لینک اشتراک هوشمند b64"
+                    if base64_output
+                    else "لینک اشتراک هوشمند"
+                )
+            elif cfg_type == "bot_link":
+                if not panel_page:
+                    raise TenantBusinessError("panel user link is unavailable")
+                await show(
+                    f"🌐 لینک پنل کاربر\n{escape(panel_page)}",
+                    [
+                        [Button("🚪 باز کردن پنل کاربر", url=panel_page, style="success")],
+                        [Button("🔙 برگشت به منوی لینک‌ها", callback_data=f"srv:pconfigs:{sid}:{uid}")],
+                    ],
+                    html=True,
+                )
+                return True
+            else:
+                raise ValueError("invalid config action")
+
+            if not url:
+                raise TenantBusinessError("subscription link is unavailable")
+            bot = getattr(context, "bot", None)
+            if bot is None:
+                raise TenantBusinessError("telegram bot is unavailable")
+            chat_id = getattr(update.effective_chat, "id", None) or actor
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=_qr_image(url),
+                caption=f"{caption}\n{url}",
+                reply_markup=markup(
+                    [[Button("🔙 بازگشت به منوی کانفیگ‌ها", callback_data=f"srv:pconfigs:{sid}:{uid}")]]
+                ),
+            )
     elif action == "plans":
         sales = service.sales(sid)
         modes = {
@@ -1277,6 +1604,7 @@ async def handle_text(update, context, *, business, actor):
         ADMIN_MAIN_BUTTONS,
         admin_main_keyboard,
         cancel_keyboard,
+        confirm_add_user_keyboard,
     )
 
     text = str(update.effective_message.text or "").strip()
@@ -1301,7 +1629,7 @@ async def handle_text(update, context, *, business, actor):
     section = "view"
 
     async def finish_create():
-        report = await service.create_users(
+        return await service.create_users(
             actor,
             sid,
             name=flow["name"],
@@ -1310,18 +1638,6 @@ async def handle_text(update, context, *, business, actor):
             count=flow["count"],
             operation_key=flow["operation_key"],
         )
-        text_result = (
-            f"👥 ساخته‌شده: {len(report['users'])} · خطا: {report['errors']}"
-        )
-        details = list(report.get("error_details") or [])
-        if details:
-            text_result += "\n" + "\n".join(f"• {row}" for row in details[:5])
-        if int(report.get("node_errors") or 0):
-            text_result += (
-                f"\n⚠️ خطای ساخت روی نودها: {int(report['node_errors'])}؛ "
-                "از «همگام‌سازی نودها» برای ترمیم استفاده کنید."
-            )
-        return text_result
 
     try:
         if kind == "search":
@@ -1381,11 +1697,14 @@ async def handle_text(update, context, *, business, actor):
                 raise ValueError("name outside bounds")
             flow["name"] = text
             if "gb" in flow and "days" in flow:
-                result = await finish_create()
-                section = "users"
-            else:
-                flow["kind"] = "create_gb"
-                next_prompt = "حجم اشتراک را به گیگابایت وارد کنید:"
+                flow["kind"] = "create_confirm"
+                await update.effective_message.reply_text(
+                    _creation_summary(flow),
+                    reply_markup=confirm_add_user_keyboard(),
+                )
+                return True
+            flow["kind"] = "create_gb"
+            next_prompt = "حجم اشتراک را به گیگابایت وارد کنید:"
         elif kind == "create_gb":
             gb = float(text)
             if not 0 < gb <= 1000000:
@@ -1396,9 +1715,108 @@ async def handle_text(update, context, *, business, actor):
             days = int(text)
             if not 1 <= days <= 36500:
                 raise ValueError("days outside bounds")
-            flow["days"] = days
-            result = await finish_create()
-            section = "users"
+            flow.update(days=days, kind="create_confirm")
+            await update.effective_message.reply_text(
+                _creation_summary(flow),
+                reply_markup=confirm_add_user_keyboard(),
+            )
+            return True
+        elif kind == "create_confirm":
+            if text not in {"✅ تایید", "✅تایید", "تایید", "تأیید"}:
+                await update.effective_message.reply_text(
+                    "لطفاً با دکمه‌های «✅ تایید» یا «❌ لغو» پاسخ دهید.",
+                    reply_markup=confirm_add_user_keyboard(),
+                )
+                return True
+
+            report = await finish_create()
+            users = list(report.get("users") or [])
+            errors = int(report.get("errors") or 0)
+            details = list(report.get("error_details") or [])
+            success_nodes = list(report.get("node_success_labels") or [])
+            failed_nodes = list(report.get("node_failed_labels") or [])
+            context.user_data.pop(FLOW, None)
+
+            if int(flow.get("count") or 1) == 1 and len(users) == 1:
+                await update.effective_message.reply_text(
+                    "✅ کاربر جدید با موفقیت ساخته شد.\n"
+                    f"👤 نام: {flow['name']}\n"
+                    f"📊 حجم: {_format_gb(flow['gb'])} گیگابایت\n"
+                    f"📅 مدت: {int(flow['days'])} روز",
+                    reply_markup=admin_main_keyboard(),
+                )
+            else:
+                lines = [
+                    "📦 نتیجه افزودن چندین کاربر",
+                    f"✅ موفق: {len(users)}",
+                    f"❌ ناموفق: {errors}",
+                ]
+                if users:
+                    lines.extend(["", "کاربران ساخته‌شده:"])
+                    lines.extend(f"• {u['name']}" for u in users[:12])
+                    if len(users) > 12:
+                        lines.append(f"... و {len(users)-12} کاربر دیگر")
+                if details:
+                    lines.extend(["", "خطاها:"])
+                    lines.extend(f"• {item}" for item in details[:8])
+                await update.effective_message.reply_text(
+                    "\n".join(lines),
+                    reply_markup=admin_main_keyboard(),
+                )
+
+            if success_nodes:
+                await update.effective_message.reply_text(
+                    "✅ ساخته شد روی نودها: " + "، ".join(success_nodes)
+                )
+            if failed_nodes:
+                await update.effective_message.reply_text(
+                    "⚠️ ساخت روی این نودها کامل نشد: " + "، ".join(failed_nodes)
+                )
+
+            if not users:
+                await update.effective_message.reply_text(
+                    "❌ خطا در ایجاد کاربر روی سرور"
+                    + (
+                        "\n" + "\n".join(f"• {item}" for item in details[:5])
+                        if details
+                        else ""
+                    ),
+                    reply_markup=admin_main_keyboard(),
+                )
+                return True
+
+            detail_limit = 20
+            for index, user in enumerate(users):
+                if index >= detail_limit:
+                    break
+                await _send_created_user_detail(
+                    update.effective_message,
+                    service,
+                    actor,
+                    sid,
+                    int(user["id"]),
+                )
+                if int(flow.get("count") or 1) > 1:
+                    native = _panel_native_link(
+                        business,
+                        sid,
+                        str(user.get("external_ref") or ""),
+                    )
+                    bot = getattr(context, "bot", None)
+                    if native and bot is not None:
+                        chat_id = getattr(update.effective_chat, "id", None) or actor
+                        await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=_qr_image(native),
+                            caption=(
+                                f"🔗 لینک اشتراک {user.get('name')}:\n{native}"
+                            ),
+                        )
+            if len(users) > detail_limit:
+                await update.effective_message.reply_text(
+                    f"ℹ️ جزئیات فقط برای {detail_limit} کاربر اول ارسال شد."
+                )
+            return True
         elif kind == "user_field":
             uid = int(flow["uid"])
             field = flow["field"]
