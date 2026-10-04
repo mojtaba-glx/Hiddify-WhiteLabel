@@ -166,9 +166,10 @@ def test_custom_invite_text_and_manual_reward_reach_userbot_and_reports(
     assert "TEST=غیرفعال" in content["body"]
     assert "BUY=25,000 IRR" in content["body"]
     assert "پاداش دستی" in content["body"]
-    assert "پاداش دستی رفرال" in user_handlers._wallet_text(
-        service.wallet_summary(7101)
-    )
+    wallet_text = user_handlers._wallet_text(service.wallet_summary(7101))
+    assert "5,000 تومان" in wallet_text
+    assert "وضعیت کاربر: 🟢 فعال" in wallet_text
+    assert "پاداش دستی رفرال" not in wallet_text
 
     rows = service.referral_rewards_admin(7001)
     assert any(
