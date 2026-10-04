@@ -1078,9 +1078,10 @@ def test_plan_domain_discount_wizards_and_root_buttons(
             await send(update, context, text)
         assert s.domains(7001, sid)[0]["origin"] == "https://newpublic.example"
         await click(update, context, f"srv:discountedit:{sid}:simple")
-        await send(update, context, "100 10 30")
+        await send(update, context, "100")
+        await send(update, context, "10")
         await click(update, context, f"srv:discountedit:{sid}:tiered")
-        await send(update, context, "100:15 200:25")
+        await send(update, context, "100:15,200:25")
         await click(update, context, f"srv:discounttoggle:{sid}:tiered:on")
         await click(update, context, f"srv:discountedit:{sid}:tiered_timer")
         await send(update, context, "60")
