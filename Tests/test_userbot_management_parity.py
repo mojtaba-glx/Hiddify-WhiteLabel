@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import asyncio
 import pytest
 
 from TenantRuntime.AdminBot import handlers as admin_handlers
@@ -199,6 +200,78 @@ def test_userbot_customer_main_menu_matches_sellbot_navigation(
         ["💌دعوت دوستان"],
         ["🎁دریافت هدیه"],
     ]
+
+
+def test_free_trial_button_lists_servers_before_provisioning() -> None:
+    class Message:
+        def __init__(self):
+            self.sent = []
+
+        async def reply_text(self, text, **kwargs):
+            self.sent.append((text, kwargs))
+
+    class Business:
+        def runtime_userbot_settings(self):
+            return {
+                "shuffle_server_layout": False,
+                "server_columns": 1,
+                "servers_list_text": "",
+                "button_theme": "smart",
+                "colored_buttons": True,
+            }
+
+        def free_trial_state(self, actor):
+            return {
+                "enabled": True,
+                "used": False,
+                "announce_enabled": True,
+            }
+
+        def list_purchase_servers(self):
+            return [
+                {"id": 11, "label": "ترکیه"},
+                {"id": 12, "label": "آلمان"},
+            ]
+
+        def claim_free_trial(self, actor, **kwargs):
+            raise AssertionError("trial must not provision before location/name")
+
+    message = Message()
+    update = SimpleNamespace(effective_message=message)
+    context = SimpleNamespace(user_data={})
+    handled = asyncio.run(
+        user_handlers._handle_main_reply_action(
+            update,
+            context,
+            spec=SimpleNamespace(tenant_name="Speed Test"),
+            business=Business(),
+            actor=7101,
+            text=user_handlers.BTN_TRIAL,
+        )
+    )
+    assert handled is True
+    assert "لوکیشن" in message.sent[-1][0]
+    markup = message.sent[-1][1]["reply_markup"]
+    labels = [
+        button.text for row in markup.inline_keyboard for button in row
+    ]
+    callbacks = [
+        button.callback_data for row in markup.inline_keyboard for button in row
+    ]
+    assert labels[:2] == ["ترکیه", "آلمان"]
+    assert callbacks[:2] == ["shop:trialserver:11", "shop:trialserver:12"]
+
+
+def test_free_trial_runtime_has_name_step_and_specific_error_messages() -> None:
+    source = open(
+        "TenantRuntime/UserBot/handlers.py",
+        encoding="utf-8",
+    ).read()
+    assert 'data.startswith("shop:trialserver:")' in source
+    assert '"kind": "trial_service_name"' in source
+    assert "⬇️ لطفا نام خود را ارسال کنید:" in source
+    assert "🚫 شما قبلا اکانت تست رایگان خود را دریافت نموده‌اید!" in source
+    assert "❌ سروری برای ارائه تست رایگان در دسترس نیست." in source
 
 
 def test_userbot_main_navigation_callbacks_are_real() -> None:
