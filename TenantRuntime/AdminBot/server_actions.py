@@ -1255,23 +1255,8 @@ async def handle_callback(update, context, *, business, actor):
                 ),
             )
     elif action == "plans":
-        sales = service.sales(sid)
-        modes = {
-            "fixed": "فقط پلن‌های ثابت",
-            "dynamic": "فقط پلن پویا",
-            "mixed": "حالت ترکیبی (ثابت + پویا)",
-        }
-        rows = [
-            button("📂 لیست دسته‌های پلن", f"srv:categories:{sid}"),
-            button("📋 لیست پلن‌ها", f"srv:plan:{sid}"),
-            button("⚙️تنظیمات پلن‌ها", f"srv:settings:{sid}"),
-            button("🎛 مدیریت حرفه‌ای تخفیف‌ها", f"srv:discounts:{sid}"),
-            back(sid),
-        ]
-        await show(
-            f"مدیریت پلن‌ها برای سرور 🖥 {business.server(sid)['label']}\n━━━━━━━━━━━━━━\nحالت نمایش فعلی در ربات کاربران: {modes[sales['mode']]}\n\nیکی از گزینه‌های زیر را انتخاب کنید:",
-            rows,
-        )
+        text, rows = _plans_root_view(business, service, sid)
+        await show(text, rows)
     elif action == "plan":
         if len(parts) == 3:
             await plan_list(query, context, service, actor, sid)
