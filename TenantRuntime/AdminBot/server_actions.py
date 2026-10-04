@@ -1891,9 +1891,18 @@ async def handle_text(update, context, *, business, actor):
         await update.effective_message.reply_text(
             "❌ عملیات لغو شد.", reply_markup=admin_main_keyboard()
         )
-        await update.effective_message.reply_text(
-            "↩️ مدیریت سرور", reply_markup=markup([back(int(flow["sid"]))])
-        )
+        sid = int(flow["sid"])
+        if str(flow.get("kind") or "").startswith(("sales_field", "discount_")):
+            service = ServerAdminService(business)
+            service.authorize(actor, sid)
+            menu_text, menu_rows = _dynamic_settings_view(service, sid)
+            await update.effective_message.reply_text(
+                menu_text, reply_markup=markup(menu_rows)
+            )
+        else:
+            await update.effective_message.reply_text(
+                "↩️ مدیریت سرور", reply_markup=markup([back(sid)])
+            )
         return True
     service = ServerAdminService(business)
     sid = int(flow["sid"])
