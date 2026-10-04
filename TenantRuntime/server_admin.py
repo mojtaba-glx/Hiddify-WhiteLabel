@@ -517,7 +517,16 @@ class ServerAdminService:
             results.append(self.user(actor, sid, uid))
 
         node_errors = 0
-        if results and self.b.list_nodes(parent_server_id=int(sid)):
+        node_success_labels: list[str] = []
+        node_failed_labels: list[str] = []
+        attached_nodes = [
+            node
+            for node in self.b.list_nodes(parent_server_id=int(sid))
+            if node.get("status") == "active"
+            and node.get("server_id")
+            and int(node["server_id"]) != int(sid)
+        ]
+        if results and attached_nodes:
             for user in results:
                 sync = await self.sync_nodes(
                     actor,
@@ -526,11 +535,42 @@ class ServerAdminService:
                     only_user=int(user["id"]),
                 )
                 node_errors += int(sync.get("errors") or 0)
+
+            for node in attached_nodes:
+                target_sid = int(node["server_id"])
+                healthy = True
+                for user in results:
+                    mapping = self.conn.execute(
+                        "SELECT external_ref,last_error,frozen_at "
+                        "FROM tenant_panel_user_nodes "
+                        "WHERE tenant_id=? AND source_user_id=? AND server_id=?",
+                        (self.tenant_id, int(user["id"]), target_sid),
+                    ).fetchone()
+                    if (
+                        mapping is None
+                        or not str(mapping["external_ref"] or "").strip()
+                        or str(mapping["last_error"] or "").strip()
+                        or mapping["frozen_at"]
+                    ):
+                        healthy = False
+                        break
+                label = str(
+                    node.get("label")
+                    or self.b.server(target_sid).get("label")
+                    or f"Server {target_sid}"
+                ).strip()
+                if healthy:
+                    node_success_labels.append(label)
+                else:
+                    node_failed_labels.append(label)
+
         return {
             "users": results,
             "errors": errors,
             "error_details": error_details,
             "node_errors": node_errors,
+            "node_success_labels": node_success_labels,
+            "node_failed_labels": node_failed_labels,
         }
 
     def related_targets(self, actor, sid, uid):

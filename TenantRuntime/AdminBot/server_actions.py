@@ -494,6 +494,23 @@ async def user_detail(query, service, actor, sid, uid, *, refresh=True, editing=
     )
 
 
+async def _send_created_user_detail(message, service, actor, sid, uid):
+    warning = ""
+    try:
+        row = await service.live_user(actor, sid, uid)
+    except TenantBusinessError:
+        row = service.user(actor, sid, uid)
+        warning = (
+            "⚠️ دریافت اطلاعات زنده ممکن نیست؛ اطلاعات ذخیره‌شده نمایش داده می‌شود.\n\n"
+        )
+    await message.reply_text(
+        warning + _user_detail_text(service, actor, sid, uid, row),
+        reply_markup=markup(_user_detail_rows(sid, uid)),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
 async def plan_list(query, context, service, actor, sid, category=None):
     plans = service.plans(actor, sid)
     if category is not None:
@@ -1568,6 +1585,7 @@ async def handle_text(update, context, *, business, actor):
         ADMIN_MAIN_BUTTONS,
         admin_main_keyboard,
         cancel_keyboard,
+        confirm_add_user_keyboard,
     )
 
     text = str(update.effective_message.text or "").strip()
@@ -1592,7 +1610,7 @@ async def handle_text(update, context, *, business, actor):
     section = "view"
 
     async def finish_create():
-        report = await service.create_users(
+        return await service.create_users(
             actor,
             sid,
             name=flow["name"],
@@ -1601,18 +1619,6 @@ async def handle_text(update, context, *, business, actor):
             count=flow["count"],
             operation_key=flow["operation_key"],
         )
-        text_result = (
-            f"👥 ساخته‌شده: {len(report['users'])} · خطا: {report['errors']}"
-        )
-        details = list(report.get("error_details") or [])
-        if details:
-            text_result += "\n" + "\n".join(f"• {row}" for row in details[:5])
-        if int(report.get("node_errors") or 0):
-            text_result += (
-                f"\n⚠️ خطای ساخت روی نودها: {int(report['node_errors'])}؛ "
-                "از «همگام‌سازی نودها» برای ترمیم استفاده کنید."
-            )
-        return text_result
 
     try:
         if kind == "search":
@@ -1672,11 +1678,14 @@ async def handle_text(update, context, *, business, actor):
                 raise ValueError("name outside bounds")
             flow["name"] = text
             if "gb" in flow and "days" in flow:
-                result = await finish_create()
-                section = "users"
-            else:
-                flow["kind"] = "create_gb"
-                next_prompt = "حجم اشتراک را به گیگابایت وارد کنید:"
+                flow["kind"] = "create_confirm"
+                await update.effective_message.reply_text(
+                    _creation_summary(flow),
+                    reply_markup=confirm_add_user_keyboard(),
+                )
+                return True
+            flow["kind"] = "create_gb"
+            next_prompt = "حجم اشتراک را به گیگابایت وارد کنید:"
         elif kind == "create_gb":
             gb = float(text)
             if not 0 < gb <= 1000000:
@@ -1687,9 +1696,108 @@ async def handle_text(update, context, *, business, actor):
             days = int(text)
             if not 1 <= days <= 36500:
                 raise ValueError("days outside bounds")
-            flow["days"] = days
-            result = await finish_create()
-            section = "users"
+            flow.update(days=days, kind="create_confirm")
+            await update.effective_message.reply_text(
+                _creation_summary(flow),
+                reply_markup=confirm_add_user_keyboard(),
+            )
+            return True
+        elif kind == "create_confirm":
+            if text not in {"✅ تایید", "✅تایید", "تایید", "تأیید"}:
+                await update.effective_message.reply_text(
+                    "لطفاً با دکمه‌های «✅ تایید» یا «❌ لغو» پاسخ دهید.",
+                    reply_markup=confirm_add_user_keyboard(),
+                )
+                return True
+
+            report = await finish_create()
+            users = list(report.get("users") or [])
+            errors = int(report.get("errors") or 0)
+            details = list(report.get("error_details") or [])
+            success_nodes = list(report.get("node_success_labels") or [])
+            failed_nodes = list(report.get("node_failed_labels") or [])
+            context.user_data.pop(FLOW, None)
+
+            if int(flow.get("count") or 1) == 1 and len(users) == 1:
+                await update.effective_message.reply_text(
+                    "✅ کاربر جدید با موفقیت ساخته شد.\n"
+                    f"👤 نام: {flow['name']}\n"
+                    f"📊 حجم: {_format_gb(flow['gb'])} گیگابایت\n"
+                    f"📅 مدت: {int(flow['days'])} روز",
+                    reply_markup=admin_main_keyboard(),
+                )
+            else:
+                lines = [
+                    "📦 نتیجه افزودن چندین کاربر",
+                    f"✅ موفق: {len(users)}",
+                    f"❌ ناموفق: {errors}",
+                ]
+                if users:
+                    lines.extend(["", "کاربران ساخته‌شده:"])
+                    lines.extend(f"• {u['name']}" for u in users[:12])
+                    if len(users) > 12:
+                        lines.append(f"... و {len(users)-12} کاربر دیگر")
+                if details:
+                    lines.extend(["", "خطاها:"])
+                    lines.extend(f"• {item}" for item in details[:8])
+                await update.effective_message.reply_text(
+                    "\n".join(lines),
+                    reply_markup=admin_main_keyboard(),
+                )
+
+            if success_nodes:
+                await update.effective_message.reply_text(
+                    "✅ ساخته شد روی نودها: " + "، ".join(success_nodes)
+                )
+            if failed_nodes:
+                await update.effective_message.reply_text(
+                    "⚠️ ساخت روی این نودها کامل نشد: " + "، ".join(failed_nodes)
+                )
+
+            if not users:
+                await update.effective_message.reply_text(
+                    "❌ خطا در ایجاد کاربر روی سرور"
+                    + (
+                        "\n" + "\n".join(f"• {item}" for item in details[:5])
+                        if details
+                        else ""
+                    ),
+                    reply_markup=admin_main_keyboard(),
+                )
+                return True
+
+            detail_limit = 20
+            for index, user in enumerate(users):
+                if index >= detail_limit:
+                    break
+                await _send_created_user_detail(
+                    update.effective_message,
+                    service,
+                    actor,
+                    sid,
+                    int(user["id"]),
+                )
+                if int(flow.get("count") or 1) > 1:
+                    native = _panel_native_link(
+                        business,
+                        sid,
+                        str(user.get("external_ref") or ""),
+                    )
+                    bot = getattr(context, "bot", None)
+                    if native and bot is not None:
+                        chat_id = getattr(update.effective_chat, "id", None) or actor
+                        await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=_qr_image(native),
+                            caption=(
+                                f"🔗 لینک اشتراک {user.get('name')}:\n{native}"
+                            ),
+                        )
+            if len(users) > detail_limit:
+                await update.effective_message.reply_text(
+                    f"ℹ️ جزئیات فقط برای {detail_limit} کاربر اول ارسال شد."
+                )
+            return True
         elif kind == "user_field":
             uid = int(flow["uid"])
             field = flow["field"]
