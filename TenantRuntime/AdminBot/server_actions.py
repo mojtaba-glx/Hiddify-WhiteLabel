@@ -432,6 +432,7 @@ async def send_list(query, service, actor, sid, *, page=0, status="all"):
 
 
 def user_text(row, server):
+    """Compatibility formatter for list/search callers without service context."""
     limit = int(row.get("traffic_bytes") or 0) / 1024**3
     usage = int(row.get("usage_bytes") or 0) / 1024**3
     return "\n".join(
@@ -439,13 +440,15 @@ def user_text(row, server):
             f"👤 کاربر: {escape(row['name'])}",
             "❖⬩╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍⬩❖",
             f"⬖ سرور: {escape(server['label'])}",
-            f"📊مصرف: {usage:.2f} از {f'{limit:.2f}' if limit else 'نامحدود'} گیگابایت",
-            f"📆انقضا: {escape(local_time(row.get('expires_at')))}",
-            f"🕓 آخرین اتصال: {escape(local_time(row.get('last_online')))}",
+            (
+                f"📊مصرف: {usage:.1f} از {limit:.1f} گیگابایت"
+                if limit
+                else f"📊مصرف: {usage:.1f} گیگابایت (نامحدود)"
+            ),
+            f"📆انقضا: {escape(_expiry_text(row.get('expires_at')))}",
             f"📶 وضعیت حساب: {STATUS_LABELS.get(user_status(row),'در انتظار')}",
-            f"📝 یادداشت: {escape(row.get('comment') or '—')}",
-            f"🔑 UUID: <code>{escape(row['external_ref'])}</code>",
-            f"🔄 آخرین بروزرسانی: {escape(local_time(row.get('last_synced_at')))}",
+            f"📶 آخرین اتصال: {escape(local_time(row.get('last_online')))}",
+            f"📝یادداشت: {escape(row.get('comment') or '—')}",
         ]
     )
 
@@ -482,14 +485,13 @@ async def user_detail(query, service, actor, sid, uid, *, refresh=True, editing=
             button("بازگشت🔙", f"srv:puser:{sid}:{uid}"),
         ]
     else:
-        rows = [
-            button("کانفیگ ها📄", f"srv:pconfigs:{sid}:{uid}"),
-            button("ویرایش کاربر✏️", f"srv:pedit:{sid}:{uid}"),
-            button("تمدید اشتراک♾️", f"srv:prenew:{sid}:{uid}"),
-            button("حذف کاربر🗑️", f"srv:pdelete:{sid}:{uid}"),
-            back(sid, "users"),
-        ]
-    await edit(query, warning + user_text(row, service.b.server(sid)), rows, html=True)
+        rows = _user_detail_rows(sid, uid)
+    await edit(
+        query,
+        warning + _user_detail_text(service, actor, sid, uid, row),
+        rows,
+        html=True,
+    )
 
 
 async def plan_list(query, context, service, actor, sid, category=None):
