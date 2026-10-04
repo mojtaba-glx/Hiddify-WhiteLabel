@@ -713,44 +713,56 @@ def _order_detail_text(order: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _wallet_text(summary: dict) -> str:
-    accounts = list(summary.get("accounts") or [])
-    history = list(summary.get("history") or [])
-    lines = ["💰 کیف پول", ""]
-    if accounts:
-        lines.extend(
-            f"• {int(x.get('balance') or 0):,} {x.get('currency') or ''}"
-            for x in accounts
+def _wallet_currency_title(currency: object) -> str:
+    code = str(currency or "").strip().upper()
+    return "تومان" if code in {"IRR", "IRT"} else (code or "تومان")
+
+
+def _wallet_primary(summary: dict) -> tuple[int, str]:
+    primary = dict(summary.get("primary_account") or {})
+    if primary:
+        return int(primary.get("balance") or 0), str(
+            primary.get("currency") or summary.get("primary_currency") or "IRR"
         )
-    else:
-        lines.append("• موجودی: 0")
-    if history:
-        lines.extend(["", "🧾 آخرین تراکنش‌ها"])
-        labels = {
-            "topup": "شارژ کیف پول",
-            "admin_credit": "شارژ ادمین",
-            "admin_debit": "کسر ادمین",
-            "referral_trial": "پاداش دعوت/تست",
-            "referral_purchase": "پاداش دعوت/خرید",
-            "purchase": "پرداخت سفارش",
-            "refund": "برگشت",
-            "gift": "🎁 هدیه",
-        }
-        for tx in history[:10]:
-            amount = int(tx.get("amount") or 0)
-            kind = str(tx.get("kind") or "")
-            label = labels.get(kind, kind or "-")
-            if (
-                kind == "admin_credit"
-                and str(tx.get("note") or "").startswith("manual referral reward")
-            ):
-                label = "پاداش دستی رفرال"
-            lines.append(
-                f"• {label}: "
-                f"{amount:+,} {tx.get('currency') or ''} → "
-                f"{int(tx.get('resulting_balance') or 0):,}"
+    accounts = list(summary.get("accounts") or [])
+    if accounts:
+        row = accounts[0]
+        return int(row.get("balance") or 0), str(row.get("currency") or "IRR")
+    return 0, str(summary.get("primary_currency") or "IRR")
+
+
+def _wallet_text(summary: dict) -> str:
+    """SellBot-compatible wallet summary: one balance + account status."""
+    balance, currency = _wallet_primary(summary)
+    money = f"{balance:,} {_wallet_currency_title(currency)}"
+    status = str(summary.get("customer_status") or "active").lower()
+    status_title = "🔴 مسدود" if status == "blocked" else "🟢 فعال"
+    return (
+        f"🔻 موجودی کیف پول شما {money} میباشد\n"
+        f"👤 وضعیت کاربر: {status_title}"
+    )
+
+
+def _wallet_method_rows(business: Any, settings: dict, *, include_back: bool = True):
+    rows = []
+    for method in business.list_methods(currency=None):
+        title = str(method.get("title") or method.get("provider_title") or "روش پرداخت")
+        icon = str(method.get("provider_icon") or "💳")
+        rows.append([
+            InlineKeyboardButton(
+                f"{icon} {title}",
+                callback_data=f"shop:wallettopupstart:{int(method['id'])}",
             )
-    return "\n".join(lines)
+        ])
+    if bool(settings.get("show_gift_button", True)):
+        rows.append([
+            InlineKeyboardButton("🎁 اعمال کد هدیه", callback_data="shop:gift")
+        ])
+    if include_back:
+        rows.append([
+            InlineKeyboardButton("بازگشت", callback_data="runtime:home")
+        ])
+    return rows
 
 
 def _payment_status_label(value: object) -> str:
@@ -1462,18 +1474,12 @@ async def _handle_main_reply_action(
         return True
 
     if text == BTN_WALLET:
-        rows = [[InlineKeyboardButton(
-            "➕ شارژ کیف پول",
-            callback_data="shop:wallettopup",
-        )]]
-        if bool(settings.get("show_gift_button", True)):
-            rows.append([InlineKeyboardButton(
-                "🎁 اعمال کد هدیه",
-                callback_data="shop:gift",
-            )])
+        summary = business.wallet_summary(actor)
         await update.effective_message.reply_text(
-            _wallet_text(business.wallet_summary(actor)),
-            reply_markup=InlineKeyboardMarkup(rows),
+            _wallet_text(summary),
+            reply_markup=InlineKeyboardMarkup(
+                _wallet_method_rows(business, settings, include_back=True)
+            ),
         )
         return True
 
@@ -2188,25 +2194,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ]),
             ); return
         if data == "shop:wallet":
-            rows = [
-                [InlineKeyboardButton(
-                    "➕ شارژ کیف پول",
-                    callback_data="shop:wallettopup",
-                )],
-                [InlineKeyboardButton(
-                    "🧾 وضعیت پرداخت‌ها",
-                    callback_data="shop:payments",
-                )],
-            ]
-            if bool(settings.get("show_gift_button", True)):
-                rows.append([InlineKeyboardButton(
-                    "🎁 اعمال کد هدیه",
-                    callback_data="shop:gift",
-                )])
-            rows.append([InlineKeyboardButton("↩️ منو", callback_data="runtime:home")])
+            summary = business.wallet_summary(actor)
             await update.callback_query.edit_message_text(
-                _wallet_text(business.wallet_summary(actor)),
-                reply_markup=InlineKeyboardMarkup(rows),
+                _wallet_text(summary),
+                reply_markup=InlineKeyboardMarkup(
+                    _wallet_method_rows(business, settings, include_back=True)
+                ),
             ); return
         if data == "shop:payments":
             history = business.customer_payment_history(actor)
@@ -2219,9 +2212,26 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
         if data == "shop:wallettopup":
-            context.user_data["biz_flow"] = {"kind": "wallet_topup_create"}
+            # Backward-compatible callback from older messages: show the real
+            # enabled payment methods instead of asking users to type a currency.
+            rows = _wallet_method_rows(business, settings, include_back=False)
+            rows.append([InlineKeyboardButton("↩️ کیف پول", callback_data="shop:wallet")])
             await update.callback_query.edit_message_text(
-                "💰 مبلغ | ارز را ارسال کنید.\nمثال: 100000 | IRR",
+                "💳 روش شارژ کیف پول را انتخاب کنید:",
+                reply_markup=InlineKeyboardMarkup(rows),
+            ); return
+        if data.startswith("shop:wallettopupstart:"):
+            method_id = int(data.rsplit(":", 1)[1])
+            method = business.method(method_id, currency=None)
+            currency = str(method.get("currency") or "IRR")
+            context.user_data["biz_flow"] = {
+                "kind": "wallet_topup_amount",
+                "method_id": method_id,
+                "currency": currency,
+            }
+            await update.callback_query.edit_message_text(
+                "🔻 لطفا مبلغی که قصد شارژ حساب خود دارید را "
+                f"به {_wallet_currency_title(currency)} وارد کنید:",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("↩️ کیف پول", callback_data="shop:wallet")]
                 ]),
@@ -3651,6 +3661,42 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 await update.effective_message.reply_text(
                     "برای ارسال پاسخ از دکمه‌های «✅ارسال» یا «✏️ویرایش» استفاده کنید.",
                     reply_markup=_ticket_confirm_markup("reply"),
+                )
+                return
+            if kind == "wallet_topup_amount":
+                amount = int(text.replace(",", "").replace("٬", "").strip())
+                if amount <= 0:
+                    raise ValueError("invalid wallet topup")
+                method_id = int(flow["method_id"])
+                currency = str(flow["currency"])
+                topup = business.create_wallet_topup(
+                    actor,
+                    amount=amount,
+                    currency=currency,
+                )
+                session = business.begin_wallet_topup_payment(
+                    actor,
+                    topup_id=int(topup["id"]),
+                    method_id=method_id,
+                )
+                rows: list[list[TelegramInlineKeyboardButton]] = []
+                if session["action"] == "receipt":
+                    context.user_data["biz_flow"] = {
+                        "kind": "wallet_receipt",
+                        "topup_id": int(topup["id"]),
+                        "method_id": method_id,
+                    }
+                else:
+                    context.user_data.pop("biz_flow", None)
+                if session.get("checkout_url"):
+                    rows.append([InlineKeyboardButton(
+                        "🌐 ورود به درگاه پرداخت",
+                        url=str(session["checkout_url"]),
+                    )])
+                rows.append([InlineKeyboardButton("↩️ کیف پول", callback_data="shop:wallet")])
+                await update.effective_message.reply_text(
+                    str(session["message"]),
+                    reply_markup=InlineKeyboardMarkup(rows),
                 )
                 return
             if kind == "wallet_topup_create":

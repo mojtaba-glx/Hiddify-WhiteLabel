@@ -752,6 +752,7 @@ def test_fresh_and_upgrade_migrations_preserve_subscription_data(tmp_path):
         "0032_server_status_daily",
         "0033_legacy_sellbot_restore",
         "0034_admin_panel_smart_subscription",
+        "0035_wallet_sellbot_parity",
     ]
     conn = connect(db)
     assert (
@@ -761,6 +762,77 @@ def test_fresh_and_upgrade_migrations_preserve_subscription_data(tmp_path):
     assert "server_id" in [
         r["name"] for r in conn.execute("PRAGMA table_info(tenant_sale_plans)")
     ]
+    conn.close()
+
+
+
+def test_wallet_currency_migration_repairs_numeric_admin_currency(tmp_path):
+    import shutil
+    from pathlib import Path
+
+    old = tmp_path / "old34"
+    old.mkdir()
+    for migration in Path("Migrations").glob("*.sql"):
+        if migration.name < "0035":
+            shutil.copy(migration, old / migration.name)
+
+    db = tmp_path / "wallet-upgrade.db"
+    migrate(db, migrations_dir=old)
+    conn = connect(db)
+    now = iso_utc(utcnow())
+    tenant_id = conn.execute(
+        "INSERT INTO tenants "
+        "(public_id,name,slug,owner_telegram_id,status,created_at,updated_at) "
+        "VALUES ('wallet-repair','Wallet Repair','wallet-repair',7001,'active',?,?)",
+        (now, now),
+    ).lastrowid
+    customer_id = conn.execute(
+        "INSERT INTO tenant_customers "
+        "(tenant_id,telegram_user_id,display_name,username,status,created_at,updated_at) "
+        "VALUES (?,?,?,?, 'active',?,?)",
+        (tenant_id, 7101, "Wallet User", "wallet_user", now, now),
+    ).lastrowid
+    conn.execute(
+        "INSERT INTO tenant_wallet_accounts "
+        "(tenant_id,customer_id,currency,balance,updated_at) "
+        "VALUES (?,?,?,?,?)",
+        (tenant_id, customer_id, "100000", 100000, now),
+    )
+    conn.execute(
+        "INSERT INTO tenant_wallet_transactions "
+        "(tenant_id,customer_id,currency,amount,kind,order_id,idempotency_key,"
+        "note,resulting_balance,created_at) "
+        "VALUES (?,?,?,?, 'admin_credit',NULL,?,?,?,?)",
+        (
+            tenant_id,
+            customer_id,
+            "100000",
+            100000,
+            "legacy-bad-wallet-currency",
+            "Admin set wallet balance",
+            100000,
+            now,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    assert migrate(db) == ["0035_wallet_sellbot_parity"]
+    conn = connect(db)
+    account = conn.execute(
+        "SELECT currency,balance FROM tenant_wallet_accounts "
+        "WHERE tenant_id=? AND customer_id=?",
+        (tenant_id, customer_id),
+    ).fetchone()
+    tx = conn.execute(
+        "SELECT currency FROM tenant_wallet_transactions "
+        "WHERE idempotency_key='legacy-bad-wallet-currency'"
+    ).fetchone()
+    assert dict(account) == {"currency": "IRR", "balance": 100000}
+    assert tx["currency"] == "IRR"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM tenant_wallet_accounts WHERE currency='100000'"
+    ).fetchone()[0] == 0
     conn.close()
 
 

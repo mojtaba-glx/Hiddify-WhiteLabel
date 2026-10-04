@@ -373,6 +373,34 @@ def _display_name(item: dict[str, Any]) -> str:
     return str(item.get("display_name") or item.get("telegram_user_id") or item.get("id") or "کاربر")
 
 
+def _wallet_currency_title(currency: object) -> str:
+    code = str(currency or "").strip().upper()
+    return "تومان" if code in {"IRR", "IRT"} else (code or "تومان")
+
+
+def _format_gb(value: object) -> str:
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        return "0"
+    if number.is_integer():
+        return f"{int(number)}.0"
+    return f"{number:.2f}".rstrip("0").rstrip(".")
+
+
+def _wallet_profile_amount(wallet: dict) -> tuple[int, str]:
+    primary = dict(wallet.get("primary_account") or {})
+    if primary:
+        return int(primary.get("balance") or 0), str(
+            primary.get("currency") or wallet.get("primary_currency") or "IRR"
+        )
+    accounts = list(wallet.get("accounts") or [])
+    if accounts:
+        row = accounts[0]
+        return int(row.get("balance") or 0), str(row.get("currency") or "IRR")
+    return 0, str(wallet.get("primary_currency") or "IRR")
+
+
 async def _refresh_admin_reply_keyboard(update: Update) -> None:
     """Refresh the persistent AdminBot ReplyKeyboard after theme changes."""
     chat = update.effective_chat
@@ -418,14 +446,36 @@ async def send_userbot_main_menu(update: Update, context: ContextTypes.DEFAULT_T
 def _user_profile_text(business: Any, actor: int, customer_id: int) -> str:
     profile = business.customer_profile_admin(actor, customer_id=customer_id)
     wallet = business.customer_wallet_admin(actor, customer_id=customer_id)
-    balances = list(wallet.get("accounts") or [])
-    wallet_text = "0"
-    if balances:
-        wallet_text = " | ".join(
-            f"{int(x.get('balance') or 0):,} {x.get('currency') or ''}"
-            for x in balances
-        )
+    balance, currency = _wallet_profile_amount(wallet)
+    currency_title = _wallet_currency_title(currency)
+    wallet_text = (
+        f"{balance:,}{currency_title}"
+        if currency_title == "تومان"
+        else f"{balance:,} {currency_title}"
+    )
     got_trial = bool(profile.get("trial_used_at"))
+    stats = dict(profile.get("full_stats") or {})
+
+    totals = list(stats.get("orders_by_currency") or [])
+    if not totals:
+        order_value = "0تومان"
+    elif len(totals) == 1:
+        item = totals[0]
+        title = _wallet_currency_title(item.get("currency"))
+        amount = int(item.get("amount") or 0)
+        order_value = (
+            f"{amount:,}{title}" if title == "تومان" else f"{amount:,} {title}"
+        )
+    else:
+        parts = []
+        for item in totals:
+            title = _wallet_currency_title(item.get("currency"))
+            amount = int(item.get("amount") or 0)
+            parts.append(
+                f"{amount:,}{title}" if title == "تومان" else f"{amount:,} {title}"
+            )
+        order_value = " | ".join(parts)
+
     return (
         f"👤 کاربر: {_display_name(profile)}\n"
         f"🔹 نام کاربری: {'@' + str(profile.get('username')).lstrip('@') if profile.get('username') else '-'}\n"
@@ -434,12 +484,14 @@ def _user_profile_text(business: Any, actor: int, customer_id: int) -> str:
         f"🔸 موجودی کیف پول: {wallet_text}\n"
         f"🔸 وضعیت اکانت: {'🟢 فعال' if profile.get('status') == 'active' else '🔴 مسدود'}\n"
         "❖ ⬩----------------------------------⬩ ❖\n"
-        f"🔸 تعداد اشتراک‌های خریداری شده: {int(profile.get('subscriptions_total') or 0)}\n"
-        f"🔸 تعداد اشتراک‌های فعال: {int(profile.get('subscriptions_active') or 0)}\n"
-        f"🔸 تعداد سفارشات: {len(business.customer_orders_admin(actor, customer_id=customer_id))}\n"
-        f"🔸 تعداد تراکنشات: {len(business.customer_receipts_admin(actor, customer_id=customer_id))}\n"
+        f"🔸 تعداد اشتراک‌های خریداری شده: {int(stats.get('subs_bought') or 0)}\n"
+        f"🔸 تعداد اشتراک‌های متصل شده: {int(stats.get('subs_connected') or 0)}\n"
+        f"🔸 تعداد تراکنشات: {int(stats.get('tx_total') or 0)}\n"
+        f"🔸 تعداد تراکنشات تایید شده: {int(stats.get('tx_approved') or 0)}\n"
         "❖ ⬩----------------------------------⬩ ❖\n"
-        f"🔸 تیکت باز: {int(profile.get('tickets_open') or 0)}"
+        f"🔸 تعداد سفارشات: {int(stats.get('orders_count') or 0)}\n"
+        f"🔸 مجموع حجم سفارشات(GB): {_format_gb(stats.get('orders_gb'))}\n"
+        f"🔸 مجموع ارزش سفارشات: {order_value}"
     )
 
 
@@ -2333,10 +2385,19 @@ async def handle_callback(
             await _edit_or_send(update, f"💵 لیست تراکنشات\nتعداد: {len(items)}", InlineKeyboardMarkup(rows)); return True
         if action == "wallet":
             wallet = business.customer_wallet_admin(actor, customer_id=customer_id)
-            current = list(wallet.get("accounts") or [])
-            text = "💳 ویرایش کیف پول\n" + ("\n".join(f"• {x['currency']}: {int(x['balance']):,}" for x in current) or "• موجودی ثبت نشده") + "\n\n💱 ارز موردنظر را وارد کنید؛ مثال IRR:"
-            context.user_data[FLOW_KEY]={"kind":"wallet_set_currency","customer_id":customer_id}
-            await query.message.reply_text(text, reply_markup=userbot_cancel_keyboard()); return True
+            current, currency = _wallet_profile_amount(wallet)
+            context.user_data[FLOW_KEY] = {
+                "kind": "wallet_set_amount",
+                "customer_id": customer_id,
+                "currency": currency,
+            }
+            await query.message.reply_text(
+                "💰 مبلغ جدید کیف پول "
+                f"({_wallet_currency_title(currency)}) را وارد کنید:\n"
+                f"موجودی فعلی: {current:,} {_wallet_currency_title(currency)}",
+                reply_markup=userbot_cancel_keyboard(),
+            )
+            return True
         if action == "reset_trial":
             await _edit_or_send(
                 update,
@@ -3934,20 +3995,12 @@ async def handle_text(
             rows.append([InlineKeyboardButton("🔙بازگشت",callback_data="userbot:users_menu")])
             await update.effective_message.reply_text(f"✅ {len(items)} نتیجه پیدا شد.",reply_markup=admin_main_keyboard())
             await update.effective_message.reply_text("نتایج:",reply_markup=InlineKeyboardMarkup(rows)); return True
-        if kind=="wallet_set_currency":
-            currency=text.strip().upper()
-            if not 3<=len(currency)<=8: raise ValueError("wallet currency")
-            flow["currency"]=currency; flow["kind"]="wallet_set_amount"
-            await update.effective_message.reply_text(
-                "💰 موجودی نهایی کیف پول را وارد کنید:",
-                reply_markup=userbot_cancel_keyboard(),
-            ); return True
         if kind=="wallet_set_amount":
-            target=int(text.replace(",",""))
+            target=int(text.replace(",","").replace("٬",""))
             if target<0: raise ValueError("wallet amount")
-            cid=int(flow["customer_id"]); currency=str(flow["currency"])
+            cid=int(flow["customer_id"]); currency=str(flow.get("currency") or "IRR")
             wallet=business.customer_wallet_admin(actor,customer_id=cid)
-            current=next((int(x["balance"]) for x in wallet["accounts"] if x["currency"]==currency),0)
+            current=int(dict(wallet.get("primary_account") or {}).get("balance") or 0)
             delta=target-current
             if delta:
                 business.adjust_wallet_admin(
@@ -3955,10 +4008,25 @@ async def handle_text(
                     note="Admin set wallet balance"
                 )
             context.user_data.pop(FLOW_KEY,None)
+            profile=business.customer_profile_admin(actor,customer_id=cid)
+            unit=_wallet_currency_title(currency)
             await update.effective_message.reply_text(
-                f"✅ موجودی کیف پول روی {target:,} {currency} تنظیم شد.",
+                f"✅ موجودی کیف پول کاربر با موفقیت به {target:,} {unit} تغییر کرد.",
                 reply_markup=admin_main_keyboard(),
-            ); return True
+            )
+            await _send_user_profile(update,business,actor,cid)
+            try:
+                await _send_via_userbot(
+                    business,
+                    int(profile["telegram_user_id"]),
+                    text=(
+                        "💰 کیف پول\n\n"
+                        f"موجودی حساب شما توسط مدیریت به {target:,} {unit} تغییر یافت."
+                    ),
+                )
+            except Exception:
+                pass
+            return True
         if kind=="user_message":
             cid=int(flow["customer_id"]); profile=business.customer_profile_admin(actor,customer_id=cid)
             await _send_via_userbot(business,int(profile["telegram_user_id"]),text=text)
