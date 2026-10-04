@@ -669,6 +669,7 @@ class HiddifyPanelAdapter:
             "package_days": max(1, int(request.duration_days)),
             "start_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             "current_usage_GB": 0,
+            "last_reset_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             "is_active": True,
             "comment": (
                 f"WhiteLabel tenant={int(request.tenant_id)} "
@@ -693,9 +694,14 @@ class HiddifyPanelAdapter:
         created_ref = str(data.get("uuid") or external_ref).strip()
         if not created_ref:
             raise PanelError("Hiddify create response has no identifier")
-        # Cross-version activation verification; this mirrors the proven
-        # compatibility behavior without depending on SellBot.
-        self._set_enabled_raw(target, secret, created_ref, True)
+        # SellBot treats the POST as the authoritative create operation.
+        # Some Hiddify versions accept that POST but reject an immediate
+        # stabilization/activation PATCH.  Do not turn a confirmed create into
+        # a false failure: try to enable, then verify that the row exists.
+        try:
+            self._set_enabled_raw(target, secret, created_ref, True)
+        except PanelError:
+            self._get(target, secret, created_ref)
         return ProvisionResult(
             external_ref=created_ref,
             subscription_url=self.subscription_link(

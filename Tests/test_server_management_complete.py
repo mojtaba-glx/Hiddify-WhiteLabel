@@ -1136,3 +1136,72 @@ def test_frozen_list_does_not_offer_actions_for_deleted_panel_accounts(
     p.users.pop((source["endpoint"], "status-user-1"))
     asyncio.run(s.refresh_users(7001, source["id"]))
     assert not s.frozen(7001, source["id"])
+
+
+def test_admin_create_recovers_when_remote_user_exists_after_provider_error(
+    conn, factories, cipher
+):
+    b, p, s, source, _, _, _ = setup(conn, factories, cipher)
+
+    def provision_then_error(*, target, secret, request):
+        del secret
+        ref = request.external_ref
+        p.seed(
+            target.endpoint,
+            ref,
+            name=request.name,
+            usage=0,
+            traffic=request.traffic_bytes,
+        )
+        p.users[target.endpoint, ref]["expires_at"] = request.expires_at
+        raise PanelError("post-create stabilization failed")
+
+    p.provision = provision_then_error
+
+    async def run():
+        report = await s.create_users(
+            7001,
+            source["id"],
+            name="Recovered create",
+            gb=12,
+            days=15,
+            count=1,
+            operation_key="recover-after-create",
+        )
+        assert report["errors"] == 0
+        assert report["error_details"] == []
+        assert len(report["users"]) == 1
+        row = report["users"][0]
+        assert row["name"] == "Recovered create"
+        assert row["state"] == "active"
+        assert row["external_ref"]
+        assert p.users[source["endpoint"], row["external_ref"]]["name"] == "Recovered create"
+
+    asyncio.run(run())
+
+
+def test_admin_create_does_not_require_redundant_name_patch(
+    conn, factories, cipher
+):
+    b, p, s, source, _, _, _ = setup(conn, factories, cipher)
+
+    async def run():
+        report = await s.create_users(
+            7001,
+            source["id"],
+            name="No extra patch",
+            gb=10,
+            days=30,
+            count=1,
+            operation_key="no-redundant-patch",
+        )
+        assert report["errors"] == 0
+        assert len(report["users"]) == 1
+        ref = report["users"][0]["external_ref"]
+        assert ("create", source["endpoint"], ref) in p.mutations
+        assert not any(
+            mutation[0] == "edit" and mutation[2] == ref
+            for mutation in p.mutations
+        )
+
+    asyncio.run(run())

@@ -241,7 +241,12 @@ class ServerAdminService:
         clean = str(name).strip()
         if not 1 <= len(clean) <= 64 or "\n" in clean:
             raise ValueError("invalid user name")
+
         results, errors = [], 0
+        error_details: list[str] = []
+        traffic_bytes = int(float(gb) * 1024**3)
+        expires_at = iso_utc(utcnow() + timedelta(days=int(days)))
+
         for index in range(int(count)):
             ref = str(
                 uuid.uuid5(
@@ -257,53 +262,115 @@ class ServerAdminService:
             if existing and existing["state"] == "active":
                 results.append(dict(existing))
                 continue
+
             with transaction(self.conn):
                 self.conn.execute(
-                    "INSERT OR IGNORE INTO tenant_panel_users (tenant_id,server_id,external_ref,name,state) VALUES (?,?,?,?,'pending')",
+                    "INSERT OR IGNORE INTO tenant_panel_users "
+                    "(tenant_id,server_id,external_ref,name,state) "
+                    "VALUES (?,?,?,?,'pending')",
                     (self.tenant_id, int(sid), ref, label),
                 )
             uid = self.conn.execute(
-                "SELECT id FROM tenant_panel_users WHERE tenant_id=? AND server_id=? AND external_ref=?",
+                "SELECT id FROM tenant_panel_users "
+                "WHERE tenant_id=? AND server_id=? AND external_ref=?",
                 (self.tenant_id, int(sid), ref),
             ).fetchone()["id"]
+
+            request = ProvisionRequest(
+                tenant_id=self.tenant_id,
+                server_id=int(sid),
+                subscription_id=-int(uid),
+                customer_id=0,
+                traffic_bytes=traffic_bytes,
+                duration_days=int(days),
+                expires_at=expires_at,
+                idempotency_key=f"admin:{operation_key}:{index}",
+                external_ref=ref,
+                name=label,
+            )
+
+            created = None
             try:
                 created = await self.call(
                     sid,
                     "provision",
-                    request=ProvisionRequest(
-                        tenant_id=self.tenant_id,
-                        server_id=int(sid),
-                        subscription_id=-int(uid),
-                        customer_id=0,
-                        traffic_bytes=int(float(gb) * 1024**3),
-                        duration_days=int(days),
-                        expires_at=iso_utc(utcnow() + timedelta(days=int(days))),
-                        idempotency_key=f"admin:{operation_key}:{index}",
-                        external_ref=ref,
-                        name=label,
-                    ),
+                    request=request,
                 )
                 if created.external_ref != ref:
                     raise TenantBusinessError(
                         "panel returned a different user identity"
                     )
-                changes = {"name": label}
-                note = str(comment or "").strip()
-                if note:
-                    changes["comment"] = note[:1000]
-                data = await self.call(
-                    sid,
-                    "update_user",
-                    external_ref=ref,
-                    changes=changes,
-                )
-                with transaction(self.conn):
-                    self.save_user(
-                        sid, asdict(data), extra={"duration_days": int(days)}
-                    )
-                results.append(self.user(actor, sid, uid))
             except TenantBusinessError:
-                errors += 1
+                # SellBot's create path is idempotent: a lost POST response or
+                # a post-create stabilization failure must not create a second
+                # user or report a false failure when the deterministic UUID
+                # already exists remotely.
+                try:
+                    recovered = await self.call(
+                        sid, "get_user", external_ref=ref
+                    )
+                except TenantBusinessError:
+                    errors += 1
+                    error_details.append(f"{label}: ساخت روی پنل تأیید نشد")
+                    continue
+                if str(recovered.external_ref or "").strip() != ref:
+                    errors += 1
+                    error_details.append(f"{label}: شناسه پنل نامعتبر بود")
+                    continue
+                created = recovered
+
+            # The create request already carries the final name/package.  Do
+            # not require an extra PATCH just to rewrite the same name; several
+            # Hiddify versions can create successfully while rejecting that
+            # immediate stabilization PATCH.  An optional note remains
+            # best-effort and can never turn a confirmed create into failure.
+            note = str(comment or "").strip()
+            remote = None
+            if note:
+                try:
+                    remote = await self.call(
+                        sid,
+                        "update_user",
+                        external_ref=ref,
+                        changes={"comment": note[:1000]},
+                    )
+                except TenantBusinessError:
+                    remote = None
+
+            if remote is None:
+                # Avoid depending on immediate read-after-write consistency.
+                # Persist the requested package now; the next inventory refresh
+                # replaces it with authoritative panel counters/state.
+                data = {
+                    "external_ref": ref,
+                    "name": label,
+                    "comment": note[:1000],
+                    "usage_bytes": 0,
+                    "traffic_bytes": traffic_bytes,
+                    "expires_at": expires_at,
+                    "last_online": None,
+                    "active": True,
+                }
+                try:
+                    fetched = await self.call(
+                        sid, "get_user", external_ref=ref
+                    )
+                except TenantBusinessError:
+                    fetched = None
+                if fetched is not None:
+                    data = asdict(fetched)
+                    if note and not str(data.get("comment") or "").strip():
+                        data["comment"] = note[:1000]
+            else:
+                data = asdict(remote)
+
+            with transaction(self.conn):
+                self.save_user(
+                    sid,
+                    data,
+                    extra={"duration_days": int(days)},
+                )
+            results.append(self.user(actor, sid, uid))
 
         # User creation is a server operation, not a UI-only operation.
         # When the selected server is a primary server with active attached
@@ -322,6 +389,7 @@ class ServerAdminService:
         return {
             "users": results,
             "errors": errors,
+            "error_details": error_details,
             "node_errors": node_errors,
         }
 
