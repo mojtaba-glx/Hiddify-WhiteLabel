@@ -701,7 +701,11 @@ class HiddifyPanelAdapter:
         try:
             self._set_enabled_raw(target, secret, created_ref, True)
         except PanelError:
-            self._get(target, secret, created_ref)
+            # SellBot treats a successful POST as authoritative. Some Hiddify
+            # versions reject the follow-up state PATCH (or briefly hide the
+            # new user from GET) with a transient/template-state error.
+            # Do not turn a confirmed creation into a false trial failure.
+            pass
         return ProvisionResult(
             external_ref=created_ref,
             subscription_url=self.subscription_link(
