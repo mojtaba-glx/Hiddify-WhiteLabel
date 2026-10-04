@@ -177,6 +177,136 @@ class SmartSubscriptionService:
             raise SmartSubscriptionError("smart subscription target is invalid")
         return value
 
+    @staticmethod
+    def _panel_user_id(target: str) -> int:
+        raw = str(target or "").strip()
+        if not raw.startswith("paneluser:"):
+            raise SmartSubscriptionError("smart subscription target is invalid")
+        try:
+            value = int(raw.split(":", 1)[1])
+        except (TypeError, ValueError) as exc:
+            raise SmartSubscriptionError("smart subscription target is invalid") from exc
+        if value <= 0:
+            raise SmartSubscriptionError("smart subscription target is invalid")
+        return value
+
+    def _panel_user_response(
+        self,
+        conn,
+        adapter: PanelAdapter,
+        link: dict[str, Any],
+        *,
+        base64_output: bool,
+    ) -> SmartSubscriptionResponse:
+        tenant_id = int(link["tenant_id"])
+        panel_user_id = self._panel_user_id(str(link["target"]))
+        row = conn.execute(
+            "SELECT u.*, t.owner_telegram_id "
+            "FROM tenant_panel_users u "
+            "JOIN tenants t ON t.id=u.tenant_id "
+            "WHERE u.id=? AND u.tenant_id=? AND u.state!='deleted'",
+            (panel_user_id, tenant_id),
+        ).fetchone()
+        if row is None:
+            raise SmartSubscriptionError("subscription was not found")
+        user = dict(row)
+        if str(user.get("state") or "") != "active" or not bool(user.get("active")):
+            raise SmartSubscriptionError("subscription is not active")
+        expires_at = str(user.get("expires_at") or "").strip()
+        if expires_at:
+            try:
+                if parse_utc(expires_at) <= utcnow():
+                    raise SmartSubscriptionError("subscription is expired")
+            except (TypeError, ValueError) as exc:
+                raise SmartSubscriptionError("subscription is expired") from exc
+        total = max(0, int(user.get("traffic_bytes") or 0))
+        used = max(0, int(user.get("usage_bytes") or 0))
+        if total > 0 and used >= total:
+            raise SmartSubscriptionError("subscription is expired")
+
+        mappings = [
+            {
+                "server_id": int(user["server_id"]),
+                "external_ref": str(user["external_ref"]),
+            }
+        ]
+        mappings.extend(
+            dict(item)
+            for item in conn.execute(
+                "SELECT server_id, external_ref FROM tenant_panel_user_nodes "
+                "WHERE tenant_id=? AND source_user_id=? "
+                "AND external_ref IS NOT NULL "
+                "AND frozen_at IS NULL AND COALESCE(last_error,'')=''",
+                (tenant_id, panel_user_id),
+            ).fetchall()
+        )
+        deduped: list[dict[str, Any]] = []
+        seen: set[tuple[int, str]] = set()
+        for mapping in mappings:
+            key = (
+                int(mapping["server_id"]),
+                str(mapping["external_ref"] or "").strip(),
+            )
+            if not key[1] or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(
+                {"server_id": key[0], "external_ref": key[1]}
+            )
+        if not deduped:
+            raise SmartSubscriptionError("subscription has no active nodes")
+
+        business = TenantBusinessService(
+            conn,
+            tenant_id=tenant_id,
+            owner_telegram_id=int(user["owner_telegram_id"]),
+            secret_cipher=self.cipher,
+            panel_adapter=adapter,
+        )
+        payloads: list[str] = []
+        for mapping in deduped:
+            secret = ""
+            try:
+                _, target, secret = business._panel_material(
+                    int(mapping["server_id"])
+                )
+                payload = adapter.subscription_content(
+                    target=target,
+                    secret=secret,
+                    external_ref=str(mapping["external_ref"]),
+                )
+                if payload:
+                    payloads.append(payload)
+            except (PanelError, Exception) as exc:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                continue
+            finally:
+                secret = ""
+
+        lines = aggregate_lines(payloads)
+        if not lines:
+            raise SmartSubscriptionError("subscription is empty")
+        plain = "\n".join(lines)
+        body = (
+            base64.b64encode(plain.encode("utf-8")).decode("ascii")
+            if base64_output
+            else plain
+        )
+        title = str(user.get("name") or link.get("label") or "subscription")
+        title_b64 = base64.b64encode(title.encode("utf-8")).decode("ascii")
+        expire = int(parse_utc(expires_at).timestamp()) if expires_at else 0
+        headers = {
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "profile-title": f"base64:{title_b64}",
+            "profile-update-interval": "24",
+            "subscription-userinfo": (
+                f"upload=0; download={used}; total={total}; expire={expire}"
+            ),
+        }
+        return SmartSubscriptionResponse(body=body, headers=headers)
+
     def build(self, code: str, *, base64_output: bool = True) -> SmartSubscriptionResponse:
         token = str(code or "").strip()
         if not token or len(token) > 128:
@@ -190,8 +320,16 @@ class SmartSubscriptionService:
             ).fetchone()
             if link is None:
                 raise SmartSubscriptionError("subscription was not found")
+            target_value = str(link["target"] or "").strip()
+            if target_value.startswith("paneluser:"):
+                return self._panel_user_response(
+                    conn,
+                    adapter,
+                    dict(link),
+                    base64_output=bool(base64_output),
+                )
             tenant_id = int(link["tenant_id"])
-            subscription_id = self._subscription_id(str(link["target"]))
+            subscription_id = self._subscription_id(target_value)
             subscription_row = conn.execute(
                 "SELECT s.*, p.name AS plan_name, t.owner_telegram_id "
                 "FROM tenant_subscriptions s "

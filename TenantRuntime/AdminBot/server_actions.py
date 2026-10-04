@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from datetime import timedelta
 from html import escape
 from io import BytesIO
 
+import qrcode
 from telegram import InlineKeyboardMarkup
 from telegram.error import BadRequest
 from TenantRuntime.button_styles import inline_button as Button
 from TenantRuntime.server_admin import ServerAdminService, user_status, DEFAULT_SALES
 from TenantRuntime.business import TenantBusinessError
+from TenantRuntime.smart_subscription import decode_subscription_lines
 from Shared.timeutils import iso_utc, utcnow, format_tehran, parse_utc
 
 FLOW = "server_admin_flow"
@@ -106,6 +109,183 @@ def local_time(raw):
         return format_tehran(parse_utc(raw))
     except (ValueError, TypeError):
         return str(raw)
+
+
+def _format_gb(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "0"
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.2f}".rstrip("0").rstrip(".")
+
+
+def _qr_image(data: str) -> BytesIO:
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M)
+    qr.add_data(str(data))
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    bio = BytesIO()
+    bio.name = "qr.png"
+    img.save(bio, "PNG")
+    bio.seek(0)
+    return bio
+
+
+def _expiry_text(raw) -> str:
+    if not raw:
+        return "نامشخص"
+    try:
+        seconds = (parse_utc(raw) - utcnow()).total_seconds()
+    except (ValueError, TypeError):
+        return local_time(raw)
+    if seconds < 0:
+        days = max(0, math.ceil(abs(seconds) / 86400))
+        return f"منقضی شده ({days} روز پیش)"
+    days = max(1, math.ceil(seconds / 86400))
+    return f"{days} روز دیگر"
+
+
+def _panel_native_link(business, sid: int, external_ref: str) -> str:
+    try:
+        server = business.server(int(sid))
+        target = business._panel_target(server)
+        return str(
+            business.panel_adapter.subscription_link(
+                target=target, external_ref=str(external_ref)
+            )
+            or ""
+        ).strip()
+    except (TenantBusinessError, PanelError, ValueError, TypeError):
+        return ""
+
+
+def _panel_user_page_link(business, sid: int, external_ref: str) -> str:
+    link = _panel_native_link(business, sid, external_ref)
+    if not link:
+        return ""
+    kind = str(business.server(int(sid)).get("panel_kind") or "").lower()
+    if kind == "hiddify" and link.rstrip("/").endswith("/all.txt"):
+        return link.rstrip("/")[:-len("all.txt")].rstrip("/") + "/"
+    return link
+
+
+def _cluster_labels(service, actor: int, sid: int, uid: int) -> list[str]:
+    try:
+        _, targets = service.related_targets(actor, sid, uid)
+    except (TenantBusinessError, ValueError, TypeError):
+        targets = [(int(sid), "")]
+    labels: list[str] = []
+    for target_sid, _ in targets:
+        try:
+            label = str(service.b.server(int(target_sid)).get("label") or "").strip()
+        except TenantBusinessError:
+            continue
+        if label and label not in labels:
+            labels.append(label)
+    return labels
+
+
+def _user_detail_text(service, actor: int, sid: int, uid: int, row: dict) -> str:
+    limit = int(row.get("traffic_bytes") or 0) / 1024**3
+    usage = int(row.get("usage_bytes") or 0) / 1024**3
+    labels = _cluster_labels(service, actor, sid, uid)
+    name = escape(str(row.get("name") or row.get("external_ref") or "کاربر"))
+    user_page = _panel_user_page_link(service.b, sid, str(row.get("external_ref") or ""))
+    header = (
+        f'👤 کاربر: <a href="{escape(user_page, quote=True)}">{name}</a>'
+        if user_page
+        else f"👤 کاربر: {name}"
+    )
+    location_line = (
+        "◇ سرویس لوکیشن: " + "، ".join(escape(x) for x in labels)
+        if labels
+        else f"⬖ سرور: {escape(str(service.b.server(sid).get('label') or 'نامشخص'))}"
+    )
+    return "\n".join(
+        [
+            header,
+            "❖⬩╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍⬩❖",
+            location_line,
+            (
+                f"📊مصرف: {usage:.1f} از {limit:.1f} گیگابایت"
+                if limit
+                else f"📊مصرف: {usage:.1f} گیگابایت (نامحدود)"
+            ),
+            f"📆انقضا: {escape(_expiry_text(row.get('expires_at')))}",
+            f"📶 وضعیت حساب: {STATUS_LABELS.get(user_status(row),'در انتظار')}",
+            f"📶 آخرین اتصال: {escape(local_time(row.get('last_online')))}",
+            f"📝یادداشت: {escape(row.get('comment') or '—')}",
+        ]
+    )
+
+
+def _user_detail_rows(sid: int, uid: int):
+    return [
+        [Button("کانفیگ ها📄", callback_data=f"srv:pconfigs:{sid}:{uid}")],
+        [Button("ویرایش کاربر✏️", callback_data=f"srv:pedit:{sid}:{uid}")],
+        [Button("تمدید اشتراک♾️", callback_data=f"srv:prenew:{sid}:{uid}")],
+        [Button("حذف کاربر🗑️", callback_data=f"srv:pdelete:{sid}:{uid}")],
+        [Button("بازگشت به لیست کاربران", callback_data=f"srv:users:{sid}")],
+    ]
+
+
+def _config_menu_rows(business, sid: int, uid: int, row: dict):
+    kind = str(business.server(int(sid)).get("panel_kind") or "").lower()
+    ref = str(row.get("external_ref") or "")
+    rows = [
+        [Button("📄 کانفیگ‌های مستقیم", callback_data=f"srv:pconfigs:{sid}:{uid}:direct", style="primary")],
+    ]
+    if kind == "xnet":
+        rows.extend(
+            [
+                [Button("🔗 لینک اشتراک X-NET", callback_data=f"srv:pconfigs:{sid}:{uid}:sub", style="primary")],
+                [Button("🌐 اشتراک هوشمند", callback_data=f"srv:pconfigs:{sid}:{uid}:multi", style="success")],
+                [Button("🌐 اشتراک هوشمند Base64", callback_data=f"srv:pconfigs:{sid}:{uid}:multi_b64", style="success")],
+            ]
+        )
+    else:
+        rows.extend(
+            [
+                [Button("🔄 اشتراک خودکار", callback_data=f"srv:pconfigs:{sid}:{uid}:auto_sub", style="primary")],
+                [Button("🔗 لینک اشتراک اصلی", callback_data=f"srv:pconfigs:{sid}:{uid}:sub", style="primary")],
+                [Button("🧬 لینک اشتراک Base64", callback_data=f"srv:pconfigs:{sid}:{uid}:sub_b64", style="primary")],
+                [Button("🌐 اشتراک هوشمند", callback_data=f"srv:pconfigs:{sid}:{uid}:multi", style="success")],
+                [Button("🌐 اشتراک هوشمند Base64", callback_data=f"srv:pconfigs:{sid}:{uid}:multi_b64", style="success")],
+            ]
+        )
+        panel_link = _panel_user_page_link(business, sid, ref)
+        if panel_link:
+            rows.append(
+                [Button("🚪 ورود به پنل کاربر", url=panel_link, style="success")]
+            )
+        else:
+            rows.append(
+                [Button("🚪 ورود به پنل کاربر", callback_data=f"srv:pconfigs:{sid}:{uid}:bot_link", style="success")]
+            )
+    rows.append(
+        [Button("🔙 برگشت به جزئیات کاربر", callback_data=f"srv:puser:{sid}:{uid}", style="primary")]
+    )
+    return rows
+
+
+def _creation_summary(flow: dict) -> str:
+    count = int(flow.get("count") or 1)
+    if count == 1:
+        return (
+            "لطفاً اطلاعات را تایید کنید:\n"
+            f"👤 کاربر: {flow['name']}\n"
+            f"📊 مصرف: {_format_gb(flow['gb'])} گیگابایت\n"
+            f"📅 مدت: {int(flow['days'])} روز"
+        )
+    return (
+        "لطفاً اطلاعات را تایید کنید:\n"
+        f"👥 تعداد کاربران: {count}\n"
+        f"👤 پیشوند نام: {flow['name']}\n"
+        f"📊 حجم هر کاربر: {_format_gb(flow['gb'])} گیگابایت\n"
+        f"📅 مدت: {int(flow['days'])} روز"
+    )
 
 
 async def edit(query, text, rows, *, html=False):
