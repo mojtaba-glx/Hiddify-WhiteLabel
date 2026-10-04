@@ -780,50 +780,159 @@ async def handle_callback(update, context, *, business, actor):
     elif action == "pconfigs":
         uid = int(parts[3])
         row = service.user(actor, sid, uid)
-        targets = service.related_targets(actor, sid, uid)[1]
-        rows = [
-            button("🔗 لینک اشتراک", f"srv:pconfigs:{sid}:{uid}:link"),
-            button("📄 کانفیگ مستقیم", f"srv:pconfigs:{sid}:{uid}:direct"),
-            button("بازگشت🔙", f"srv:puser:{sid}:{uid}"),
-        ]
-        if len(parts) > 4 and parts[4] == "link":
-            _, target, _ = business._panel_material(sid)
-            link = business.panel_adapter.subscription_link(
-                target=target, external_ref=row["external_ref"]
-            )
+        scoped_row, targets = service.related_targets(actor, sid, uid)
+        rows = _config_menu_rows(business, sid, uid, row)
+        cfg_type = parts[4] if len(parts) > 4 else ""
+
+        if not cfg_type:
             await show(
-                f"🔗 لینک اشتراک\n\n<code>{escape(link)}</code>", rows, html=True
+                _user_detail_text(service, actor, sid, uid, row),
+                rows,
+                html=True,
             )
-        elif len(parts) > 4 and parts[4] == "direct":
-            payload = []
+        elif cfg_type == "direct" and len(parts) == 5:
+            await show(
+                "📄 کانفیگ مستقیم\n"
+                f"👤 کاربر: {escape(str(row.get('name') or 'کاربر'))}\n"
+                "━━━━━━━━━━━━━━\n"
+                "پروتکل موردنظر را انتخاب کنید:",
+                [
+                    [Button("🟢 VLESS", callback_data=f"srv:pconfigs:{sid}:{uid}:direct:vless")],
+                    [Button("🔵 VMESS", callback_data=f"srv:pconfigs:{sid}:{uid}:direct:vmess")],
+                    [Button("🟠 TROJAN", callback_data=f"srv:pconfigs:{sid}:{uid}:direct:trojan")],
+                    [Button("🔙 بازگشت", callback_data=f"srv:pconfigs:{sid}:{uid}")],
+                ],
+                html=True,
+            )
+        elif cfg_type == "direct" and len(parts) >= 6:
+            proto = str(parts[5] or "").lower()
+            if proto not in {"vless", "vmess", "trojan"}:
+                raise ValueError("invalid direct protocol")
+            links: list[str] = []
+            seen: set[str] = set()
             errors = 0
-            for target, ref in targets:
+            for target_sid, ref in targets:
                 try:
-                    payload.append(
-                        str(
-                            await service.call(
-                                target, "subscription_content", external_ref=ref
-                            )
+                    raw = str(
+                        await service.call(
+                            target_sid,
+                            "subscription_content",
+                            external_ref=ref,
                         )
                     )
                 except TenantBusinessError:
                     errors += 1
-            if not payload:
-                raise TenantBusinessError("configs unavailable")
-            text = "\n".join(payload)
-            if errors:
-                text += f"\n\n⚠️ دریافت کانفیگ از {errors} سرور ممکن نشد."
-            if len(text) < 3000:
+                    continue
+                for line in decode_subscription_lines(raw):
+                    low = line.lower()
+                    if not low.startswith(proto + "://") or line in seen:
+                        continue
+                    seen.add(line)
+                    links.append(line)
+            if not links:
                 await show(
-                    "📄 کانفیگ‌ها\n<pre>" + escape(text) + "</pre>", rows, html=True
+                    f"❌ کانفیگ مستقیم {proto.upper()} یافت نشد.\n"
+                    "برای این کاربر هیچ کانفیگ مناسبی یافت نشد.",
+                    [[Button("🔙 بازگشت به منوی کانفیگ‌ها", callback_data=f"srv:pconfigs:{sid}:{uid}")]],
                 )
             else:
-                await update.effective_message.reply_document(
-                    BytesIO(text.encode()), filename=f"configs-{uid}.txt"
+                payload = "\n".join(links)
+                body = (
+                    f"🔗 کانفیگ‌های {proto.upper()}\n"
+                    "برای کپی، کل باکس زیر را یکجا کپی کنید:\n"
+                    f"<pre><code>{escape(payload)}</code></pre>"
                 )
-                await show("📄 کانفیگ‌ها در فایل ارسال شدند.", rows)
+                back_rows = [[Button("🔙 بازگشت به منوی کانفیگ‌ها", callback_data=f"srv:pconfigs:{sid}:{uid}")]]
+                if errors:
+                    body += f"\n⚠️ دریافت کانفیگ از {errors} سرور ممکن نشد."
+                if len(body) <= 3900:
+                    await show(body, back_rows, html=True)
+                else:
+                    await update.effective_message.reply_document(
+                        BytesIO(payload.encode()),
+                        filename=f"{proto}-configs-{uid}.txt",
+                    )
+                    await show("📄 کانفیگ‌ها در فایل ارسال شدند.", back_rows)
         else:
-            await show(user_text(row, business.server(sid)), rows, html=True)
+            kind = str(business.server(int(sid)).get("panel_kind") or "").lower()
+            native = _panel_native_link(
+                business, sid, str(row.get("external_ref") or "")
+            )
+            panel_page = _panel_user_page_link(
+                business, sid, str(row.get("external_ref") or "")
+            )
+            url = ""
+            caption = ""
+
+            if cfg_type == "auto_sub":
+                if not native:
+                    raise TenantBusinessError("subscription link is unavailable")
+                url = (
+                    panel_page.rstrip("/") + "/sub/?asn=unknown"
+                    if kind == "hiddify" and panel_page
+                    else native
+                )
+                caption = "لینک اشتراک خودکار"
+            elif cfg_type in {"sub", "link"}:
+                if not native:
+                    raise TenantBusinessError("subscription link is unavailable")
+                url = native
+                caption = "لینک اشتراک X-NET" if kind == "xnet" else "لینک اشتراک"
+            elif cfg_type == "sub_b64":
+                if not native:
+                    raise TenantBusinessError("subscription link is unavailable")
+                sep = "&" if "?" in native else "?"
+                url = native + sep + "base64=1"
+                caption = "لینک اشتراک b64"
+            elif cfg_type in {"multi", "multi_b64"}:
+                base64_output = cfg_type == "multi_b64"
+                if scoped_row.get("subscription_id"):
+                    url = business.admin_smart_subscription_link(
+                        actor,
+                        subscription_id=int(scoped_row["subscription_id"]),
+                        base64_output=base64_output,
+                    )
+                else:
+                    source_uid = int(scoped_row.get("_source_user_id") or uid)
+                    url = business.admin_panel_smart_subscription_link(
+                        actor,
+                        panel_user_id=source_uid,
+                        base64_output=base64_output,
+                    )
+                caption = (
+                    "لینک اشتراک هوشمند b64"
+                    if base64_output
+                    else "لینک اشتراک هوشمند"
+                )
+            elif cfg_type == "bot_link":
+                if not panel_page:
+                    raise TenantBusinessError("panel user link is unavailable")
+                await show(
+                    f"🌐 لینک پنل کاربر\n{escape(panel_page)}",
+                    [
+                        [Button("🚪 باز کردن پنل کاربر", url=panel_page, style="success")],
+                        [Button("🔙 برگشت به منوی لینک‌ها", callback_data=f"srv:pconfigs:{sid}:{uid}")],
+                    ],
+                    html=True,
+                )
+                return True
+            else:
+                raise ValueError("invalid config action")
+
+            if not url:
+                raise TenantBusinessError("subscription link is unavailable")
+            bot = getattr(context, "bot", None)
+            if bot is None:
+                raise TenantBusinessError("telegram bot is unavailable")
+            chat_id = getattr(update.effective_chat, "id", None) or actor
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=_qr_image(url),
+                caption=f"{caption}\n{url}",
+                reply_markup=markup(
+                    [[Button("🔙 بازگشت به منوی کانفیگ‌ها", callback_data=f"srv:pconfigs:{sid}:{uid}")]]
+                ),
+            )
     elif action == "plans":
         sales = service.sales(sid)
         modes = {
