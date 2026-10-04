@@ -228,6 +228,112 @@ class ServerAdminService:
             )
         return 30
 
+    def _adopt_created_identity(
+        self,
+        sid: int,
+        uid: int,
+        *,
+        requested_ref: str,
+        panel_ref: str,
+        duration_days: int,
+    ) -> int:
+        actual = str(panel_ref or "").strip()
+        requested = str(requested_ref or "").strip()
+        if not actual or len(actual) > 255:
+            raise TenantBusinessError("invalid panel user identity")
+
+        meta = json.dumps(
+            {
+                "duration_days": int(duration_days),
+                "create_request_ref": requested,
+            },
+            ensure_ascii=False,
+        )
+        if actual == requested:
+            with transaction(self.conn):
+                self.conn.execute(
+                    "UPDATE tenant_panel_users "
+                    "SET extra_json=json_patch(extra_json, ?) "
+                    "WHERE id=? AND tenant_id=? AND server_id=?",
+                    (meta, int(uid), self.tenant_id, int(sid)),
+                )
+            return int(uid)
+
+        collision = self.conn.execute(
+            "SELECT id FROM tenant_panel_users "
+            "WHERE tenant_id=? AND server_id=? AND external_ref=? AND id<>? "
+            "LIMIT 1",
+            (self.tenant_id, int(sid), actual, int(uid)),
+        ).fetchone()
+        with transaction(self.conn):
+            if collision is not None:
+                adopted_uid = int(collision["id"])
+                # The remote row may already be present from a previous refresh.
+                # Keep it as the canonical record and retire only our pending
+                # placeholder.  Never manufacture a second local user.
+                self.conn.execute(
+                    "UPDATE tenant_panel_users SET state='deleted' "
+                    "WHERE id=? AND tenant_id=? AND server_id=?",
+                    (int(uid), self.tenant_id, int(sid)),
+                )
+                self.conn.execute(
+                    "UPDATE tenant_panel_users "
+                    "SET extra_json=json_patch(extra_json, ?) "
+                    "WHERE id=? AND tenant_id=? AND server_id=?",
+                    (meta, adopted_uid, self.tenant_id, int(sid)),
+                )
+                return adopted_uid
+
+            self.conn.execute(
+                "UPDATE tenant_panel_users "
+                "SET external_ref=?, extra_json=json_patch(extra_json, ?) "
+                "WHERE id=? AND tenant_id=? AND server_id=?",
+                (actual, meta, int(uid), self.tenant_id, int(sid)),
+            )
+        return int(uid)
+
+    async def _recover_created_identity(
+        self,
+        sid: int,
+        *,
+        requested_ref: str,
+        uid: int,
+    ) -> str | None:
+        requested = str(requested_ref or "").strip()
+        try:
+            recovered = await self.call(
+                sid, "get_user", external_ref=requested
+            )
+            actual = str(recovered.external_ref or "").strip()
+            if actual:
+                return actual
+        except TenantBusinessError:
+            pass
+
+        marker = (
+            f"WhiteLabel tenant={int(self.tenant_id)} "
+            f"subscription={-int(uid)}"
+        )
+        try:
+            rows = await self.call(sid, "list_users")
+        except TenantBusinessError:
+            return None
+        if not isinstance(rows, list):
+            return None
+
+        matches: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            actual = str(row.get("external_ref") or "").strip()
+            if not actual:
+                continue
+            comment = str(row.get("comment") or "")
+            if actual == requested or marker in comment:
+                matches.append(actual)
+        unique = list(dict.fromkeys(matches))
+        return unique[0] if len(unique) == 1 else None
+
     async def create_users(
         self, actor, sid, *, name, gb, days, count=1, operation_key, comment=""
     ):
@@ -248,7 +354,7 @@ class ServerAdminService:
         expires_at = iso_utc(utcnow() + timedelta(days=int(days)))
 
         for index in range(int(count)):
-            ref = str(
+            requested_ref = str(
                 uuid.uuid5(
                     uuid.NAMESPACE_URL,
                     f"wl-admin:{self.tenant_id}:{sid}:{operation_key}:{index}",
@@ -256,26 +362,55 @@ class ServerAdminService:
             )
             label = clean if count == 1 else f"{clean}-{index+1}"
             existing = self.conn.execute(
-                "SELECT * FROM tenant_panel_users WHERE tenant_id=? AND server_id=? AND external_ref=?",
-                (self.tenant_id, int(sid), ref),
+                "SELECT * FROM tenant_panel_users "
+                "WHERE tenant_id=? AND server_id=? AND state!='deleted' "
+                "AND (external_ref=? OR "
+                "json_extract(extra_json,'$.create_request_ref')=?) "
+                "ORDER BY CASE WHEN external_ref=? THEN 0 ELSE 1 END LIMIT 1",
+                (
+                    self.tenant_id,
+                    int(sid),
+                    requested_ref,
+                    requested_ref,
+                    requested_ref,
+                ),
             ).fetchone()
             if existing and existing["state"] == "active":
                 results.append(dict(existing))
                 continue
 
-            with transaction(self.conn):
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO tenant_panel_users "
-                    "(tenant_id,server_id,external_ref,name,state) "
-                    "VALUES (?,?,?,?,'pending')",
-                    (self.tenant_id, int(sid), ref, label),
-                )
-            uid = self.conn.execute(
-                "SELECT id FROM tenant_panel_users "
-                "WHERE tenant_id=? AND server_id=? AND external_ref=?",
-                (self.tenant_id, int(sid), ref),
-            ).fetchone()["id"]
+            initial_meta = json.dumps(
+                {
+                    "duration_days": int(days),
+                    "create_request_ref": requested_ref,
+                },
+                ensure_ascii=False,
+            )
+            if existing is None:
+                with transaction(self.conn):
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO tenant_panel_users "
+                        "(tenant_id,server_id,external_ref,name,state,extra_json) "
+                        "VALUES (?,?,?,?,'pending',?)",
+                        (
+                            self.tenant_id,
+                            int(sid),
+                            requested_ref,
+                            label,
+                            initial_meta,
+                        ),
+                    )
+                existing = self.conn.execute(
+                    "SELECT * FROM tenant_panel_users "
+                    "WHERE tenant_id=? AND server_id=? AND external_ref=?",
+                    (self.tenant_id, int(sid), requested_ref),
+                ).fetchone()
+            if existing is None:
+                errors += 1
+                error_details.append(f"{label}: ثبت موقت کاربر ناموفق بود")
+                continue
 
+            uid = int(existing["id"])
             request = ProvisionRequest(
                 tenant_id=self.tenant_id,
                 server_id=int(sid),
@@ -285,45 +420,54 @@ class ServerAdminService:
                 duration_days=int(days),
                 expires_at=expires_at,
                 idempotency_key=f"admin:{operation_key}:{index}",
-                external_ref=ref,
+                external_ref=requested_ref,
                 name=label,
             )
 
-            created = None
+            panel_ref = requested_ref
             try:
                 created = await self.call(
                     sid,
                     "provision",
                     request=request,
                 )
-                if created.external_ref != ref:
+                panel_ref = str(created.external_ref or "").strip()
+                if not panel_ref:
                     raise TenantBusinessError(
-                        "panel returned a different user identity"
+                        "panel returned an empty user identity"
                     )
             except TenantBusinessError:
-                # SellBot's create path is idempotent: a lost POST response or
-                # a post-create stabilization failure must not create a second
-                # user or report a false failure when the deterministic UUID
-                # already exists remotely.
-                try:
-                    recovered = await self.call(
-                        sid, "get_user", external_ref=ref
-                    )
-                except TenantBusinessError:
+                # A Hiddify POST may already have created the user even when
+                # the follow-up response/stabilization step fails.  Recover by
+                # deterministic UUID first, then by the unique SellBot-style
+                # tenant/subscription marker embedded in the remote comment.
+                recovered_ref = await self._recover_created_identity(
+                    sid,
+                    requested_ref=requested_ref,
+                    uid=uid,
+                )
+                if not recovered_ref:
                     errors += 1
                     error_details.append(f"{label}: ساخت روی پنل تأیید نشد")
                     continue
-                if str(recovered.external_ref or "").strip() != ref:
-                    errors += 1
-                    error_details.append(f"{label}: شناسه پنل نامعتبر بود")
-                    continue
-                created = recovered
+                panel_ref = recovered_ref
+
+            try:
+                uid = self._adopt_created_identity(
+                    int(sid),
+                    uid,
+                    requested_ref=requested_ref,
+                    panel_ref=panel_ref,
+                    duration_days=int(days),
+                )
+            except (TenantBusinessError, sqlite3.IntegrityError):
+                errors += 1
+                error_details.append(f"{label}: شناسه برگشتی پنل قابل ثبت نبود")
+                continue
+            ref = panel_ref
 
             # The create request already carries the final name/package.  Do
-            # not require an extra PATCH just to rewrite the same name; several
-            # Hiddify versions can create successfully while rejecting that
-            # immediate stabilization PATCH.  An optional note remains
-            # best-effort and can never turn a confirmed create into failure.
+            # not require an extra PATCH just to rewrite the same name.
             note = str(comment or "").strip()
             remote = None
             if note:
@@ -338,9 +482,6 @@ class ServerAdminService:
                     remote = None
 
             if remote is None:
-                # Avoid depending on immediate read-after-write consistency.
-                # Persist the requested package now; the next inventory refresh
-                # replaces it with authoritative panel counters/state.
                 data = {
                     "external_ref": ref,
                     "name": label,
@@ -368,14 +509,13 @@ class ServerAdminService:
                 self.save_user(
                     sid,
                     data,
-                    extra={"duration_days": int(days)},
+                    extra={
+                        "duration_days": int(days),
+                        "create_request_ref": requested_ref,
+                    },
                 )
             results.append(self.user(actor, sid, uid))
 
-        # User creation is a server operation, not a UI-only operation.
-        # When the selected server is a primary server with active attached
-        # nodes, replicate each successfully-created user to every node using
-        # the same provider-neutral PanelAdapter path (Hiddify/X-UI/X-NET).
         node_errors = 0
         if results and self.b.list_nodes(parent_server_id=int(sid)):
             for user in results:

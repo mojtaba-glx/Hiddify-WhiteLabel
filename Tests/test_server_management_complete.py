@@ -1205,3 +1205,103 @@ def test_admin_create_does_not_require_redundant_name_patch(
         )
 
     asyncio.run(run())
+
+
+def test_admin_create_adopts_panel_generated_uuid_and_retry_is_idempotent(
+    conn, factories, cipher
+):
+    b, p, s, source, _, _, _ = setup(conn, factories, cipher)
+    calls: list[str] = []
+
+    def generated_uuid(*, target, secret, request):
+        del secret
+        calls.append(request.external_ref)
+        actual = "panel-generated-admin-uuid"
+        if (target.endpoint, actual) not in p.users:
+            p.seed(
+                target.endpoint,
+                actual,
+                name=request.name,
+                usage=0,
+                traffic=request.traffic_bytes,
+            )
+            p.users[target.endpoint, actual]["expires_at"] = request.expires_at
+        return ProvisionResult(actual)
+
+    p.provision = generated_uuid
+
+    async def run():
+        first = await s.create_users(
+            7001,
+            source["id"],
+            name="Panel UUID",
+            gb=1,
+            days=1,
+            count=1,
+            operation_key="panel-generated-uuid",
+        )
+        assert first["errors"] == 0
+        assert len(first["users"]) == 1
+        row = first["users"][0]
+        assert row["external_ref"] == "panel-generated-admin-uuid"
+        meta = json.loads(row["extra_json"])
+        assert meta["create_request_ref"] != row["external_ref"]
+
+        again = await s.create_users(
+            7001,
+            source["id"],
+            name="Panel UUID",
+            gb=1,
+            days=1,
+            count=1,
+            operation_key="panel-generated-uuid",
+        )
+        assert again["errors"] == 0
+        assert again["users"][0]["id"] == row["id"]
+        assert len(calls) == 1
+
+    asyncio.run(run())
+
+
+def test_admin_create_recovers_panel_generated_uuid_by_remote_marker(
+    conn, factories, cipher
+):
+    b, p, s, source, _, _, _ = setup(conn, factories, cipher)
+
+    def create_then_lose_response(*, target, secret, request):
+        del secret
+        actual = "panel-generated-after-error"
+        p.seed(
+            target.endpoint,
+            actual,
+            name=request.name,
+            usage=0,
+            traffic=request.traffic_bytes,
+        )
+        p.users[target.endpoint, actual]["expires_at"] = request.expires_at
+        p.users[target.endpoint, actual]["comment"] = (
+            f"WhiteLabel tenant={request.tenant_id} "
+            f"subscription={request.subscription_id}"
+        )
+        raise PanelError("response lost after remote create")
+
+    p.provision = create_then_lose_response
+
+    async def run():
+        report = await s.create_users(
+            7001,
+            source["id"],
+            name="Recovered panel UUID",
+            gb=1,
+            days=1,
+            count=1,
+            operation_key="recover-panel-generated-uuid",
+        )
+        assert report["errors"] == 0
+        assert len(report["users"]) == 1
+        assert (
+            report["users"][0]["external_ref"]
+            == "panel-generated-after-error"
+        )
+
+    asyncio.run(run())
