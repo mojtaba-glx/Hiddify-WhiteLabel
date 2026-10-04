@@ -800,6 +800,109 @@ def test_real_wallet_gift_is_single_use_per_customer(
     assert int(stored["used_count"]) == 1
 
 
+
+def test_wallet_view_matches_sellbot_single_toman_balance_and_status() -> None:
+    text = user_handlers._wallet_text(
+        {
+            "primary_account": {"balance": 100000, "currency": "IRR"},
+            "primary_currency": "IRR",
+            "customer_status": "active",
+        }
+    )
+    assert text == (
+        "🔻 موجودی کیف پول شما 100,000 تومان میباشد\n"
+        "👤 وضعیت کاربر: 🟢 فعال"
+    )
+    assert "IRR" not in text
+    assert "100000" not in text
+
+
+def test_wallet_menu_matches_sellbot_payment_method_shape() -> None:
+    class StubBusiness:
+        def list_methods(self, *, currency=None):
+            assert currency is None
+            return [
+                {
+                    "id": 9,
+                    "title": "کارت به کارت",
+                    "provider_icon": "💳",
+                }
+            ]
+
+    rows = user_handlers._wallet_method_rows(
+        StubBusiness(), {"show_gift_button": False}, include_back=True
+    )
+    labels = [[button.text for button in row] for row in rows]
+    callbacks = [[button.callback_data for button in row] for row in rows]
+    assert labels == [["💳 کارت به کارت"], ["بازگشت"]]
+    assert callbacks[0] == ["shop:wallettopupstart:9"]
+
+
+def test_admin_profile_matches_sellbot_wallet_and_full_stats() -> None:
+    class StubBusiness:
+        def customer_profile_admin(self, actor, *, customer_id):
+            return {
+                "id": customer_id,
+                "display_name": "SpeedlVpn",
+                "username": "SpeedlVpn",
+                "telegram_user_id": 6119169885,
+                "trial_used_at": "2026-10-01T00:00:00+00:00",
+                "status": "active",
+                "full_stats": {
+                    "subs_bought": 3,
+                    "subs_connected": 3,
+                    "tx_total": 55,
+                    "tx_approved": 48,
+                    "orders_count": 37,
+                    "orders_gb": 440.0,
+                    "orders_price": 4795035,
+                    "orders_by_currency": [
+                        {"currency": "IRR", "count": 37, "amount": 4795035}
+                    ],
+                },
+            }
+
+        def customer_wallet_admin(self, actor, *, customer_id):
+            return {
+                "primary_account": {"balance": 113067, "currency": "IRR"},
+                "primary_currency": "IRR",
+                "accounts": [],
+                "history": [],
+            }
+
+    text = admin_userbot._user_profile_text(StubBusiness(), 7001, 1)
+    for expected in (
+        "🔸 موجودی کیف پول: 113,067تومان",
+        "🔸 تعداد اشتراک‌های خریداری شده: 3",
+        "🔸 تعداد اشتراک‌های متصل شده: 3",
+        "🔸 تعداد تراکنشات: 55",
+        "🔸 تعداد تراکنشات تایید شده: 48",
+        "🔸 تعداد سفارشات: 37",
+        "🔸 مجموع حجم سفارشات(GB): 440.0",
+        "🔸 مجموع ارزش سفارشات: 4,795,035تومان",
+    ):
+        assert expected in text
+    assert "113,067 113067" not in text
+    assert "تیکت باز" not in text
+
+
+def test_numeric_wallet_currency_is_rejected_for_future_admin_edits(
+    conn, factories, cipher
+) -> None:
+    _tenant, service = _service(conn, factories, cipher)
+    customer = service.register_customer(
+        7101, display_name="Wallet User", username="wallet_user"
+    )
+    with pytest.raises(ValueError):
+        service.adjust_wallet_admin(
+            7001,
+            customer_id=int(customer["id"]),
+            currency="100000",
+            amount=100000,
+            note="should be rejected",
+        )
+
+
 def test_gift_voucher_edits_change_real_redemption_rules(
     conn, factories, cipher
 ) -> None:
@@ -998,7 +1101,8 @@ def test_admin_forms_use_bottom_cancel_and_not_pipe_for_core_new_flows() -> None
     assert "payment_add_title" in source
     assert '"kind":"gift_add_code"' in source
     assert '"kind":"referral_manual_customer"' in source
-    assert '"kind":"wallet_set_currency"' in source
+    assert '"kind": "wallet_set_amount"' in source
+    assert '"kind":"wallet_set_currency"' not in source
     assert "payment_add_instructions" in source
     assert "gift_add_expiry" in source
 

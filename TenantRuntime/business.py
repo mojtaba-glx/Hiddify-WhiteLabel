@@ -203,6 +203,17 @@ def _text(value: object, maximum: int, *, required: bool = True) -> str:
     return result
 
 
+def _currency_code(value: object, *, fallback: str = "") -> str:
+    """Normalize an ISO-like wallet currency code and reject numeric pseudo-currencies."""
+    clean = str(value or "").strip().upper()
+    if re.fullmatch(r"[A-Z][A-Z0-9]{2,7}", clean):
+        return clean
+    backup = str(fallback or "").strip().upper()
+    if backup and re.fullmatch(r"[A-Z][A-Z0-9]{2,7}", backup):
+        return backup
+    raise ValueError("invalid currency code")
+
+
 class TenantBusinessService:
     def __init__(
         self,
@@ -1979,7 +1990,7 @@ class TenantBusinessService:
         order_id: int | None = None,
         note: str = "",
     ) -> dict[str, Any]:
-        currency_code = _text(currency, 8).upper()
+        currency_code = _currency_code(currency)
         delta = int(amount)
         if delta == 0:
             raise ValueError("wallet amount must be non-zero")
@@ -2038,6 +2049,67 @@ class TenantBusinessService:
         assert tx is not None
         return dict(tx)
 
+    def _preferred_wallet_currency(self, customer_id: int) -> str:
+        cid = int(customer_id)
+        accounts = [
+            dict(row)
+            for row in self.conn.execute(
+                "SELECT currency,balance FROM tenant_wallet_accounts "
+                "WHERE tenant_id=? AND customer_id=? ORDER BY balance DESC,currency",
+                (self.tenant_id, cid),
+            ).fetchall()
+        ]
+        valid_accounts = [
+            row for row in accounts
+            if re.fullmatch(r"[A-Z][A-Z0-9]{2,7}", str(row.get("currency") or "").upper())
+        ]
+        if valid_accounts:
+            for preferred in ("IRR", "IRT"):
+                hit = next(
+                    (row for row in valid_accounts if str(row["currency"]).upper() == preferred),
+                    None,
+                )
+                if hit is not None and int(hit.get("balance") or 0) > 0:
+                    return preferred
+            return str(valid_accounts[0]["currency"]).upper()
+
+        row = self.conn.execute(
+            "SELECT currency FROM tenant_orders "
+            "WHERE tenant_id=? AND customer_id=? "
+            "ORDER BY id DESC LIMIT 1",
+            (self.tenant_id, cid),
+        ).fetchone()
+        if row is not None:
+            try:
+                return _currency_code(row["currency"])
+            except ValueError:
+                pass
+
+        row = self.conn.execute(
+            "SELECT currency FROM tenant_sale_plans "
+            "WHERE tenant_id=? AND status='active' "
+            "ORDER BY id DESC LIMIT 1",
+            (self.tenant_id,),
+        ).fetchone()
+        if row is not None:
+            try:
+                return _currency_code(row["currency"])
+            except ValueError:
+                pass
+
+        row = self.conn.execute(
+            "SELECT currency FROM tenant_payment_methods "
+            "WHERE tenant_id=? AND status='active' "
+            "ORDER BY priority,id LIMIT 1",
+            (self.tenant_id,),
+        ).fetchone()
+        if row is not None:
+            try:
+                return _currency_code(row["currency"])
+            except ValueError:
+                pass
+        return "IRR"
+
     def wallet_summary(self, actor_id: int) -> dict[str, Any]:
         customer = self._customer(actor_id, active=False)
         accounts = [
@@ -2084,7 +2156,26 @@ class TenantBusinessService:
             key=lambda item: str(item.get("created_at") or ""),
             reverse=True,
         )[:15]
-        return {"accounts": accounts, "history": history}
+        primary_currency = self._preferred_wallet_currency(int(customer["id"]))
+        primary_account = next(
+            (
+                row for row in accounts
+                if str(row.get("currency") or "").upper() == primary_currency
+            ),
+            {
+                "tenant_id": self.tenant_id,
+                "customer_id": int(customer["id"]),
+                "currency": primary_currency,
+                "balance": 0,
+            },
+        )
+        return {
+            "accounts": accounts,
+            "history": history,
+            "primary_currency": primary_currency,
+            "primary_account": dict(primary_account),
+            "customer_status": str(customer.get("status") or "active"),
+        }
 
     def create_wallet_topup(
         self,
@@ -2095,7 +2186,7 @@ class TenantBusinessService:
     ) -> dict[str, Any]:
         customer = self._customer(actor_id)
         value = int(amount)
-        currency_code = _text(currency, 8).upper()
+        currency_code = _currency_code(currency)
         if value <= 0:
             raise ValueError("invalid wallet topup amount")
         now = iso_utc(utcnow())
@@ -7018,6 +7109,45 @@ class TenantBusinessService:
                 (self.tenant_id, int(customer_id)),
             ).fetchall()
         ]
+        payments = self._payment_rows(customer_id=int(customer_id))
+        order_stats = self.conn.execute(
+            "SELECT COUNT(*) AS cnt, "
+            "COALESCE(SUM(p.traffic_gb),0) AS gb, "
+            "COALESCE(SUM(o.amount),0) AS price "
+            "FROM tenant_orders o "
+            "JOIN tenant_sale_plans p "
+            "ON p.id=o.plan_id AND p.tenant_id=o.tenant_id "
+            "WHERE o.tenant_id=? AND o.customer_id=? "
+            "AND o.order_kind IN ('purchase','renewal')",
+            (self.tenant_id, int(customer_id)),
+        ).fetchone()
+        order_totals = [
+            dict(item)
+            for item in self.conn.execute(
+                "SELECT o.currency, COUNT(*) AS count, "
+                "COALESCE(SUM(o.amount),0) AS amount "
+                "FROM tenant_orders o "
+                "WHERE o.tenant_id=? AND o.customer_id=? "
+                "AND o.order_kind IN ('purchase','renewal') "
+                "GROUP BY o.currency ORDER BY o.currency",
+                (self.tenant_id, int(customer_id)),
+            ).fetchall()
+        ]
+        result["full_stats"] = {
+            "subs_bought": int(result.get("subscriptions_total") or 0),
+            # SellBot treats every stored service as a connected service in
+            # the profile counter, regardless of its current expiry status.
+            "subs_connected": int(result.get("subscriptions_total") or 0),
+            "tx_total": len(payments),
+            "tx_approved": sum(
+                1 for item in payments
+                if str(item.get("status") or "").lower() == "approved"
+            ),
+            "orders_count": int(order_stats["cnt"] or 0) if order_stats else 0,
+            "orders_gb": float(order_stats["gb"] or 0) if order_stats else 0.0,
+            "orders_price": int(order_stats["price"] or 0) if order_stats else 0,
+            "orders_by_currency": order_totals,
+        }
         return result
 
     def set_customer_status_admin(
@@ -7338,7 +7468,25 @@ class TenantBusinessService:
                 (self.tenant_id, int(customer_id)),
             ).fetchall()
         ]
-        return {"accounts": accounts, "history": history}
+        primary_currency = self._preferred_wallet_currency(int(customer_id))
+        primary_account = next(
+            (
+                row for row in accounts
+                if str(row.get("currency") or "").upper() == primary_currency
+            ),
+            {
+                "tenant_id": self.tenant_id,
+                "customer_id": int(customer_id),
+                "currency": primary_currency,
+                "balance": 0,
+            },
+        )
+        return {
+            "accounts": accounts,
+            "history": history,
+            "primary_currency": primary_currency,
+            "primary_account": dict(primary_account),
+        }
 
     def reset_customer_trial_admin(
         self, actor_id: int, *, customer_id: int
