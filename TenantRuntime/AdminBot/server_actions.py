@@ -15,6 +15,7 @@ from telegram.error import BadRequest
 from TenantRuntime.button_styles import inline_button as Button
 from TenantRuntime.server_admin import ServerAdminService, user_status, DEFAULT_SALES
 from TenantRuntime.business import TenantBusinessError
+from TenantRuntime.panels import PanelError
 from TenantRuntime.smart_subscription import decode_subscription_lines
 from Shared.timeutils import iso_utc, utcnow, format_tehran, parse_utc
 
