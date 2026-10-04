@@ -1101,9 +1101,23 @@ class ServerAdminService:
             if settings[key] is not None:
                 parse_utc(settings[key])
         if (
-            settings["discount_step_gb"] < 1
-            or max(settings["discount_percent_step"], settings["discount_percent_max"])
-            > 100
+            settings["discount_step_gb"] < 0
+            or min(
+                settings["discount_percent_step"],
+                settings["discount_percent_max"],
+            ) < 0
+            or max(
+                settings["discount_percent_step"],
+                settings["discount_percent_max"],
+            ) > 100
+            or (
+                settings["discount_simple_enabled"]
+                and (
+                    settings["discount_step_gb"] < 1
+                    or settings["discount_percent_step"] < 1
+                    or settings["discount_percent_max"] < 1
+                )
+            )
         ):
             raise ValueError("invalid volume discount")
         tiers = settings["discount_tiers"]
