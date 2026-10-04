@@ -15,13 +15,15 @@ def _month_mode(sales: dict) -> bool:
     return sales.get("pricing_model") == "sellbot_month"
 
 
-def rows(business, *, subscription=None):
+def rows(business, *, subscription=None, server_id=None):
     service = ServerAdminService(business)
     result = []
     servers = business.list_purchase_servers()
     for server in servers:
         sid = int(server["id"])
         if subscription and sid != int(subscription.get("server_id") or 0):
+            continue
+        if server_id is not None and sid != int(server_id):
             continue
         sales = service.sales(sid)
         time_price = sales["price_month"] if _month_mode(sales) else sales["price_day"]
