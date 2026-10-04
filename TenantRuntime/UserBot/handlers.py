@@ -1338,6 +1338,8 @@ def _sorted_purchase_plans(
 def _plan_buttons(
     plans: list[dict[str, Any]],
     settings: dict[str, Any],
+    *,
+    server_id: int = 0,
 ) -> list[list[TelegramInlineKeyboardButton]]:
     buttons = [
         _button(
@@ -1346,7 +1348,11 @@ def _plan_buttons(
                 f"{int(p.get('duration_days') or 0)} روز · "
                 f"{int(p.get('price') or 0):,} {p.get('currency') or ''}"
             ),
-            callback_data=f"shop:plan:{int(p['id'])}",
+            callback_data=(
+                f"shop:plan:{int(server_id)}:{int(p['id'])}"
+                if int(server_id or 0)
+                else f"shop:plan:{int(p['id'])}"
+            ),
             settings=settings,
         )
         for p in _sorted_purchase_plans(plans, settings)
@@ -1355,6 +1361,25 @@ def _plan_buttons(
         buttons,
         int(settings.get("plan_columns") or 1),
     )
+
+
+def _purchase_location_rows(
+    servers: list[dict[str, Any]],
+    settings: dict[str, Any],
+) -> list[list[TelegramInlineKeyboardButton]]:
+    """SellBot-parity first step: choose the purchase location before plans."""
+    items = list(servers)
+    if bool(settings.get("shuffle_server_layout", True)) and len(items) > 1:
+        random.shuffle(items)
+    buttons = [
+        _button(
+            str(server.get("label") or f"سرور #{server['id']}"),
+            callback_data=f"shop:buyloc:{int(server['id'])}",
+            settings=settings,
+        )
+        for server in items
+    ]
+    return _column_rows(buttons, int(settings.get("server_columns") or 1))
 
 
 def _purchase_server_rows(
@@ -1588,53 +1613,20 @@ async def _handle_main_reply_action(
     if text == BTN_BUY:
         if not bool(settings.get("enable_buy", True)):
             raise TenantBusinessError("purchase is disabled")
-        categories = (
-            business.list_plan_categories()
-            if bool(settings.get("plan_categories_enabled", True))
-            else []
-        )
-        plans = [
-            p for p in business.list_plans()
-            if not str(p.get("name") or "").startswith("__WHITELABEL_")
-        ]
-        if categories:
-            rows = [
-                [
-                    _button(
-                        f"📂 {category['title']}",
-                        callback_data=f"shop:buycat:{int(category['id'])}",
-                        settings=settings,
-                    )
-                ]
-                for category in categories
-            ]
-            if any(p.get("category_id") is None for p in plans):
-                rows.append([
-                    _button(
-                        "📋 سایر پلن‌ها",
-                        callback_data="shop:buycat:0",
-                        settings=settings,
-                    )
-                ])
-            body = (
-                str(settings.get("plans_list_text") or "").strip()
-                or "📂 دسته‌بندی پلن‌ها\nدسته موردنظر را انتخاب کنید:"
+        servers = business.list_purchase_servers()
+        if not servers:
+            await update.effective_message.reply_text(
+                "❌ هیچ سروری در دسترس نیست.",
+                reply_markup=_main_keyboard(spec, business),
             )
-        else:
-            rows = _plan_buttons(plans, settings)
-            if not rows:
-                rows = [[InlineKeyboardButton(
-                    "پلنی موجود نیست",
-                    callback_data="noop",
-                )]]
-            body = (
-                str(settings.get("plans_list_text") or "").strip()
-                or "📋 پلن موردنظر را انتخاب کنید:"
-            )
-        from TenantRuntime.UserBot import dynamic_plans
-        rows.extend(dynamic_plans.rows(business))
+            return True
+        rows = _purchase_location_rows(servers, settings)
+        rows.append([
+            _button("🔙بازگشت", callback_data="runtime:home", settings=settings)
+        ])
         await update.effective_message.reply_text(
-            body,
+            str(settings.get("servers_list_text") or "").strip()
+            or "📡 لطفاً لوکیشن مورد نظر خود را انتخاب کنید:",
             reply_markup=InlineKeyboardMarkup(rows),
         )
         return True
@@ -2449,6 +2441,30 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data == "shop:buy":
             if not bool(settings.get("enable_buy", True)):
                 raise TenantBusinessError("purchase is disabled")
+            servers = business.list_purchase_servers()
+            if not servers:
+                raise TenantBusinessError("no purchase server")
+            rows = _purchase_location_rows(servers, settings)
+            rows.append([
+                _button("🔙بازگشت", callback_data="runtime:home", settings=settings)
+            ])
+            await update.callback_query.edit_message_text(
+                str(settings.get("servers_list_text") or "").strip()
+                or "📡 لطفاً لوکیشن مورد نظر خود را انتخاب کنید:",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+
+        if data.startswith("shop:buyloc:"):
+            if not bool(settings.get("enable_buy", True)):
+                raise TenantBusinessError("purchase is disabled")
+            server_id = int(data.rsplit(":", 1)[1])
+            server = next(
+                (item for item in business.list_purchase_servers() if int(item["id"]) == server_id),
+                None,
+            )
+            if server is None:
+                raise TenantBusinessError("purchase server is unavailable")
             categories = (
                 business.list_plan_categories()
                 if bool(settings.get("plan_categories_enabled", True))
@@ -2457,57 +2473,51 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             plans = [
                 p for p in business.list_plans()
                 if not str(p.get("name") or "").startswith("__WHITELABEL_")
+                and p.get("server_id") in (None, server_id)
             ]
+            rows: list[list[TelegramInlineKeyboardButton]] = []
             if categories:
-                rows = [
-                    [
-                        _button(
-                            f"📂 {category['title']}",
-                            callback_data=f"shop:buycat:{int(category['id'])}",
-                            settings=settings,
-                        )
+                for category in categories:
+                    category_plans = [
+                        p for p in plans
+                        if int(p.get("category_id") or 0) == int(category["id"])
                     ]
-                    for category in categories
-                ]
+                    if category_plans:
+                        rows.append([
+                            _button(
+                                f"📂 {category['title']}",
+                                callback_data=f"shop:buycat:{server_id}:{int(category['id'])}",
+                                settings=settings,
+                            )
+                        ])
                 if any(p.get("category_id") is None for p in plans):
                     rows.append([
                         _button(
                             "📋 سایر پلن‌ها",
-                            callback_data="shop:buycat:0",
+                            callback_data=f"shop:buycat:{server_id}:0",
                             settings=settings,
                         )
                     ])
-                from TenantRuntime.UserBot import dynamic_plans
-                rows.extend(dynamic_plans.rows(business))
-                rows.append([
-                    _button(
-                        "🔙بازگشت",
-                        callback_data="runtime:home",
-                        settings=settings,
-                    )
-                ])
-                await update.callback_query.edit_message_text(
-                    str(settings.get("plans_list_text") or "").strip()
-                    or "📂 دسته‌بندی پلن‌ها\nدسته موردنظر را انتخاب کنید:",
-                    reply_markup=InlineKeyboardMarkup(rows),
+            else:
+                rows = _plan_buttons(
+                    plans,
+                    settings,
+                    server_id=server_id,
                 )
-                return
-
-            rows = _plan_buttons(plans, settings)
+            from TenantRuntime.UserBot import dynamic_plans
+            rows.extend(dynamic_plans.rows(business, server_id=server_id))
             if not rows:
                 rows = [[InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")]]
-            from TenantRuntime.UserBot import dynamic_plans
-            rows.extend(dynamic_plans.rows(business))
             rows.append([
                 _button(
-                    "🔙بازگشت",
-                    callback_data="runtime:home",
+                    "🔙 بازگشت به لوکیشن‌ها",
+                    callback_data="shop:buy",
                     settings=settings,
                 )
             ])
             await update.callback_query.edit_message_text(
-                str(settings.get("plans_list_text") or "").strip()
-                or "📋 پلن موردنظر را انتخاب کنید:",
+                "📋 پلن مورد نظر را انتخاب کنید:" if not categories
+                else "📋 پلن مورد نظر را انتخاب کنید:",
                 reply_markup=InlineKeyboardMarkup(rows),
             )
             return
@@ -2515,7 +2525,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data.startswith("shop:buycat:"):
             if not bool(settings.get("enable_buy", True)):
                 raise TenantBusinessError("purchase is disabled")
-            category_id = int(data.rsplit(":", 1)[1])
+            parts = data.split(":")
+            if len(parts) == 4:
+                server_id = int(parts[2])
+                category_id = int(parts[3])
+            else:
+                # Compatibility for old keyboards/messages generated before
+                # v1.2.4. New flow is always location -> category -> plan.
+                category_id = int(parts[2])
+                server_id = 0
+            if server_id:
+                business._purchase_server(server_id)
             if category_id > 0:
                 category = business.plan_category(category_id)
                 plans = business.list_plans(category_id=category_id)
@@ -2529,23 +2549,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             plans = [
                 p for p in plans
                 if not str(p.get("name") or "").startswith("__WHITELABEL_")
+                and (not server_id or p.get("server_id") in (None, server_id))
             ]
-            rows = _plan_buttons(plans, settings)
+            rows = _plan_buttons(plans, settings, server_id=server_id)
             if not rows:
                 rows = [[InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")]]
             rows.append([
                 _button(
-                    "🔙 دسته‌بندی‌ها",
-                    callback_data="shop:buy",
+                    "🔙 بازگشت به لوکیشن‌ها" if server_id else "🔙 دسته‌بندی‌ها",
+                    callback_data="shop:buyloc:" + str(server_id) if server_id else "shop:buy",
                     settings=settings,
                 )
             ])
             await update.callback_query.edit_message_text(
-                f"{title}\n\n"
-                + (
-                    str(settings.get("plans_list_text") or "").strip()
-                    or "پلن موردنظر را انتخاب کنید:"
-                ),
+                "📋 پلن مورد نظر را انتخاب کنید:",
                 reply_markup=InlineKeyboardMarkup(rows),
             )
             return
@@ -2553,45 +2570,49 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data.startswith("shop:plan:"):
             if not bool(settings.get("enable_buy", True)):
                 raise TenantBusinessError("purchase is disabled")
-            plan_id = int(data.rsplit(":", 1)[1])
+            parts = data.split(":")
+            if len(parts) == 4:
+                server_id = int(parts[2])
+                plan_id = int(parts[3])
+            else:
+                plan_id = int(parts[2])
+                server_id = 0
             plan = business.plan(plan_id, public=True)
-            servers = [x for x in business.list_purchase_servers() if plan.get("server_id") in (None,int(x["id"]))]
-            rows = _purchase_server_rows(
-                servers,
-                plan_id=plan_id,
-                settings=settings,
-            )
-            if not rows:
-                rows = [[
-                    InlineKeyboardButton(
-                        "سرور قابل خریدی موجود نیست",
-                        callback_data="noop",
-                    )
-                ]]
-            category_id = int(plan.get("category_id") or 0)
-            back_callback = (
-                f"shop:buycat:{category_id}"
-                if bool(settings.get("plan_categories_enabled", True))
-                and category_id > 0
-                else "shop:buy"
-            )
-            rows.append([
-                _button(
-                    "🔙 بازگشت به پلن‌ها",
-                    callback_data=back_callback,
-                    settings=settings,
+            if server_id:
+                business._purchase_server(server_id)
+                if plan.get("server_id") not in (None, server_id):
+                    raise TenantBusinessError("plan is not available on selected server")
+            else:
+                # Legacy callback: preserve the previous server-selection path.
+                servers = [
+                    x for x in business.list_purchase_servers()
+                    if plan.get("server_id") in (None, int(x["id"]))
+                ]
+                rows = _purchase_server_rows(servers, plan_id=plan_id, settings=settings)
+                if not rows:
+                    rows = [[InlineKeyboardButton("سرور قابل خریدی موجود نیست", callback_data="noop")]]
+                rows.append([
+                    _button("🔙 بازگشت به پلن‌ها", callback_data="shop:buy", settings=settings)
+                ])
+                await update.callback_query.edit_message_text(
+                    (str(settings.get("servers_list_text") or "").strip()
+                     or "🛰 سرور موردنظر را انتخاب کنید:")
+                    + "\n\n"
+                    + f"📦 {plan['name']} · {int(plan['traffic_gb'])}GB · "
+                    + f"{int(plan['duration_days'])} روز · "
+                    + f"{int(plan['price']):,} {plan['currency']}",
+                    reply_markup=InlineKeyboardMarkup(rows),
                 )
-            ])
+                return
+            order = business.create_order(actor, plan_id, server_id=server_id)
             await update.callback_query.edit_message_text(
-                (
-                    str(settings.get("servers_list_text") or "").strip()
-                    or "🛰 سرور موردنظر را انتخاب کنید:"
-                )
-                + "\n\n"
-                + f"📦 {plan['name']} · {int(plan['traffic_gb'])}GB · "
-                + f"{int(plan['duration_days'])} روز · "
-                + f"{int(plan['price']):,} {plan['currency']}",
-                reply_markup=InlineKeyboardMarkup(rows),
+                _checkout_text(order, business.wallet_summary(actor)),
+                reply_markup=_checkout_markup(
+                    int(order["id"]),
+                    settings,
+                    back_callback=f"shop:buycat:{server_id}:{int(plan.get('category_id') or 0)}",
+                    back_label="🔙 بازگشت",
+                ),
             )
             return
 
