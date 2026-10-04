@@ -112,6 +112,291 @@ def local_time(raw):
         return str(raw)
 
 
+_PERSIAN_DIGITS_TRANS = str.maketrans(
+    "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩",
+    "01234567890123456789",
+)
+
+
+def _normalize_digit_text(value):
+    return str(value or "").translate(_PERSIAN_DIGITS_TRANS)
+
+
+def _format_discount_tiers(tiers):
+    normalized = sorted(
+        (
+            {"gb": int(item["gb"]), "percent": int(item["percent"])}
+            for item in (tiers or [])
+            if int(item.get("gb") or 0) > 0 and int(item.get("percent") or 0) > 0
+        ),
+        key=lambda item: item["gb"],
+    )
+    if not normalized:
+        return "غیرفعال"
+    return " | ".join(
+        f"از {item['gb']} گیگ: {item['percent']}٪" for item in normalized
+    )
+
+
+def _parse_discount_tiers_text(text):
+    raw = _normalize_digit_text(text).strip()
+    if raw in {"0", "خاموش", "غیرفعال", "-"}:
+        return []
+    items = []
+    normalized = raw.replace("،", ",").replace("\n", ",").replace("؛", ",")
+    for part in normalized.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        separator = next((sep for sep in (":", "=", "-") if sep in part), None)
+        if not separator:
+            raise ValueError("invalid discount tier")
+        gb_text, percent_text = part.split(separator, 1)
+        gb = int(
+            _normalize_digit_text(
+                gb_text.replace("گیگ", "").replace("gb", "").replace("GB", "")
+            )
+            .replace(",", "")
+            .strip()
+        )
+        percent = int(
+            _normalize_digit_text(percent_text)
+            .replace("%", "")
+            .replace("٪", "")
+            .replace(",", "")
+            .strip()
+        )
+        if gb <= 0 or not 0 < percent <= 100:
+            raise ValueError("invalid discount tier")
+        items.append({"gb": gb, "percent": percent})
+    if not items or len({item["gb"] for item in items}) != len(items):
+        raise ValueError("invalid discount tier")
+    return sorted(items, key=lambda item: item["gb"])
+
+
+def _plan_mode_title(mode):
+    return {
+        "fixed": "فقط پلن‌های ثابت",
+        "dynamic": "فقط پلن پویا",
+        "mixed": "حالت ترکیبی (ثابت + پویا)",
+    }.get(mode, "نامشخص")
+
+
+def _plans_root_view(business, service, sid):
+    sales = service.sales(sid)
+    mode = sales["mode"]
+    rows = []
+    if mode in {"fixed", "mixed"}:
+        rows.append(button("📂 لیست دسته‌های پلن", f"srv:categories:{sid}"))
+    rows.append(button("⚙️تنظیمات پلن‌ها", f"srv:settings:{sid}"))
+    if mode in {"dynamic", "mixed"}:
+        rows.append(button("🎛 مدیریت حرفه‌ای تخفیف‌ها", f"srv:discounts:{sid}"))
+    rows.append(back(sid))
+    return (
+        f"مدیریت پلن‌ها برای سرور 🖥 {business.server(sid)['label']}\n"
+        "━━━━━━━━━━━━━━\n"
+        f"حالت نمایش فعلی در ربات کاربران: {_plan_mode_title(mode)}\n\n"
+        "یکی از گزینه‌های زیر را انتخاب کنید:",
+        rows,
+    )
+
+
+def _plans_settings_view(sid):
+    return (
+        "⚙️تنظیمات پلن‌ها\n\nیکی از گزینه‌های زیر را انتخاب کنید:",
+        [
+            button("نوع نمایش پلن‌ها📋", f"srv:mode:{sid}"),
+            button("تنظیم پلن پویا📈", f"srv:settings:{sid}:dynamic"),
+            back(sid, "plans"),
+        ],
+    )
+
+
+def _plan_mode_view(service, sid):
+    current = service.sales(sid)["mode"]
+
+    def mode_button(value, title):
+        selected = current == value
+        return Button(
+            ("✅ " if selected else "❌ ") + title,
+            callback_data=f"srv:mode:{sid}:{value}",
+            style="success" if selected else "danger",
+        )
+
+    return (
+        "⚙️تنظیمات پلن‌ها\n\nحالت نمایش پلن‌ها را انتخاب کنید:",
+        [
+            [
+                mode_button("fixed", "ثابت"),
+                mode_button("dynamic", "پویا"),
+                mode_button("mixed", "ترکیبی"),
+            ],
+            back(sid, "settings"),
+        ],
+    )
+
+
+def _dynamic_settings_view(service, sid):
+    sales = service.sales(sid)
+    tiers = sales.get("discount_tiers") or []
+    if tiers:
+        discount_line = f"🎚 تخفیف پلاکانی: {_format_discount_tiers(tiers)}"
+    else:
+        discount_line = (
+            f"🎁 تخفیف حجمی ساده: هر {sales['discount_step_gb']} گیگ "
+            f"+{sales['discount_percent_step']}٪ تا سقف "
+            f"{sales['discount_percent_max']}٪"
+        )
+    text = "\n".join(
+        [
+            "📈 تنظیم مقادیر پلن پویا",
+            "",
+            f"💰 قیمت هر گیگ: {int(sales['price_gb']):,} تومان",
+            f"💰 قیمت هر ماه: {int(sales['price_month']):,} تومان",
+            "",
+            (
+                f"📊 حجم قابل فروش: از {sales['min_gb']} تا {sales['max_gb']} "
+                f"گیگ (گام: {sales['step_gb']})"
+            ),
+            (
+                f"⌛ زمان اشتراک: از {sales['min_month']} تا "
+                f"{sales['max_month']} ماه (گام: {sales['step_month']})"
+            ),
+            "",
+            discount_line,
+            "",
+            "برای تغییر هر مقدار از دکمه‌های زیر استفاده کنید.",
+            (
+                "برای مدیریت و ویرایش تنظیمات تخفیف‌ها، "
+                "از دکمه‌ی اختصاصی استفاده کنید."
+            ),
+        ]
+    )
+    rows = [
+        button("💰 قیمت هر گیگ", f"srv:salesfield:{sid}:price_gb"),
+        button("💰 قیمت هر ماه", f"srv:salesfield:{sid}:price_month"),
+        button("📊 حداقل/حداکثر حجم و گام", f"srv:salesfield:{sid}:volume_range"),
+        button("⌛ حداقل/حداکثر زمان و گام", f"srv:salesfield:{sid}:time_range"),
+        back(sid, "settings"),
+    ]
+    return text, rows
+
+
+def _discount_timer_line(sales, kind, label):
+    raw = sales.get(f"discount_{kind}_until")
+    if not raw:
+        return ""
+    try:
+        end = parse_utc(raw)
+        remaining = int((end - utcnow()).total_seconds())
+    except (ValueError, TypeError):
+        return ""
+    if remaining <= 0:
+        return ""
+    days = remaining // 86400
+    hours = (remaining % 86400) // 3600
+    minutes = (remaining % 3600) // 60
+    parts = []
+    if days:
+        parts.append(f"{days} روز")
+    if hours:
+        parts.append(f"{hours} ساعت")
+    if minutes:
+        parts.append(f"{minutes} دقیقه")
+    remaining_text = " و ".join(parts) if parts else "کمتر از یک دقیقه"
+    return (
+        f"⏱ تایمر {label}: {remaining_text} مانده "
+        f"(پایان: {local_time(raw)})"
+    )
+
+
+def _discount_settings_view(service, sid):
+    sales = service.sales(sid)
+    simple_enabled = service.discount_active(sales, "simple")
+    tiered_enabled = service.discount_active(sales, "tiered")
+    tiers = sales.get("discount_tiers") or []
+    lines = [
+        "🎛 مدیریت حرفه‌ای تخفیف‌ها",
+        "",
+        f"🎁 تخفیف حجمی ساده: {'فعال ✅' if simple_enabled else 'غیرفعال ❌'}",
+        f"🎚 تخفیف پلاکانی: {'فعال ✅' if tiered_enabled else 'غیرفعال ❌'}",
+        "",
+        (
+            "در این بخش می‌توانی تنظیمات ذخیره‌شده هر نوع تخفیف را ببینی "
+            "و تنها در صورت نیاز آن را تغییر بدهی."
+        ),
+    ]
+    simple_timer = _discount_timer_line(
+        sales, "simple", "تخفیف حجمی ساده"
+    )
+    tiered_timer = _discount_timer_line(
+        sales, "tiered", "تخفیف پلاکانی"
+    )
+    if simple_timer:
+        lines.append(simple_timer)
+    if tiered_timer:
+        lines.append(tiered_timer)
+    if simple_enabled:
+        lines.append(
+            f"• تخفیف حجمی ساده: از {sales['discount_step_gb']} گیگ به بالا، "
+            f"{sales['discount_percent_step']}٪ تا سقف "
+            f"{sales['discount_percent_max']}٪"
+        )
+    elif (
+        int(sales.get("discount_step_gb") or 0) > 0
+        and int(sales.get("discount_percent_step") or 0) > 0
+    ):
+        lines.append(
+            f"• تنظیمات ذخیره‌شده تخفیف حجمی ساده: از "
+            f"{sales['discount_step_gb']} گیگ به بالا، "
+            f"{sales['discount_percent_step']}٪ تا سقف "
+            f"{sales['discount_percent_max']}٪ (غیرفعال)"
+        )
+    if tiered_enabled:
+        lines.append(f"• پله‌های تخفیف پلاکانی: {_format_discount_tiers(tiers)}")
+    elif tiers:
+        lines.append(
+            "• پله‌های تخفیف پلاکانی ذخیره شده: "
+            f"{_format_discount_tiers(tiers)} (غیرفعال)"
+        )
+    rows = [
+        [
+            Button(
+                ("خاموش کن" if simple_enabled else "روشن کن")
+                + " تخفیف حجمی ساده",
+                callback_data=(
+                    f"srv:discounttoggle:{sid}:simple:"
+                    f"{'off' if simple_enabled else 'on'}"
+                ),
+                style="danger" if simple_enabled else "success",
+            )
+        ],
+        [
+            Button(
+                ("خاموش کن" if tiered_enabled else "روشن کن")
+                + " تخفیف پلاکانی",
+                callback_data=(
+                    f"srv:discounttoggle:{sid}:tiered:"
+                    f"{'off' if tiered_enabled else 'on'}"
+                ),
+                style="danger" if tiered_enabled else "success",
+            )
+        ],
+        button("✏️ ویرایش تخفیف حجمی ساده", f"srv:discountedit:{sid}:simple"),
+        button("✏️ ویرایش تخفیف پله‌ای", f"srv:discountedit:{sid}:tiered"),
+        button(
+            "⏱ تنظیم تایمر تخفیف حجمی ساده",
+            f"srv:discountedit:{sid}:simple_timer",
+        ),
+        button(
+            "⏱ تنظیم تایمر تخفیف پلاکانی",
+            f"srv:discountedit:{sid}:tiered_timer",
+        ),
+        back(sid, "plans"),
+    ]
+    return "\n".join(lines), rows
+
+
 def _format_gb(value):
     try:
         number = float(value)
