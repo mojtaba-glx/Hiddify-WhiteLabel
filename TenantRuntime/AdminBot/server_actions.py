@@ -904,19 +904,37 @@ async def handle_callback(update, context, *, business, actor):
                 caption = "لینک اشتراک b64"
             elif cfg_type in {"multi", "multi_b64"}:
                 base64_output = cfg_type == "multi_b64"
-                if scoped_row.get("subscription_id"):
-                    url = business.admin_smart_subscription_link(
-                        actor,
-                        subscription_id=int(scoped_row["subscription_id"]),
-                        base64_output=base64_output,
+                try:
+                    if scoped_row.get("subscription_id"):
+                        url = business.admin_smart_subscription_link(
+                            actor,
+                            subscription_id=int(scoped_row["subscription_id"]),
+                            base64_output=base64_output,
+                        )
+                    else:
+                        source_uid = int(scoped_row.get("_source_user_id") or uid)
+                        url = business.admin_panel_smart_subscription_link(
+                            actor,
+                            panel_user_id=source_uid,
+                            base64_output=base64_output,
+                        )
+                except TenantBusinessError:
+                    fallback_rows = []
+                    if panel_page:
+                        fallback_rows.append(
+                            [Button("🚪 ورود به پنل کاربر", url=panel_page, style="success")]
+                        )
+                    fallback_rows.append(
+                        [Button("🔙 برگشت به منوی لینک‌ها", callback_data=f"srv:pconfigs:{sid}:{uid}")]
                     )
-                else:
-                    source_uid = int(scoped_row.get("_source_user_id") or uid)
-                    url = business.admin_panel_smart_subscription_link(
-                        actor,
-                        panel_user_id=source_uid,
-                        base64_output=base64_output,
+                    await show(
+                        (
+                            "❌ لینک اشتراک هوشمند برای این کاربر هنوز آماده نیست.\n"
+                            "آدرس عمومی Smart Subscription را در تنظیمات سرور WhiteLabel ثبت کنید."
+                        ),
+                        fallback_rows,
                     )
+                    return True
                 caption = (
                     "لینک اشتراک هوشمند b64"
                     if base64_output
