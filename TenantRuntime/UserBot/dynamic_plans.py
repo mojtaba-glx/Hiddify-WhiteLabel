@@ -1,9 +1,18 @@
-"""Server-specific dynamic quotes using the normal, immutable checkout flow."""
+"""Server-specific dynamic quotes using the normal, immutable checkout flow.
+
+The AdminBot SellBot-parity editor uses month-based duration settings. Existing
+tenants that still have legacy day-based pricing continue to use their old
+fields until an admin edits the dynamic-plan settings.
+"""
 
 from telegram import InlineKeyboardMarkup
 from TenantRuntime.button_styles import inline_button as Button
 from TenantRuntime.business import TenantBusinessError
 from TenantRuntime.server_admin import ServerAdminService
+
+
+def _month_mode(sales: dict) -> bool:
+    return sales.get("pricing_model") == "sellbot_month"
 
 
 def rows(business, *, subscription=None):
@@ -15,9 +24,10 @@ def rows(business, *, subscription=None):
         if subscription and sid != int(subscription.get("server_id") or 0):
             continue
         sales = service.sales(sid)
+        time_price = sales["price_month"] if _month_mode(sales) else sales["price_day"]
         if (
             sales["mode"] in {"dynamic", "mixed"}
-            and sales["price_gb"] + sales["price_day"] > 0
+            and sales["price_gb"] + time_price > 0
         ):
             callback = f"shop:dynamic:{sid}:open" + (
                 f':{subscription["id"]}' if subscription else ""
@@ -50,31 +60,59 @@ async def handle_callback(update, context, *, business, actor, settings):
     business._purchase_server(sid)
     service = ServerAdminService(business)
     sales = service.sales(sid)
+    month_mode = _month_mode(sales)
     key = f"dynamic_quote:{sid}:{subid or 0}"
     if action == "open":
-        context.user_data[key] = {"gb": sales["min_gb"], "days": sales["min_days"]}
+        context.user_data[key] = (
+            {"gb": sales["min_gb"], "months": sales["min_month"]}
+            if month_mode
+            else {"gb": sales["min_gb"], "days": sales["min_days"]}
+        )
     quote = context.user_data.get(key)
     if not isinstance(quote, dict):
         raise TenantBusinessError("quote expired")
-    changes = {
-        "gb_plus": ("gb", sales["step_gb"]),
-        "gb_minus": ("gb", -sales["step_gb"]),
-        "days_plus": ("days", sales["step_days"]),
-        "days_minus": ("days", -sales["step_days"]),
-    }
+
+    if month_mode:
+        changes = {
+            "gb_plus": ("gb", sales["step_gb"]),
+            "gb_minus": ("gb", -sales["step_gb"]),
+            "months_plus": ("months", sales["step_month"]),
+            "months_minus": ("months", -sales["step_month"]),
+            # Keep callbacks from already-rendered keyboards valid across an
+            # AdminBot settings update.
+            "days_plus": ("months", sales["step_month"]),
+            "days_minus": ("months", -sales["step_month"]),
+        }
+        bounds = {
+            "gb": (sales["min_gb"], sales["max_gb"]),
+            "months": (sales["min_month"], sales["max_month"]),
+        }
+    else:
+        changes = {
+            "gb_plus": ("gb", sales["step_gb"]),
+            "gb_minus": ("gb", -sales["step_gb"]),
+            "days_plus": ("days", sales["step_days"]),
+            "days_minus": ("days", -sales["step_days"]),
+        }
+        bounds = {
+            "gb": (sales["min_gb"], sales["max_gb"]),
+            "days": (sales["min_days"], sales["max_days"]),
+        }
+
     if action in changes:
         field, change = changes[action]
-        quote[field] = max(
-            sales["min_" + field], min(sales["max_" + field], quote[field] + change)
-        )
+        low, high = bounds[field]
+        quote[field] = max(low, min(high, quote[field] + change))
     elif action not in {"open", "confirm"}:
         raise ValueError("invalid quote action")
-    price, currency = service.quote(sid, quote["gb"], quote["days"])
+
+    quote_days = int(quote["months"]) * 30 if month_mode else int(quote["days"])
+    price, currency = service.quote(sid, quote["gb"], quote_days)
     query = update.callback_query
     if action == "confirm":
         from TenantRuntime.UserBot.handlers import _checkout_text, _checkout_markup
 
-        plan = service.dynamic_plan(actor, sid, quote["gb"], quote["days"])
+        plan = service.dynamic_plan(actor, sid, quote["gb"], quote_days)
         order = (
             business.create_renewal_order(
                 actor, subscription_id=subid, plan_id=plan["id"]
@@ -90,8 +128,23 @@ async def handle_callback(update, context, *, business, actor, settings):
         )
         return True
 
-    def callback(action):
-        return f"shop:dynamic:{sid}:{action}" + (f":{subid}" if subid else "")
+    def callback(name):
+        return f"shop:dynamic:{sid}:{name}" + (f":{subid}" if subid else "")
+
+    if month_mode:
+        duration_row = [
+            Button("➖ مدت", callback_data=callback("months_minus")),
+            Button(f"{quote['months']} ماه", callback_data="noop"),
+            Button("➕ مدت", callback_data=callback("months_plus")),
+        ]
+        duration_text = f"{quote['months']} ماه"
+    else:
+        duration_row = [
+            Button("➖ مدت", callback_data=callback("days_minus")),
+            Button(f"{quote['days']} روز", callback_data="noop"),
+            Button("➕ مدت", callback_data=callback("days_plus")),
+        ]
+        duration_text = f"{quote['days']} روز"
 
     keyboard = [
         [
@@ -99,11 +152,7 @@ async def handle_callback(update, context, *, business, actor, settings):
             Button(f"{quote['gb']} گیگابایت", callback_data="noop"),
             Button("➕ حجم", callback_data=callback("gb_plus")),
         ],
-        [
-            Button("➖ مدت", callback_data=callback("days_minus")),
-            Button(f"{quote['days']} روز", callback_data="noop"),
-            Button("➕ مدت", callback_data=callback("days_plus")),
-        ],
+        duration_row,
         [Button("✅ تایید و پرداخت", callback_data=callback("confirm"))],
         [
             Button(
@@ -117,7 +166,11 @@ async def handle_callback(update, context, *, business, actor, settings):
 
     await _edit_subscription(
         query,
-        f"🎛 پلن پویا · {business.server(sid)['label']}\n\n📊 حجم: {quote['gb']} گیگ\n📅 مدت: {quote['days']} روز\n💰 مبلغ: {price:,} {currency}\n🎟 تخفیف: {service.discount_percent(sid,quote['gb'])}٪",
+        f"🎛 پلن پویا · {business.server(sid)['label']}\n\n"
+        f"📊 حجم: {quote['gb']} گیگ\n"
+        f"📅 مدت: {duration_text}\n"
+        f"💰 مبلغ: {price:,} {currency}\n"
+        f"🎟 تخفیف: {service.discount_percent(sid,quote['gb'])}٪",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return True
