@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.2.3 — UserBot free-trial provisioning fix
+
+- اصلاح مسیر «🔥تست رایگان» ربات کاربران بر اساس رفتار واقعی SellBot.
+- ایجاد موفق کاربر در Hiddify دیگر با خطای PATCH تثبیت وضعیت/Template State به‌اشتباه ناموفق اعلام نمی‌شود.
+- اگر Hiddify بعد از POST موفق، کاربر را موقتاً در GET نشان ندهد، ساخت تست رایگان شکست کاذب نمی‌خورد.
+- تست رگرسیون برای همین سناریوی Hiddify اضافه شد.
+- rollback و کنترل مصرف تست رایگان قبلی همچنان حفظ می‌شود.
+
 ## v1.2.2 — SellBot plan-management parity
 
 - بازطراحی مسیر «مدیریت سرورها → پلن‌ها» در AdminBot بر اساس کد واقعی Hiddify-SellBot.
