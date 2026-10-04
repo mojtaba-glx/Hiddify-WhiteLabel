@@ -83,6 +83,41 @@ def test_v13_create_translates_is_active_and_returns_native_subscription_link() 
     assert any(path.endswith("/admin-secret/api/v2/admin/user/") for _, path, _ in seen)
 
 
+
+def test_create_survives_rejected_stabilization_and_unavailable_immediate_get() -> None:
+    seen_post: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode()) if request.content else None
+        if request.url.path.endswith("/api/v2/panel/info/"):
+            return _json_response(200, {"version": "12.3.3"}, request)
+        if request.method == "POST":
+            seen_post.append(body or {})
+            return _json_response(
+                200,
+                {
+                    "uuid": body["uuid"],
+                    "is_active": True,
+                    "name": body["name"],
+                    "usage_limit_GB": body["usage_limit_GB"],
+                    "current_usage_GB": 0,
+                },
+                request,
+            )
+        # Reproduce the Hiddify failure seen by the UserBot trial path:
+        # creation succeeds, but the post-create state/template update and the
+        # immediate user lookup are temporarily rejected.
+        if request.method == "PATCH":
+            return _json_response(422, {"detail": "template status is invalid"}, request)
+        return _json_response(404, {"detail": "user not ready"}, request)
+
+    adapter = HiddifyPanelAdapter(transport=httpx.MockTransport(handler))
+    result = adapter.provision(target=_target(), secret="api-key", request=_request())
+    assert result.external_ref == seen_post[0]["uuid"]
+    assert result.subscription_url.endswith(
+        f"/{result.external_ref}/all.txt"
+    )
+
 def test_v12_renew_keeps_legacy_fields_and_resets_usage() -> None:
     patches: list[dict] = []
 
