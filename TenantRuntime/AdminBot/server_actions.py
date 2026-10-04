@@ -2199,39 +2199,199 @@ async def handle_text(update, context, *, business, actor):
             section = f'category:{flow["cid"]}'
         elif kind == "sales_field":
             key = flow["field"]
-            value = text.upper() if key == "currency" else int(text.replace(",", ""))
-            service.set_sales(actor, sid, {key: value})
-            section = "settings"
-        elif kind == "discount_field":
-            field = flow["field"]
-            if field == "simple":
-                step, percent, cap = map(int, text.split())
-                changes = {
-                    "discount_step_gb": step,
-                    "discount_percent_step": percent,
-                    "discount_percent_max": cap,
-                }
-            elif field == "tiered":
-                tiers = []
-                if text != "-":
-                    for part in text.split():
-                        gb, percent = map(int, part.split(":"))
-                        tiers.append(dict(gb=gb, percent=percent))
-                changes = {"discount_tiers": tiers}
+            raw = _normalize_digit_text(text).replace(",", "").strip()
+            changes = {"pricing_model": "sellbot_month"}
+            if key in {"price_gb", "price_month"}:
+                value = int(raw)
+                if value < 0:
+                    raise ValueError("invalid dynamic price")
+                changes[key] = value
+            elif key == "volume_range":
+                values = list(map(int, _normalize_digit_text(text).split("-")))
+                if len(values) != 3:
+                    raise ValueError("invalid volume range")
+                changes.update(
+                    min_gb=values[0],
+                    max_gb=values[1],
+                    step_gb=values[2],
+                )
+            elif key == "time_range":
+                values = list(map(int, _normalize_digit_text(text).split("-")))
+                if len(values) != 3:
+                    raise ValueError("invalid time range")
+                changes.update(
+                    min_month=values[0],
+                    max_month=values[1],
+                    step_month=values[2],
+                )
             else:
-                minutes = int(text)
-                if not 0 <= minutes <= 525600:
-                    raise ValueError("invalid discount timer")
-                name = field.removesuffix("_timer")
-                changes = {
-                    f"discount_{name}_until": (
-                        iso_utc(utcnow() + timedelta(minutes=minutes))
-                        if minutes
-                        else None
-                    )
-                }
+                raise ValueError("invalid dynamic field")
             service.set_sales(actor, sid, changes)
-            section = "discounts"
+            context.user_data.pop(FLOW, None)
+            await update.effective_message.reply_text(
+                "✅ تنظیمات با موفقیت ذخیره شد.",
+                reply_markup=admin_main_keyboard(),
+            )
+            menu_text, menu_rows = _dynamic_settings_view(service, sid)
+            await update.effective_message.reply_text(
+                menu_text, reply_markup=markup(menu_rows)
+            )
+            return True
+        elif kind == "discount_simple_threshold":
+            threshold = int(
+                _normalize_digit_text(text).replace(",", "").strip()
+            )
+            flow["threshold"] = max(0, threshold)
+            flow["kind"] = "discount_simple_percent"
+            await update.effective_message.reply_text(
+                "الان درصد تخفیف را ارسال کن (مثلاً 25).\n"
+                "برای خاموش کردن کامل تخفیف 0 بفرست.",
+                reply_markup=cancel_keyboard(),
+            )
+            return True
+        elif kind == "discount_simple_percent":
+            percent = int(
+                _normalize_digit_text(text)
+                .replace("%", "")
+                .replace("٪", "")
+                .replace(",", "")
+                .strip()
+            )
+            threshold = int(flow.get("threshold") or 0)
+            if percent <= 0 or threshold <= 0:
+                service.set_sales(
+                    actor,
+                    sid,
+                    {
+                        "discount_step_gb": 0,
+                        "discount_percent_step": 0,
+                        "discount_percent_max": 0,
+                        "discount_tiers": [],
+                        "discount_simple_enabled": False,
+                        "discount_tiered_enabled": False,
+                        "discount_simple_until": None,
+                        "discount_tiered_until": None,
+                    },
+                )
+                success = "✅ تخفیف حجمی غیرفعال شد."
+            else:
+                if percent > 100:
+                    raise ValueError("invalid discount percent")
+                service.set_sales(
+                    actor,
+                    sid,
+                    {
+                        "discount_step_gb": threshold,
+                        "discount_percent_step": percent,
+                        "discount_percent_max": percent,
+                        "discount_tiers": [],
+                        "discount_simple_enabled": True,
+                        "discount_tiered_enabled": False,
+                        "discount_simple_until": None,
+                        "discount_tiered_until": None,
+                    },
+                )
+                success = (
+                    "✅ تخفیف ذخیره شد.\n"
+                    f"از {threshold} گیگ به بالا، {percent}٪ تخفیف "
+                    "روی قیمت نهایی اعمال می‌شود."
+                )
+            context.user_data.pop(FLOW, None)
+            await update.effective_message.reply_text(
+                success, reply_markup=admin_main_keyboard()
+            )
+            menu_text, menu_rows = _discount_settings_view(service, sid)
+            await update.effective_message.reply_text(
+                menu_text, reply_markup=markup(menu_rows)
+            )
+            return True
+        elif kind == "discount_tiered":
+            tiers = _parse_discount_tiers_text(text)
+            service.set_sales(
+                actor,
+                sid,
+                {
+                    "discount_tiers": tiers,
+                    "discount_tiered_enabled": bool(tiers),
+                    "discount_tiered_until": None,
+                },
+            )
+            context.user_data.pop(FLOW, None)
+            await update.effective_message.reply_text(
+                (
+                    "✅ تخفیف پلاکانی ذخیره شد.\n"
+                    + _format_discount_tiers(tiers)
+                    if tiers
+                    else "✅ تخفیف حجمی غیرفعال شد."
+                ),
+                reply_markup=admin_main_keyboard(),
+            )
+            menu_text, menu_rows = _discount_settings_view(service, sid)
+            await update.effective_message.reply_text(
+                menu_text, reply_markup=markup(menu_rows)
+            )
+            return True
+        elif kind in {"discount_simple_timer", "discount_tiered_timer"}:
+            hours = int(_normalize_digit_text(text).replace(",", "").strip())
+            if hours > 8760:
+                raise ValueError("invalid discount timer")
+            timer_kind = "simple" if kind == "discount_simple_timer" else "tiered"
+            if timer_kind == "tiered" and hours > 0:
+                current = service.sales(sid)
+                if not current.get("discount_tiers"):
+                    await update.effective_message.reply_text(
+                        "⚠️ ابتدا پله‌های تخفیف پلاکانی را تنظیم کنید، "
+                        "سپس تایمر را فعال کنید.",
+                        reply_markup=cancel_keyboard(),
+                    )
+                    return True
+            if hours <= 0:
+                service.set_sales(
+                    actor,
+                    sid,
+                    {
+                        f"discount_{timer_kind}_enabled": False,
+                        f"discount_{timer_kind}_until": None,
+                    },
+                )
+                success = (
+                    "✅ تایمر تخفیف حذف شد و تخفیف حجمی ساده خاموش شد."
+                    if timer_kind == "simple"
+                    else "✅ تایمر تخفیف پلاکانی حذف شد و تخفیف پلاکانی خاموش شد."
+                )
+            else:
+                expire_at = utcnow() + timedelta(hours=hours)
+                service.set_sales(
+                    actor,
+                    sid,
+                    {
+                        f"discount_{timer_kind}_enabled": True,
+                        f"discount_{timer_kind}_until": iso_utc(expire_at),
+                    },
+                )
+                if timer_kind == "simple":
+                    success = (
+                        "✅ تایمر تخفیف حجمی ساده تنظیم شد.\n"
+                        f"تخفیف به مدت {hours} ساعت "
+                        f"(تا {format_tehran(expire_at)}) فعال است و پس از "
+                        "اتمام، به‌صورت خودکار خاموش می‌شود."
+                    )
+                else:
+                    success = (
+                        "✅ تایمر تخفیف پلاکانی تنظیم شد.\n"
+                        f"تخفیف به مدت {hours} ساعت "
+                        f"(تا {format_tehran(expire_at)}) فعال است و پس از "
+                        "اتمام، به‌صورت خودکار خاموش می‌شود."
+                    )
+            context.user_data.pop(FLOW, None)
+            await update.effective_message.reply_text(
+                success, reply_markup=admin_main_keyboard()
+            )
+            menu_text, menu_rows = _discount_settings_view(service, sid)
+            await update.effective_message.reply_text(
+                menu_text, reply_markup=markup(menu_rows)
+            )
+            return True
         elif kind == "domain_title":
             if not 1 <= len(text) <= 80:
                 raise ValueError("invalid title")
