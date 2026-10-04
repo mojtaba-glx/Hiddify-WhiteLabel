@@ -1,58 +1,49 @@
-# Changelog – SellBot Parity
+# Changelog
 
-All parity changes are tracked here. Branch: `feat/sellbot-parity-phase1`
+All notable changes to Hiddify-WhiteLabel are documented here.
 
 ---
 
-## v0.2.0-parity-phase2 – Card Payment Flow
+## [v1.2.5] – 2026-10-05
 
-**Commit:** a87ab9fc14e68e71fe0532906a3af16b35101f25  
-**File:** `TenantRuntime/UserBot/card_payment.py`
+### Changed (SellBot-parity purchase flow)
+
+**File:** `TenantRuntime/UserBot/dynamic_plans.py`  
+**Commit:** `9e9868fe54585a33953d09848049f4f3d871bd21`
+
+| # | تغییر | قبل | جدید |
+|---|---|---|---|
+| 1 | ردیرکت لوکیشن | لیست پلن (مرحله اضافه) | مستقیم به plan builder |
+| 2 | نمایش قیمت | `IRR 30,000` | `130,000 تومان` |
+| 3 | دکمه confirm | تایید و پرداخت | تایید و خرید |
+| 4 | بعد از confirm | مستقیم checkout | خلاصه پلن + انتخاب روش پرداخت |
+| 5 | دکمه بازگشت | — | برمی‌گردده به لیست لوکیشن |
 
 ### Added
 
-| Function | SellBot origin | Description |
-|---|---|---|
-| `finalize_pending_card_payment` | `_finalize_pending_card_payment` | Download receipt + submit + archive media + notify admin |
-| `finalize_pending_wallet_topup` | *(wallet variant)* | Same flow for wallet top-up |
-| `_notify_admin_card_payment` | `_notify_admin_new_ticket` pattern | Best-effort AdminBot DM on receipt submit |
-| `pending_card_admin_notify_job` | `_pending_card_admin_notify_job` | PTB job_queue periodic reminder (25s / first 8s) |
-| `card_payment_result_text` | `_card_payment_result_user_text` | User-facing approved/pending/rejected message |
-| `build_card_payment_instruction` | buy flow display | Card-to-card panel with TX marker support |
-| `require_last4_enabled` | `_get_payment_settings()` | Per-tenant 4-digit card verification flag |
-
-### Architecture notes
-
-- All global singletons (`userbot_db`, `ADMIN_ID`, `ADMIN_BOT_TOKEN`) replaced with per-tenant `business` object
-- AdminBot token resolved via `_sibling_admin_bot_token(business)` from `handlers.py`
-- Admin chat ID via `business.owner_telegram_id`
-- Media archived via `business.attach_payment_receipt_media()`
-- Receipt submitted via `business.submit_receipt()` / `business.submit_wallet_topup_receipt()`
+- `_display_price()` — تبدیل IRR ÷ 10 → تومان
+- `_open_plan_builder()` — اینیشیالایز و رندر plan builder
+- `_render_builder()` — نمایش SellBot-style keyboard
+- `shop:buy` handler — نمایش دوباره لیست سرورها (برای دکمه بازگشت)
+- `shop:buyloc:{sid}` intercept — بدون مردودیر به plan list
 
 ---
 
-## v0.1.0-parity-phase1 – Core Utilities
+## [v1.2.4] – base branch
 
-**Commit:** 053c7ada  
-**File:** `TenantRuntime/UserBot/sellbot_utils.py`
+`feature/userbot-buy-sellbot-parity-v1.2.4`
 
-### Added (25 utility functions)
+### Added (previous phases on this branch)
 
-`_toman_to_irt`, `_irt_to_toman`, `_humanize_bytes`, `_fmt_toman`,
-`_format_subscription_period`, `_get_plan_emoji`, `_get_status_emoji`,
-`_get_payment_method_emoji`, `_get_delivery_emoji`,
-`_apply_random_tx_marker`, `_validate_tx_marker`,
-`_parse_exact_card_last4`, `_build_card_to_card_payment_text`,
-`_card_payment_result_user_text`, `_get_payment_settings`,
-`_parse_plan_traffic_gb`, `_plan_display_name`, `_plan_short_description`,
-`_order_status_label`, `_payment_status_label`,
-`_subscription_status_label`, `_safe_int`, `_safe_float`,
-`_chunk_list`, `_flatten`
+| فایل | commit | توضیح |
+|---|---|---|
+| `sellbot_utils.py` | `053c7ada` | 25 utility function (SellBot parity) |
+| `card_payment.py` | `a87ab9fc` | Card + wallet payment flow |
 
 ---
 
 ## Upcoming
 
-- **v0.3.0-parity-phase3** – `_direct_buy_delivery_loop` + `_process_approved_direct_buy_payments`
-- **v0.4.0-parity-phase4** – QR delivery, config delivery, sub HTTP server
-- **v0.5.0-parity-phase5** – Force join, event channel
+- `handlers.py` — تغییر هدر BTN_BUY + دکمه‌های «یک اشتراک همه لوکیشن‌ها» / «مولتی‌سرور هوشمند»
+- QR دلیوری و config delivery
+- Force join و event channel
