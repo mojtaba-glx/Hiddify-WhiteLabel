@@ -751,6 +751,7 @@ def test_fresh_and_upgrade_migrations_preserve_subscription_data(tmp_path):
         "0031_backup_agency_infra",
         "0032_server_status_daily",
         "0033_legacy_sellbot_restore",
+        "0034_admin_panel_smart_subscription",
     ]
     conn = connect(db)
     assert (
