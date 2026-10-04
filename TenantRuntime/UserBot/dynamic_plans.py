@@ -188,7 +188,10 @@ async def handle_callback(update, context, *, business, actor, settings):
         )
         return True
 
-    # SellBot-parity: shop:buyloc:{sid} -> skip plan list, open builder directly
+    # SellBot-parity: shop:buyloc:{sid} -> skip plan list for dynamic sales.
+    # Fixed-only servers must fall back to handlers.py, which renders their
+    # normal plan/category list. Without this guard every location callback
+    # was treated as a dynamic quote and could break fixed-plan purchases.
     if data.startswith("shop:buyloc:"):
         sid_str = data.rsplit(":", 1)[-1]
         if not sid_str.isdigit():
@@ -196,6 +199,17 @@ async def handle_callback(update, context, *, business, actor, settings):
         sid = int(sid_str)
         if not settings.get("enable_buy", True):
             raise TenantBusinessError("purchase is disabled")
+        sales = ServerAdminService(business).sales(sid)
+        time_price = (
+            sales["price_month"]
+            if _month_mode(sales)
+            else sales["price_day"]
+        )
+        if (
+            sales["mode"] not in {"dynamic", "mixed"}
+            or sales["price_gb"] + time_price <= 0
+        ):
+            return False
         await _open_plan_builder(
             update.callback_query,
             context,

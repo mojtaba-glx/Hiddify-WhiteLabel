@@ -4,6 +4,12 @@ All parity work lives on branch `feat/sellbot-parity-phase1`.
 
 ---
 
+## v1.2.6 — Purchase-flow parity guard
+
+- Kept the SellBot-style location → dynamic plan builder flow for dynamic and mixed sales.
+- Restored the existing fixed-plan/category flow for locations without dynamic pricing.
+- Verified the post-confirm summary with direct-payment methods and wallet-payment actions.
+
 ## v0.3.0-parity-phase345 — Delivery Loop, QR/Configs, Force-join & Events
 
 ### Phase 3: `TenantRuntime/UserBot/direct_buy_delivery.py` (323 lines)
