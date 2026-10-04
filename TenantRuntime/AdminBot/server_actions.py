@@ -112,6 +112,291 @@ def local_time(raw):
         return str(raw)
 
 
+_PERSIAN_DIGITS_TRANS = str.maketrans(
+    "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩",
+    "01234567890123456789",
+)
+
+
+def _normalize_digit_text(value):
+    return str(value or "").translate(_PERSIAN_DIGITS_TRANS)
+
+
+def _format_discount_tiers(tiers):
+    normalized = sorted(
+        (
+            {"gb": int(item["gb"]), "percent": int(item["percent"])}
+            for item in (tiers or [])
+            if int(item.get("gb") or 0) > 0 and int(item.get("percent") or 0) > 0
+        ),
+        key=lambda item: item["gb"],
+    )
+    if not normalized:
+        return "غیرفعال"
+    return " | ".join(
+        f"از {item['gb']} گیگ: {item['percent']}٪" for item in normalized
+    )
+
+
+def _parse_discount_tiers_text(text):
+    raw = _normalize_digit_text(text).strip()
+    if raw in {"0", "خاموش", "غیرفعال", "-"}:
+        return []
+    items = []
+    normalized = raw.replace("،", ",").replace("\n", ",").replace("؛", ",")
+    for part in normalized.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        separator = next((sep for sep in (":", "=", "-") if sep in part), None)
+        if not separator:
+            raise ValueError("invalid discount tier")
+        gb_text, percent_text = part.split(separator, 1)
+        gb = int(
+            _normalize_digit_text(
+                gb_text.replace("گیگ", "").replace("gb", "").replace("GB", "")
+            )
+            .replace(",", "")
+            .strip()
+        )
+        percent = int(
+            _normalize_digit_text(percent_text)
+            .replace("%", "")
+            .replace("٪", "")
+            .replace(",", "")
+            .strip()
+        )
+        if gb <= 0 or not 0 < percent <= 100:
+            raise ValueError("invalid discount tier")
+        items.append({"gb": gb, "percent": percent})
+    if not items or len({item["gb"] for item in items}) != len(items):
+        raise ValueError("invalid discount tier")
+    return sorted(items, key=lambda item: item["gb"])
+
+
+def _plan_mode_title(mode):
+    return {
+        "fixed": "فقط پلن‌های ثابت",
+        "dynamic": "فقط پلن پویا",
+        "mixed": "حالت ترکیبی (ثابت + پویا)",
+    }.get(mode, "نامشخص")
+
+
+def _plans_root_view(business, service, sid):
+    sales = service.sales(sid)
+    mode = sales["mode"]
+    rows = []
+    if mode in {"fixed", "mixed"}:
+        rows.append(button("📂 لیست دسته‌های پلن", f"srv:categories:{sid}"))
+    rows.append(button("⚙️تنظیمات پلن‌ها", f"srv:settings:{sid}"))
+    if mode in {"dynamic", "mixed"}:
+        rows.append(button("🎛 مدیریت حرفه‌ای تخفیف‌ها", f"srv:discounts:{sid}"))
+    rows.append(back(sid))
+    return (
+        f"مدیریت پلن‌ها برای سرور 🖥 {business.server(sid)['label']}\n"
+        "━━━━━━━━━━━━━━\n"
+        f"حالت نمایش فعلی در ربات کاربران: {_plan_mode_title(mode)}\n\n"
+        "یکی از گزینه‌های زیر را انتخاب کنید:",
+        rows,
+    )
+
+
+def _plans_settings_view(sid):
+    return (
+        "⚙️تنظیمات پلن‌ها\n\nیکی از گزینه‌های زیر را انتخاب کنید:",
+        [
+            button("نوع نمایش پلن‌ها📋", f"srv:mode:{sid}"),
+            button("تنظیم پلن پویا📈", f"srv:settings:{sid}:dynamic"),
+            back(sid, "plans"),
+        ],
+    )
+
+
+def _plan_mode_view(service, sid):
+    current = service.sales(sid)["mode"]
+
+    def mode_button(value, title):
+        selected = current == value
+        return Button(
+            ("✅ " if selected else "❌ ") + title,
+            callback_data=f"srv:mode:{sid}:{value}",
+            style="success" if selected else "danger",
+        )
+
+    return (
+        "⚙️تنظیمات پلن‌ها\n\nحالت نمایش پلن‌ها را انتخاب کنید:",
+        [
+            [
+                mode_button("fixed", "ثابت"),
+                mode_button("dynamic", "پویا"),
+                mode_button("mixed", "ترکیبی"),
+            ],
+            back(sid, "settings"),
+        ],
+    )
+
+
+def _dynamic_settings_view(service, sid):
+    sales = service.sales(sid)
+    tiers = sales.get("discount_tiers") or []
+    if tiers:
+        discount_line = f"🎚 تخفیف پلاکانی: {_format_discount_tiers(tiers)}"
+    else:
+        discount_line = (
+            f"🎁 تخفیف حجمی ساده: هر {sales['discount_step_gb']} گیگ "
+            f"+{sales['discount_percent_step']}٪ تا سقف "
+            f"{sales['discount_percent_max']}٪"
+        )
+    text = "\n".join(
+        [
+            "📈 تنظیم مقادیر پلن پویا",
+            "",
+            f"💰 قیمت هر گیگ: {int(sales['price_gb']):,} تومان",
+            f"💰 قیمت هر ماه: {int(sales['price_month']):,} تومان",
+            "",
+            (
+                f"📊 حجم قابل فروش: از {sales['min_gb']} تا {sales['max_gb']} "
+                f"گیگ (گام: {sales['step_gb']})"
+            ),
+            (
+                f"⌛ زمان اشتراک: از {sales['min_month']} تا "
+                f"{sales['max_month']} ماه (گام: {sales['step_month']})"
+            ),
+            "",
+            discount_line,
+            "",
+            "برای تغییر هر مقدار از دکمه‌های زیر استفاده کنید.",
+            (
+                "برای مدیریت و ویرایش تنظیمات تخفیف‌ها، "
+                "از دکمه‌ی اختصاصی استفاده کنید."
+            ),
+        ]
+    )
+    rows = [
+        button("💰 قیمت هر گیگ", f"srv:salesfield:{sid}:price_gb"),
+        button("💰 قیمت هر ماه", f"srv:salesfield:{sid}:price_month"),
+        button("📊 حداقل/حداکثر حجم و گام", f"srv:salesfield:{sid}:volume_range"),
+        button("⌛ حداقل/حداکثر زمان و گام", f"srv:salesfield:{sid}:time_range"),
+        back(sid, "settings"),
+    ]
+    return text, rows
+
+
+def _discount_timer_line(sales, kind, label):
+    raw = sales.get(f"discount_{kind}_until")
+    if not raw:
+        return ""
+    try:
+        end = parse_utc(raw)
+        remaining = int((end - utcnow()).total_seconds())
+    except (ValueError, TypeError):
+        return ""
+    if remaining <= 0:
+        return ""
+    days = remaining // 86400
+    hours = (remaining % 86400) // 3600
+    minutes = (remaining % 3600) // 60
+    parts = []
+    if days:
+        parts.append(f"{days} روز")
+    if hours:
+        parts.append(f"{hours} ساعت")
+    if minutes:
+        parts.append(f"{minutes} دقیقه")
+    remaining_text = " و ".join(parts) if parts else "کمتر از یک دقیقه"
+    return (
+        f"⏱ تایمر {label}: {remaining_text} مانده "
+        f"(پایان: {local_time(raw)})"
+    )
+
+
+def _discount_settings_view(service, sid):
+    sales = service.sales(sid)
+    simple_enabled = service.discount_active(sales, "simple")
+    tiered_enabled = service.discount_active(sales, "tiered")
+    tiers = sales.get("discount_tiers") or []
+    lines = [
+        "🎛 مدیریت حرفه‌ای تخفیف‌ها",
+        "",
+        f"🎁 تخفیف حجمی ساده: {'فعال ✅' if simple_enabled else 'غیرفعال ❌'}",
+        f"🎚 تخفیف پلاکانی: {'فعال ✅' if tiered_enabled else 'غیرفعال ❌'}",
+        "",
+        (
+            "در این بخش می‌توانی تنظیمات ذخیره‌شده هر نوع تخفیف را ببینی "
+            "و تنها در صورت نیاز آن را تغییر بدهی."
+        ),
+    ]
+    simple_timer = _discount_timer_line(
+        sales, "simple", "تخفیف حجمی ساده"
+    )
+    tiered_timer = _discount_timer_line(
+        sales, "tiered", "تخفیف پلاکانی"
+    )
+    if simple_timer:
+        lines.append(simple_timer)
+    if tiered_timer:
+        lines.append(tiered_timer)
+    if simple_enabled:
+        lines.append(
+            f"• تخفیف حجمی ساده: از {sales['discount_step_gb']} گیگ به بالا، "
+            f"{sales['discount_percent_step']}٪ تا سقف "
+            f"{sales['discount_percent_max']}٪"
+        )
+    elif (
+        int(sales.get("discount_step_gb") or 0) > 0
+        and int(sales.get("discount_percent_step") or 0) > 0
+    ):
+        lines.append(
+            f"• تنظیمات ذخیره‌شده تخفیف حجمی ساده: از "
+            f"{sales['discount_step_gb']} گیگ به بالا، "
+            f"{sales['discount_percent_step']}٪ تا سقف "
+            f"{sales['discount_percent_max']}٪ (غیرفعال)"
+        )
+    if tiered_enabled:
+        lines.append(f"• پله‌های تخفیف پلاکانی: {_format_discount_tiers(tiers)}")
+    elif tiers:
+        lines.append(
+            "• پله‌های تخفیف پلاکانی ذخیره شده: "
+            f"{_format_discount_tiers(tiers)} (غیرفعال)"
+        )
+    rows = [
+        [
+            Button(
+                ("خاموش کن" if simple_enabled else "روشن کن")
+                + " تخفیف حجمی ساده",
+                callback_data=(
+                    f"srv:discounttoggle:{sid}:simple:"
+                    f"{'off' if simple_enabled else 'on'}"
+                ),
+                style="danger" if simple_enabled else "success",
+            )
+        ],
+        [
+            Button(
+                ("خاموش کن" if tiered_enabled else "روشن کن")
+                + " تخفیف پلاکانی",
+                callback_data=(
+                    f"srv:discounttoggle:{sid}:tiered:"
+                    f"{'off' if tiered_enabled else 'on'}"
+                ),
+                style="danger" if tiered_enabled else "success",
+            )
+        ],
+        button("✏️ ویرایش تخفیف حجمی ساده", f"srv:discountedit:{sid}:simple"),
+        button("✏️ ویرایش تخفیف پله‌ای", f"srv:discountedit:{sid}:tiered"),
+        button(
+            "⏱ تنظیم تایمر تخفیف حجمی ساده",
+            f"srv:discountedit:{sid}:simple_timer",
+        ),
+        button(
+            "⏱ تنظیم تایمر تخفیف پلاکانی",
+            f"srv:discountedit:{sid}:tiered_timer",
+        ),
+        back(sid, "plans"),
+    ]
+    return "\n".join(lines), rows
+
+
 def _format_gb(value):
     try:
         number = float(value)
@@ -970,23 +1255,8 @@ async def handle_callback(update, context, *, business, actor):
                 ),
             )
     elif action == "plans":
-        sales = service.sales(sid)
-        modes = {
-            "fixed": "فقط پلن‌های ثابت",
-            "dynamic": "فقط پلن پویا",
-            "mixed": "حالت ترکیبی (ثابت + پویا)",
-        }
-        rows = [
-            button("📂 لیست دسته‌های پلن", f"srv:categories:{sid}"),
-            button("📋 لیست پلن‌ها", f"srv:plan:{sid}"),
-            button("⚙️تنظیمات پلن‌ها", f"srv:settings:{sid}"),
-            button("🎛 مدیریت حرفه‌ای تخفیف‌ها", f"srv:discounts:{sid}"),
-            back(sid),
-        ]
-        await show(
-            f"مدیریت پلن‌ها برای سرور 🖥 {business.server(sid)['label']}\n━━━━━━━━━━━━━━\nحالت نمایش فعلی در ربات کاربران: {modes[sales['mode']]}\n\nیکی از گزینه‌های زیر را انتخاب کنید:",
-            rows,
-        )
+        text, rows = _plans_root_view(business, service, sid)
+        await show(text, rows)
     elif action == "plan":
         if len(parts) == 3:
             await plan_list(query, context, service, actor, sid)
@@ -1184,152 +1454,157 @@ async def handle_callback(update, context, *, business, actor):
         )
         await show("✅ وضعیت دسته ذخیره شد.", [back(sid, "categories")])
     elif action == "settings":
-        sales = service.sales(sid)
-        names = {
-            "min_gb": "حداقل حجم",
-            "max_gb": "حداکثر حجم",
-            "step_gb": "گام حجم",
-            "min_days": "حداقل مدت",
-            "max_days": "حداکثر مدت",
-            "step_days": "گام مدت",
-            "price_gb": "قیمت هر گیگ",
-            "price_day": "قیمت هر روز",
-            "currency": "واحد پول",
-            "discount_percent": "درصد تخفیف",
-        }
-        rows = (
-            [
-                button(
-                    "حالت نمایش: "
-                    + {"fixed": "ثابت", "dynamic": "پویا", "mixed": "ترکیبی"}[
-                        sales["mode"]
-                    ],
-                    f"srv:mode:{sid}",
-                )
-            ]
-            + [
-                button(f"{v}: {sales[k]}", f"srv:salesfield:{sid}:{k}")
-                for k, v in names.items()
-            ]
-            + [back(sid, "plans")]
-        )
-        await show(
-            "⚙️ تنظیمات پلن‌ها\nقیمت پلن پویا = (حجم × قیمت هر گیگ + مدت × قیمت هر روز) پس از تخفیف.\nبرای فعال‌شدن خرید پویا، قیمت و محدوده‌ها را تنظیم کنید.",
-            rows,
-        )
+        if len(parts) > 3:
+            if parts[3] != "dynamic":
+                raise ValueError("invalid plan settings section")
+            text, rows = _dynamic_settings_view(service, sid)
+        else:
+            text, rows = _plans_settings_view(sid)
+        await show(text, rows)
     elif action == "mode":
         if len(parts) > 3:
-            service.set_sales(actor, sid, {"mode": parts[3]})
-            await show("✅ حالت نمایش ذخیره شد.", [back(sid, "settings")])
-        else:
-            await show(
-                "حالت نمایش پلن‌ها در ربات کاربران:",
-                [
-                    button("فقط پلن‌های ثابت", f"srv:mode:{sid}:fixed"),
-                    button("فقط پلن پویا", f"srv:mode:{sid}:dynamic"),
-                    button("ترکیبی (ثابت + پویا)", f"srv:mode:{sid}:mixed"),
-                    back(sid, "settings"),
-                ],
-            )
+            selected = parts[3]
+            if selected not in {"fixed", "dynamic", "mixed"}:
+                raise ValueError("invalid plan mode")
+            service.set_sales(actor, sid, {"mode": selected})
+        text, rows = _plan_mode_view(service, sid)
+        await show(text, rows)
     elif action == "salesfield":
         field = parts[3]
-        if field not in {
-            "min_gb",
-            "max_gb",
-            "step_gb",
-            "min_days",
-            "max_days",
-            "step_days",
-            "price_gb",
-            "price_day",
-            "currency",
-            "discount_percent",
-        }:
+        prompts = {
+            "price_gb": "💰 قیمت هر گیگ را (تومان) ارسال کنید:",
+            "price_month": "💰 قیمت هر ماه اشتراک را (تومان) ارسال کنید:",
+            "volume_range": (
+                "📊 تنظیم حجم به صورت: حداقل_حجم-حداکثر_حجم-گام\n"
+                "مثال: 20-200-20"
+            ),
+            "time_range": (
+                "⌛ تنظیم زمان به صورت: حداقل_ماه-حداکثر_ماه-گام\n"
+                "مثال: 1-12-1"
+            ),
+        }
+        if field not in prompts:
             raise ValueError("invalid pricing field")
+        if hasattr(query.message, "edit_reply_markup"):
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except BadRequest:
+                pass
         await prompt(
             update,
             context,
             dict(kind="sales_field", sid=sid, field=field),
-            "مقدار جدید تنظیم پلن را وارد کنید:",
+            prompts[field],
         )
     elif action == "discounts":
-        sales = service.sales(sid)
-        rows = []
-        lines = [
-            "🎛 مدیریت حرفه‌ای تخفیف‌ها",
-            "بیشترین تخفیف قابل‌استفاده روی قیمت پلن پویا اعمال می‌شود.",
-        ]
-        for kind, title in (("simple", "حجمی ساده"), ("tiered", "پله‌ای")):
-            active = service.discount_active(sales, kind)
-            lines.append(f"🎁 تخفیف {title}: {'فعال ✅' if active else 'غیرفعال ❌'}")
-            lines.append(
-                "⏱ پایان: " + local_time(sales.get(f"discount_{kind}_until"))
-                if sales.get(f"discount_{kind}_until")
-                else "⏱ بدون محدودیت زمانی"
-            )
-            rows.extend(
-                [
-                    button(
-                        ("خاموش کن" if active else "روشن کن") + " تخفیف " + title,
-                        f'srv:discounttoggle:{sid}:{kind}:{"off" if active else "on"}',
-                    ),
-                    button(
-                        "✏️ ویرایش تخفیف " + title, f"srv:discountedit:{sid}:{kind}"
-                    ),
-                    button(
-                        "⏱ تنظیم تایمر تخفیف " + title,
-                        f"srv:discountedit:{sid}:{kind}_timer",
-                    ),
-                ]
-            )
-        lines.append(
-            f"حجمی ساده: هر {sales['discount_step_gb']} گیگ، {sales['discount_percent_step']}٪ تا سقف {sales['discount_percent_max']}٪"
-        )
-        lines.append(
-            "پله‌ها: "
-            + (
-                " · ".join(
-                    f"{t['gb']} گیگ: {t['percent']}٪" for t in sales["discount_tiers"]
-                )
-                or "ثبت نشده"
-            )
-        )
-        rows.extend(
-            [
-                button(
-                    f"تخفیف عمومی: {sales['discount_percent']}٪",
-                    f"srv:salesfield:{sid}:discount_percent",
-                ),
-                back(sid, "plans"),
-            ]
-        )
-        await show("\n".join(lines), rows)
+        text, rows = _discount_settings_view(service, sid)
+        await show(text, rows)
     elif action == "discounttoggle":
         kind, state = parts[3], parts[4]
         if kind not in {"simple", "tiered"} or state not in {"on", "off"}:
             raise ValueError("invalid discount toggle")
-        changes = {f"discount_{kind}_enabled": state == "on"}
-        # An explicit enable starts a new untimed offer if the old timer expired.
         sales = service.sales(sid)
-        until = sales.get(f"discount_{kind}_until")
-        if state == "on" and until and parse_utc(until) <= utcnow():
-            changes[f"discount_{kind}_until"] = None
-        service.set_sales(actor, sid, changes)
-        await show("✅ وضعیت تخفیف ذخیره شد.", [back(sid, "discounts")])
+        if kind == "simple":
+            if state == "off":
+                changes = {
+                    "discount_simple_enabled": False,
+                    "discount_simple_until": None,
+                }
+            else:
+                changes = {
+                    "discount_simple_enabled": True,
+                    "discount_simple_until": None,
+                }
+                if (
+                    int(sales.get("discount_step_gb") or 0) <= 0
+                    or int(sales.get("discount_percent_step") or 0) <= 0
+                    or int(sales.get("discount_percent_max") or 0) <= 0
+                ):
+                    changes.update(
+                        discount_step_gb=50,
+                        discount_percent_step=5,
+                        discount_percent_max=50,
+                    )
+            service.set_sales(actor, sid, changes)
+        else:
+            tiers = sales.get("discount_tiers") or []
+            if state == "off":
+                service.set_sales(
+                    actor,
+                    sid,
+                    {
+                        "discount_tiered_enabled": False,
+                        "discount_tiered_until": None,
+                    },
+                )
+            elif tiers:
+                service.set_sales(
+                    actor,
+                    sid,
+                    {
+                        "discount_tiered_enabled": True,
+                        "discount_tiered_until": None,
+                    },
+                )
+            else:
+                from TenantRuntime.AdminBot.handlers import cancel_keyboard
+
+                await query.message.reply_text(
+                    "⚠️ هیچ پله‌ای برای تخفیف پلاکانی تنظیم نشده است. "
+                    "برای فعال کردن ابتدا روی «✏️ ویرایش تخفیف پله‌ای» "
+                    "بزن و پله‌ها را وارد کن.",
+                    reply_markup=cancel_keyboard(),
+                )
+        text, rows = _discount_settings_view(service, sid)
+        await show(text, rows)
     elif action == "discountedit":
         kind = parts[3]
         prompts = {
-            "simple": "گام حجم، درصد هر گام و سقف تخفیف را با فاصله بفرستید.\nمثال: 50 5 30",
-            "tiered": "پله‌ها را به شکل «حجم:درصد» با فاصله بفرستید.\nمثال: 50:5 100:10 200:20\nبرای پاک‌کردن «-» بفرستید.",
-            "simple_timer": "زمان تخفیف حجمی ساده را به دقیقه وارد کنید؛ 0 یعنی بدون محدودیت.",
-            "tiered_timer": "زمان تخفیف پله‌ای را به دقیقه وارد کنید؛ 0 یعنی بدون محدودیت.",
+            "simple": (
+                "🎁 تنظیم تخفیف حجمی\n"
+                "ابتدا بنویس از چه حجمی به بالا تخفیف فعال شود (بر حسب گیگ).\n"
+                "مثال: 50\n"
+                "برای خاموش کردن کامل تخفیف، عدد 0 بفرست."
+            ),
+            "tiered": (
+                "🎚 تنظیم تخفیف پله‌ای\n"
+                "هر پله را با فرمت «حجم:درصد» وارد کن و پله‌ها را با "
+                "کاما یا خط جدید جدا کن.\n"
+                "مثال: 50:5, 100:10, 200:15\n"
+                "یعنی: از ۵۰ گیگ ۵٪، از ۱۰۰ گیگ ۱۰٪ و از ۲۰۰ گیگ "
+                "۱۵٪ تخفیف.\n"
+                "برای خاموش کردن تخفیف، عدد 0 بفرست.\n"
+                "می‌توانی از - یا = هم به جای : استفاده کنی."
+            ),
+            "simple_timer": (
+                "⏱ تنظیم تایمر تخفیف حجمی ساده\n"
+                "مدت زمان را به ساعت ارسال کنید (مثلاً 12 یا 24).\n"
+                "برای اتمام تایمر و خاموش شدن خودکار تخفیف، عدد 0 بفرستید."
+            ),
+            "tiered_timer": (
+                "⏱ تنظیم تایمر تخفیف پلاکانی\n"
+                "مدت زمان را به ساعت ارسال کنید (مثلاً 12 یا 24).\n"
+                "برای اتمام تایمر و خاموش شدن خودکار تخفیف پلاکانی، "
+                "عدد 0 بفرستید."
+            ),
         }
         if kind not in prompts:
             raise ValueError("invalid discount setting")
+        if hasattr(query.message, "edit_reply_markup"):
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except BadRequest:
+                pass
+        flow_kind = {
+            "simple": "discount_simple_threshold",
+            "tiered": "discount_tiered",
+            "simple_timer": "discount_simple_timer",
+            "tiered_timer": "discount_tiered_timer",
+        }[kind]
         await prompt(
             update,
             context,
-            dict(kind="discount_field", sid=sid, field=kind),
+            dict(kind=flow_kind, sid=sid),
             prompts[kind],
         )
     elif action == "domains":
@@ -1616,9 +1891,18 @@ async def handle_text(update, context, *, business, actor):
         await update.effective_message.reply_text(
             "❌ عملیات لغو شد.", reply_markup=admin_main_keyboard()
         )
-        await update.effective_message.reply_text(
-            "↩️ مدیریت سرور", reply_markup=markup([back(int(flow["sid"]))])
-        )
+        sid = int(flow["sid"])
+        if str(flow.get("kind") or "").startswith(("sales_field", "discount_")):
+            service = ServerAdminService(business)
+            service.authorize(actor, sid)
+            menu_text, menu_rows = _dynamic_settings_view(service, sid)
+            await update.effective_message.reply_text(
+                menu_text, reply_markup=markup(menu_rows)
+            )
+        else:
+            await update.effective_message.reply_text(
+                "↩️ مدیریت سرور", reply_markup=markup([back(sid)])
+            )
         return True
     service = ServerAdminService(business)
     sid = int(flow["sid"])
@@ -1924,39 +2208,199 @@ async def handle_text(update, context, *, business, actor):
             section = f'category:{flow["cid"]}'
         elif kind == "sales_field":
             key = flow["field"]
-            value = text.upper() if key == "currency" else int(text.replace(",", ""))
-            service.set_sales(actor, sid, {key: value})
-            section = "settings"
-        elif kind == "discount_field":
-            field = flow["field"]
-            if field == "simple":
-                step, percent, cap = map(int, text.split())
-                changes = {
-                    "discount_step_gb": step,
-                    "discount_percent_step": percent,
-                    "discount_percent_max": cap,
-                }
-            elif field == "tiered":
-                tiers = []
-                if text != "-":
-                    for part in text.split():
-                        gb, percent = map(int, part.split(":"))
-                        tiers.append(dict(gb=gb, percent=percent))
-                changes = {"discount_tiers": tiers}
+            raw = _normalize_digit_text(text).replace(",", "").strip()
+            changes = {"pricing_model": "sellbot_month"}
+            if key in {"price_gb", "price_month"}:
+                value = int(raw)
+                if value < 0:
+                    raise ValueError("invalid dynamic price")
+                changes[key] = value
+            elif key == "volume_range":
+                values = list(map(int, _normalize_digit_text(text).split("-")))
+                if len(values) != 3:
+                    raise ValueError("invalid volume range")
+                changes.update(
+                    min_gb=values[0],
+                    max_gb=values[1],
+                    step_gb=values[2],
+                )
+            elif key == "time_range":
+                values = list(map(int, _normalize_digit_text(text).split("-")))
+                if len(values) != 3:
+                    raise ValueError("invalid time range")
+                changes.update(
+                    min_month=values[0],
+                    max_month=values[1],
+                    step_month=values[2],
+                )
             else:
-                minutes = int(text)
-                if not 0 <= minutes <= 525600:
-                    raise ValueError("invalid discount timer")
-                name = field.removesuffix("_timer")
-                changes = {
-                    f"discount_{name}_until": (
-                        iso_utc(utcnow() + timedelta(minutes=minutes))
-                        if minutes
-                        else None
-                    )
-                }
+                raise ValueError("invalid dynamic field")
             service.set_sales(actor, sid, changes)
-            section = "discounts"
+            context.user_data.pop(FLOW, None)
+            await update.effective_message.reply_text(
+                "✅ تنظیمات با موفقیت ذخیره شد.",
+                reply_markup=admin_main_keyboard(),
+            )
+            menu_text, menu_rows = _dynamic_settings_view(service, sid)
+            await update.effective_message.reply_text(
+                menu_text, reply_markup=markup(menu_rows)
+            )
+            return True
+        elif kind == "discount_simple_threshold":
+            threshold = int(
+                _normalize_digit_text(text).replace(",", "").strip()
+            )
+            flow["threshold"] = max(0, threshold)
+            flow["kind"] = "discount_simple_percent"
+            await update.effective_message.reply_text(
+                "الان درصد تخفیف را ارسال کن (مثلاً 25).\n"
+                "برای خاموش کردن کامل تخفیف 0 بفرست.",
+                reply_markup=cancel_keyboard(),
+            )
+            return True
+        elif kind == "discount_simple_percent":
+            percent = int(
+                _normalize_digit_text(text)
+                .replace("%", "")
+                .replace("٪", "")
+                .replace(",", "")
+                .strip()
+            )
+            threshold = int(flow.get("threshold") or 0)
+            if percent <= 0 or threshold <= 0:
+                service.set_sales(
+                    actor,
+                    sid,
+                    {
+                        "discount_step_gb": 0,
+                        "discount_percent_step": 0,
+                        "discount_percent_max": 0,
+                        "discount_tiers": [],
+                        "discount_simple_enabled": False,
+                        "discount_tiered_enabled": False,
+                        "discount_simple_until": None,
+                        "discount_tiered_until": None,
+                    },
+                )
+                success = "✅ تخفیف حجمی غیرفعال شد."
+            else:
+                if percent > 100:
+                    raise ValueError("invalid discount percent")
+                service.set_sales(
+                    actor,
+                    sid,
+                    {
+                        "discount_step_gb": threshold,
+                        "discount_percent_step": percent,
+                        "discount_percent_max": percent,
+                        "discount_tiers": [],
+                        "discount_simple_enabled": True,
+                        "discount_tiered_enabled": False,
+                        "discount_simple_until": None,
+                        "discount_tiered_until": None,
+                    },
+                )
+                success = (
+                    "✅ تخفیف ذخیره شد.\n"
+                    f"از {threshold} گیگ به بالا، {percent}٪ تخفیف "
+                    "روی قیمت نهایی اعمال می‌شود."
+                )
+            context.user_data.pop(FLOW, None)
+            await update.effective_message.reply_text(
+                success, reply_markup=admin_main_keyboard()
+            )
+            menu_text, menu_rows = _discount_settings_view(service, sid)
+            await update.effective_message.reply_text(
+                menu_text, reply_markup=markup(menu_rows)
+            )
+            return True
+        elif kind == "discount_tiered":
+            tiers = _parse_discount_tiers_text(text)
+            service.set_sales(
+                actor,
+                sid,
+                {
+                    "discount_tiers": tiers,
+                    "discount_tiered_enabled": bool(tiers),
+                    "discount_tiered_until": None,
+                },
+            )
+            context.user_data.pop(FLOW, None)
+            await update.effective_message.reply_text(
+                (
+                    "✅ تخفیف پلاکانی ذخیره شد.\n"
+                    + _format_discount_tiers(tiers)
+                    if tiers
+                    else "✅ تخفیف حجمی غیرفعال شد."
+                ),
+                reply_markup=admin_main_keyboard(),
+            )
+            menu_text, menu_rows = _discount_settings_view(service, sid)
+            await update.effective_message.reply_text(
+                menu_text, reply_markup=markup(menu_rows)
+            )
+            return True
+        elif kind in {"discount_simple_timer", "discount_tiered_timer"}:
+            hours = int(_normalize_digit_text(text).replace(",", "").strip())
+            if hours > 8760:
+                raise ValueError("invalid discount timer")
+            timer_kind = "simple" if kind == "discount_simple_timer" else "tiered"
+            if timer_kind == "tiered" and hours > 0:
+                current = service.sales(sid)
+                if not current.get("discount_tiers"):
+                    await update.effective_message.reply_text(
+                        "⚠️ ابتدا پله‌های تخفیف پلاکانی را تنظیم کنید، "
+                        "سپس تایمر را فعال کنید.",
+                        reply_markup=cancel_keyboard(),
+                    )
+                    return True
+            if hours <= 0:
+                service.set_sales(
+                    actor,
+                    sid,
+                    {
+                        f"discount_{timer_kind}_enabled": False,
+                        f"discount_{timer_kind}_until": None,
+                    },
+                )
+                success = (
+                    "✅ تایمر تخفیف حذف شد و تخفیف حجمی ساده خاموش شد."
+                    if timer_kind == "simple"
+                    else "✅ تایمر تخفیف پلاکانی حذف شد و تخفیف پلاکانی خاموش شد."
+                )
+            else:
+                expire_at = utcnow() + timedelta(hours=hours)
+                service.set_sales(
+                    actor,
+                    sid,
+                    {
+                        f"discount_{timer_kind}_enabled": True,
+                        f"discount_{timer_kind}_until": iso_utc(expire_at),
+                    },
+                )
+                if timer_kind == "simple":
+                    success = (
+                        "✅ تایمر تخفیف حجمی ساده تنظیم شد.\n"
+                        f"تخفیف به مدت {hours} ساعت "
+                        f"(تا {format_tehran(expire_at)}) فعال است و پس از "
+                        "اتمام، به‌صورت خودکار خاموش می‌شود."
+                    )
+                else:
+                    success = (
+                        "✅ تایمر تخفیف پلاکانی تنظیم شد.\n"
+                        f"تخفیف به مدت {hours} ساعت "
+                        f"(تا {format_tehran(expire_at)}) فعال است و پس از "
+                        "اتمام، به‌صورت خودکار خاموش می‌شود."
+                    )
+            context.user_data.pop(FLOW, None)
+            await update.effective_message.reply_text(
+                success, reply_markup=admin_main_keyboard()
+            )
+            menu_text, menu_rows = _discount_settings_view(service, sid)
+            await update.effective_message.reply_text(
+                menu_text, reply_markup=markup(menu_rows)
+            )
+            return True
         elif kind == "domain_title":
             if not 1 <= len(text) <= 80:
                 raise ValueError("invalid title")

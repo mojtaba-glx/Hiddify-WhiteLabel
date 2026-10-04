@@ -23,14 +23,22 @@ from TenantRuntime.server_connections import url
 
 DEFAULT_SALES = dict(
     mode="fixed",
+    # Keep the legacy day-based fields for already configured tenants.  New
+    # SellBot-parity edits switch pricing_model to "sellbot_month" and use the
+    # month fields below, matching AdminBot/plans.py in Hiddify-SellBot.
+    pricing_model="legacy_day",
     min_gb=10,
     max_gb=1000,
     step_gb=10,
     min_days=30,
     max_days=365,
     step_days=30,
+    min_month=1,
+    max_month=12,
+    step_month=1,
     price_gb=0,
     price_day=0,
+    price_month=0,
     discount_percent=0,
     currency="IRR",
     discount_simple_enabled=False,
@@ -1055,12 +1063,15 @@ class ServerAdminService:
         if set(changes) - set(DEFAULT_SALES):
             raise ValueError("invalid sales setting")
         settings = self.sales(sid) | changes
-        if settings["mode"] not in {"fixed", "dynamic", "mixed"} or settings[
-            "currency"
-        ] not in {"IRR", "IRT", "USD", "USDT", "EUR"}:
+        if (
+            settings["mode"] not in {"fixed", "dynamic", "mixed"}
+            or settings["currency"] not in {"IRR", "IRT", "USD", "USDT", "EUR"}
+            or settings["pricing_model"] not in {"legacy_day", "sellbot_month"}
+        ):
             raise ValueError("invalid sales setting")
         for key in set(DEFAULT_SALES) - {
             "mode",
+            "pricing_model",
             "currency",
             "discount_tiers",
             "discount_simple_until",
@@ -1074,7 +1085,12 @@ class ServerAdminService:
         if (
             not 0 < settings["min_gb"] <= settings["max_gb"] <= 1000000
             or not 0 < settings["min_days"] <= settings["max_days"] <= 36500
-            or min(settings["step_gb"], settings["step_days"]) < 1
+            or not 0 < settings["min_month"] <= settings["max_month"] <= 1200
+            or min(
+                settings["step_gb"],
+                settings["step_days"],
+                settings["step_month"],
+            ) < 1
             or settings["discount_percent"] > 100
         ):
             raise ValueError("invalid dynamic limits")
@@ -1085,9 +1101,23 @@ class ServerAdminService:
             if settings[key] is not None:
                 parse_utc(settings[key])
         if (
-            settings["discount_step_gb"] < 1
-            or max(settings["discount_percent_step"], settings["discount_percent_max"])
-            > 100
+            settings["discount_step_gb"] < 0
+            or min(
+                settings["discount_percent_step"],
+                settings["discount_percent_max"],
+            ) < 0
+            or max(
+                settings["discount_percent_step"],
+                settings["discount_percent_max"],
+            ) > 100
+            or (
+                settings["discount_simple_enabled"]
+                and (
+                    settings["discount_step_gb"] < 1
+                    or settings["discount_percent_step"] < 1
+                    or settings["discount_percent_max"] < 1
+                )
+            )
         ):
             raise ValueError("invalid volume discount")
         tiers = settings["discount_tiers"]
@@ -1399,18 +1429,28 @@ class ServerAdminService:
 
     def quote(self, sid, gb, days):
         s = self.sales(sid)
+        month_mode = s.get("pricing_model") == "sellbot_month"
+        time_price = int(s["price_month"] if month_mode else s["price_day"])
         if (
             s["mode"] not in {"dynamic", "mixed"}
-            or int(s["price_gb"]) + int(s["price_day"]) <= 0
+            or int(s["price_gb"]) + time_price <= 0
         ):
             raise TenantBusinessError("dynamic pricing is not configured")
-        if (
-            not s["min_gb"] <= int(gb) <= s["max_gb"]
-            or not s["min_days"] <= int(days) <= s["max_days"]
-        ):
+        if not s["min_gb"] <= int(gb) <= s["max_gb"]:
             raise ValueError("package outside configured bounds")
+        if month_mode:
+            if int(days) % 30:
+                raise ValueError("package outside configured bounds")
+            months = int(days) // 30
+            if not s["min_month"] <= months <= s["max_month"]:
+                raise ValueError("package outside configured bounds")
+            time_component = months * int(s["price_month"])
+        else:
+            if not s["min_days"] <= int(days) <= s["max_days"]:
+                raise ValueError("package outside configured bounds")
+            time_component = int(days) * int(s["price_day"])
         price = (
-            (int(gb) * s["price_gb"] + int(days) * s["price_day"])
+            (int(gb) * int(s["price_gb"]) + time_component)
             * (100 - self.discount_percent(sid, gb))
             // 100
         )
