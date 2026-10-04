@@ -364,3 +364,51 @@ def test_hiddify_native_subscription_content_is_fetched() -> None:
         target=_target(), secret="api-key", external_ref="u-content"
     ) == body
 
+
+
+def test_create_keeps_confirmed_hiddify_user_when_stabilization_patch_is_rejected() -> None:
+    seen_post: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode()) if request.content else None
+        if request.url.path.endswith("/api/v2/panel/info/"):
+            return _json_response(200, {"version": "12.3.3"}, request)
+        if request.method == "POST":
+            seen_post.append(body or {})
+            return _json_response(
+                200,
+                {
+                    "uuid": body["uuid"],
+                    "is_active": True,
+                    "name": body["name"],
+                    "usage_limit_GB": body["usage_limit_GB"],
+                    "current_usage_GB": 0,
+                },
+                request,
+            )
+        if request.method == "PATCH":
+            return _json_response(
+                422, {"detail": "stabilization rejected"}, request
+            )
+        return _json_response(
+            200,
+            {
+                "uuid": seen_post[0]["uuid"],
+                "is_active": True,
+                "name": seen_post[0]["name"],
+                "usage_limit_GB": seen_post[0]["usage_limit_GB"],
+                "current_usage_GB": 0,
+                "start_date": seen_post[0]["start_date"],
+                "package_days": seen_post[0]["package_days"],
+            },
+            request,
+        )
+
+    adapter = HiddifyPanelAdapter(transport=httpx.MockTransport(handler))
+    result = adapter.provision(
+        target=_target(), secret="api-key", request=_request()
+    )
+    assert result.external_ref == seen_post[0]["uuid"]
+    assert seen_post[0]["last_reset_time"]
+    assert seen_post[0]["current_usage_GB"] == 0
+    assert seen_post[0]["is_active"] is True

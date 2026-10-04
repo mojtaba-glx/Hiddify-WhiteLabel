@@ -1313,6 +1313,9 @@ async def handle_text(update, context, *, business, actor):
         text_result = (
             f"👥 ساخته‌شده: {len(report['users'])} · خطا: {report['errors']}"
         )
+        details = list(report.get("error_details") or [])
+        if details:
+            text_result += "\n" + "\n".join(f"• {row}" for row in details[:5])
         if int(report.get("node_errors") or 0):
             text_result += (
                 f"\n⚠️ خطای ساخت روی نودها: {int(report['node_errors'])}؛ "
