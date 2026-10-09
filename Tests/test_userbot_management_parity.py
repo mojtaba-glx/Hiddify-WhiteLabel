@@ -165,12 +165,16 @@ def test_user_menu_reacts_to_admin_settings(conn, factories, cipher) -> None:
     assert "💳خرید اشتراک" not in labels
     assert "🔥تست رایگان" not in labels
     assert "💌دعوت دوستان" not in labels
-    assert "🎁دریافت هدیه" not in labels
 
-    service.set_userbot_setting_admin(7001, key="enable_buy", value=True)
+    # SellBot parity: legacy show_gift_button keeps دعوت دوستان visible
+    # even when referral is disabled.
     service.set_userbot_setting_admin(
         7001, key="show_gift_button", value=True
     )
+    labels = sum(_reply_labels(user_handlers._main_keyboard(spec, service)), [])
+    assert "💌دعوت دوستان" in labels
+
+    service.set_userbot_setting_admin(7001, key="enable_buy", value=True)
     service.update_growth_settings(
         7001, referral_enabled=True, trial_enabled=True
     )
@@ -178,7 +182,6 @@ def test_user_menu_reacts_to_admin_settings(conn, factories, cipher) -> None:
     assert "💳خرید اشتراک" in labels
     assert "🔥تست رایگان" in labels
     assert "💌دعوت دوستان" in labels
-    assert "🎁دریافت هدیه" in labels
 
 
 def test_userbot_customer_main_menu_matches_sellbot_navigation(
@@ -198,7 +201,6 @@ def test_userbot_customer_main_menu_matches_sellbot_navigation(
         ["🔥تست رایگان", "💰کیف پول"],
         ["📩پشتیبانی", "📚راهنما", "❗️سوالات متداول"],
         ["💌دعوت دوستان"],
-        ["🎁دریافت هدیه"],
     ]
 
 
@@ -505,7 +507,7 @@ def test_userbot_main_reply_buttons_are_routed_to_real_actions() -> None:
     assert 'if text == BTN_GUIDE:' in runtime
     assert 'if text == BTN_FAQ:' in runtime
     assert 'if text == BTN_REFERRAL:' in runtime
-    assert 'if text == BTN_GIFT:' in runtime
+    assert 'BTN_GIFT' not in runtime
     assert 'if text in main_labels:' in runtime
 
 

@@ -115,27 +115,33 @@ async def _render_builder(
 
     if month_mode:
         duration_row = [
-            Button("➖ مدت", callback_data=cb("months_minus")),
-            Button(f"{quote['months']} ماه", callback_data="noop"),
-            Button("➕ مدت", callback_data=cb("months_plus")),
+            Button("➖", callback_data=cb("months_minus")),
+            Button(f"{quote['months']} ماهه", callback_data="noop"),
+            Button("➕", callback_data=cb("months_plus")),
         ]
         duration_text = f"{quote['months']} ماهه"
     else:
         duration_row = [
-            Button("➖ مدت", callback_data=cb("days_minus")),
+            Button("➖", callback_data=cb("days_minus")),
             Button(f"{quote['days']} روز", callback_data="noop"),
-            Button("➕ مدت", callback_data=cb("days_plus")),
+            Button("➕", callback_data=cb("days_plus")),
         ]
         duration_text = f"{quote['days']} روزه"
 
     keyboard = [
+        [Button("📊 حجم", callback_data="noop")],
         [
-            Button("➖ حجم", callback_data=cb("gb_minus")),
+            Button("➖", callback_data=cb("gb_minus")),
             Button(f"{quote['gb']} گیگابایت", callback_data="noop"),
-            Button("➕ حجم", callback_data=cb("gb_plus")),
+            Button("➕", callback_data=cb("gb_plus")),
         ],
+        [Button("⏳ زمان", callback_data="noop")],
         duration_row,
-        [Button("✅ تایید و خرید", callback_data=cb("confirm"))],
+        [
+            Button(f"🏷 تخفیف: {service.discount_percent(sid, quote['gb'])}%", callback_data="noop"),
+            Button(f"💰 قیمت: {price_disp:,} {currency_disp}", callback_data="noop"),
+        ],
+        [Button("💳 تایید و خرید", callback_data=cb("confirm"))],
         [
             Button(
                 "🔙 بازگشت",
@@ -146,16 +152,9 @@ async def _render_builder(
     await query.answer()
     from TenantRuntime.UserBot.handlers import _edit_subscription
 
-    discount_pct = service.discount_percent(sid, quote["gb"])
     await _edit_subscription(
         query,
-        (
-            "📦 بسته مورد نیاز خود را جهت خرید تنظیم کنید\n\n"
-            f"📊 حجم: {quote['gb']} گیگابایت\n"
-            f"⏳ زمان: {duration_text}\n"
-            f"💰 قیمت: {price_disp:,} {currency_disp}  |  "
-            f"🏷 تخفیف: {discount_pct}٪"
-        ),
+        "📦بسته مورد نیاز خود را جهت خرید تنظیم کنید",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 

@@ -4,6 +4,13 @@ All parity work lives on branch `feat/sellbot-parity-phase1`.
 
 ---
 
+## v1.2.7 — Dynamic builder + invite menu parity
+
+- Plan-builder keyboard now matches SellBot: separate `📊 حجم` / `⏳ زمان` label rows, plain `➖`/`➕` steppers, discount+price row, `💳 تایید و خرید` confirm, `X ماهه` format, short header text.
+- Main-menu `🎁دریافت هدیه` replaced with SellBot-style `💌دعوت دوستان` (visible when referral is enabled or legacy `show_gift_button` is on).
+- Invite home keyboard is now the SellBot 5-button layout with `inviterewards` / `invitelist` / `invitestats` / `invitehistory` handlers backed by `referral_summary`.
+- Wallet gift-code redeem (`shop:gift`) unchanged. Full offline suite: 744 passed.
+
 ## v1.2.6 — Purchase-flow parity guard
 
 - Kept the SellBot-style location → dynamic plan builder flow for dynamic and mixed sales.

@@ -437,6 +437,21 @@ def _referral_content(
     }
 
 
+def _invite_home_markup() -> InlineKeyboardMarkup:
+    """SellBot-style دعوت دوستان keyboard (5 buttons)."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 لینک دعوت من", callback_data="shop:invitebanner")],
+        [
+            InlineKeyboardButton("🎁 جوایز من", callback_data="shop:inviterewards"),
+            InlineKeyboardButton("👥 دعوت‌های من", callback_data="shop:invitelist"),
+        ],
+        [
+            InlineKeyboardButton("📊 آمار دعوت", callback_data="shop:invitestats"),
+            InlineKeyboardButton("📜 تاریخچه جوایز", callback_data="shop:invitehistory"),
+        ],
+    ])
+
+
 def _account_status_label(value: object) -> str:
     return {
         "active": "🟢 فعال",
@@ -1452,7 +1467,6 @@ BTN_SUPPORT = "📩پشتیبانی"
 BTN_GUIDE = "📚راهنما"
 BTN_FAQ = "❗️سوالات متداول"
 BTN_REFERRAL = "💌دعوت دوستان"
-BTN_GIFT = "🎁دریافت هدیه"
 
 
 def _main_keyboard(spec: RuntimeBotSpec, business) -> ReplyKeyboardMarkup:
@@ -1490,14 +1504,9 @@ def _main_keyboard(spec: RuntimeBotSpec, business) -> ReplyKeyboardMarkup:
         KeyboardButton(BTN_FAQ, settings=settings),
     ])
 
-    if bool(growth.get("referral_enabled")):
+    if bool(growth.get("referral_enabled")) or bool(settings.get("show_gift_button", True)):
         rows.append([
             KeyboardButton(BTN_REFERRAL, settings=settings),
-        ])
-
-    if bool(settings.get("show_gift_button", True)):
-        rows.append([
-            KeyboardButton(BTN_GIFT, settings=settings),
         ])
 
     return ReplyKeyboardMarkup(
@@ -1545,15 +1554,6 @@ async def _handle_main_reply_action(
         )
         return True
 
-    if text == BTN_GIFT:
-        if not bool(settings.get("show_gift_button", True)):
-            raise TenantBusinessError("gift is disabled")
-        context.user_data["biz_flow"] = {"kind": "gift_redeem"}
-        await update.effective_message.reply_text(
-            "🎁 کد هدیه را ارسال کنید."
-        )
-        return True
-
     if text == BTN_REFERRAL:
         growth = business._ensure_growth_settings()
         if not bool(growth.get("referral_enabled")):
@@ -1566,20 +1566,7 @@ async def _handle_main_reply_action(
         )
         await update.effective_message.reply_text(
             str(referral["body"]),
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🖼 بنر دعوت",
-                        callback_data="shop:invitebanner",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "💰 کیف پول",
-                        callback_data="shop:wallet",
-                    )
-                ],
-            ]),
+            reply_markup=_invite_home_markup(),
             disable_web_page_preview=True,
         )
         return True
@@ -2315,11 +2302,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             await update.callback_query.edit_message_text(
                 str(referral["body"]),
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🖼 بنر دعوت", callback_data="shop:invitebanner")],
-                    [InlineKeyboardButton("💰 کیف پول", callback_data="shop:wallet")],
-                    [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
-                ]),
+                reply_markup=_invite_home_markup(),
                 disable_web_page_preview=True,
             )
             return
@@ -2364,6 +2347,63 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 text=banner_text,
                 disable_web_page_preview=True,
             )
+            return
+        if data in {"shop:inviterewards", "shop:invitelist", "shop:invitestats", "shop:invitehistory"}:
+            growth = business._ensure_growth_settings()
+            if not bool(growth.get("referral_enabled")):
+                raise TenantBusinessError("referral is disabled")
+            summary = business.referral_summary(actor)
+            chat_id = int(update.effective_chat.id) if update.effective_chat else actor
+            await update.callback_query.answer()
+            if data == "shop:inviterewards":
+                rewards = list(summary.get("settings") or {} and summary.get("rewards") or [])
+                trial_amount = int((summary.get("settings") or {}).get("referral_trial_reward") or 0)
+                purchase_amount = int((summary.get("settings") or {}).get("referral_purchase_reward") or 0)
+                total = sum(int(x.get("amount") or 0) for x in rewards)
+                count = sum(int(x.get("count") or 0) for x in rewards)
+                text = (
+                    "🎁 جوایز من\n"
+                    "❖ ◈━━━━━━━━━━━━━━━◈ ❖\n"
+                    f"🤝 پاداش تست: {trial_amount:,} تومان\n"
+                    f"🛒 پاداش خرید اول: {purchase_amount:,} تومان\n"
+                    f"🎯 جوایز دریافتی: {count}\n"
+                    f"💰 مجموع پاداش‌ها: {total:,} تومان\n"
+                )
+            elif data == "shop:invitelist":
+                count = int(summary.get("referred_count") or 0)
+                text = (
+                    f"👥 دعوت‌های من ({count} نفر)\n❖ ◈━━━━━━━━━━━━━━━◈ ❖\n"
+                    + (f"✅ {count} دعوت موفق ثبت شده است." if count else "👥 هنوز کسی را دعوت نکرده‌اید.")
+                )
+            elif data == "shop:invitestats":
+                rewards = list(summary.get("rewards") or [])
+                count = int(summary.get("referred_count") or 0)
+                total = sum(int(x.get("amount") or 0) for x in rewards)
+                paid = sum(int(x.get("count") or 0) for x in rewards)
+                text = (
+                    "📊 آمار دعوت\n"
+                    "❖ ◈━━━━━━━━━━━━━━━◈ ❖\n"
+                    f"👥 کل دعوت‌ها: {count}\n"
+                    f"✅ دعوت‌های موفق: {count}\n"
+                    f"🎁 مجموع پاداش‌ها: {total:,} تومان\n"
+                    f"🧾 تعداد جوایز دریافتی: {paid}"
+                )
+            else:
+                rewards = list(summary.get("rewards") or [])
+                labels = {"trial": "پاداش تست", "purchase": "پاداش خرید", "manual": "پاداش دستی"}
+                if not rewards:
+                    text = "📜 هنوز پاداشی دریافت نکرده‌اید."
+                else:
+                    lines = [f"📜 تاریخچه جوایز ({len(rewards)} مورد)\n❖ ◈━━━━━━━━━━━━━━━◈ ❖"]
+                    for idx, rw in enumerate(rewards, start=1):
+                        rtype = str(rw.get("reward_type") or "")
+                        lines.append(
+                            f"{idx}. {labels.get(rtype, rtype)} | "
+                            f"{int(rw.get('amount') or 0):,} {rw.get('currency') or ''} | "
+                            f"✅ {int(rw.get('count') or 0)} مورد"
+                        )
+                    text = "\n".join(lines)
+            await context.bot.send_message(chat_id=chat_id, text=text)
             return
         if data == "shop:trial":
             state = business.free_trial_state(actor)
@@ -3677,7 +3717,6 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             BTN_GUIDE,
             BTN_FAQ,
             BTN_REFERRAL,
-            BTN_GIFT,
         }
         if text in main_labels:
             context.user_data.pop("biz_flow", None)
