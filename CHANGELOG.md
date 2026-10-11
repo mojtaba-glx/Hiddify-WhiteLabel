@@ -4,6 +4,21 @@ All notable changes to Hiddify-WhiteLabel are documented here.
 
 ---
 
+## [v1.3.1] – 2026-10-12
+
+### Added (MasterBot: full-backup settings section, owner-only)
+
+**Files:** `MasterBot/views.py`, `MasterBot/handlers.py`, `MasterBot/customer_service.py`, `MasterBot/platform_settings.py`, `MasterBot/main.py`
+
+- دکمه `🗄 بکاپ کامل` در `⚙️ تنظیمات` (فقط ادمین مستر؛ مشتری‌ها این بخش را نمی‌بینند)
+- صفحه بکاپ با چیدمان ۳ردیفه: ردیف ۱ `📤 ارسال خودکار` تمام‌عرض، ردیف ۲ `📦 بکاپ فوری` + `📥 بازیابی بکاپ` کنار هم، ردیف ۳ `↩️ بازگشت` تمام‌عرض
+- بکاپ فوری: ساخت `.wlbak` رمزنگاری‌شده (دیتابیس کامل شامل لایسنس‌ها و مشتری‌ها + `.env`) و ارسال به DM مالک؛ رمز از `BACKUP_PASSPHRASE` یا ورودی محرمانه (حذف فوری پیام)
+- ارسال خودکار: تاگل ذخیره‌شده + جاب روزانه (نگهداری ۷ نسخه)؛ بدون `BACKUP_PASSPHRASE` جاب رد می‌شود
+- بازیابی: آپلود `.wlbak` + رمز، فقط بررسی اعتبار و نمایش مشخصات + دستور ترمینال ریستور (بازیابی زنده از تلگرام انجام نمی‌شود)
+- تنظیمات جدید `auto_backup_enabled` / `backup_last_at` + آدیت `platform_backup.create` / `platform_backup.auto_toggle`
+
+---
+
 ## [v1.3.0] – 2026-10-11
 
 ### Changed (SellBot-parity: subscription detail text, panel note, vpn names, missing-service hiding)

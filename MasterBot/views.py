@@ -81,6 +81,8 @@ AUDIT_ACTION_FA = {
     "payment.receipt_review": "بررسی رسید پرداخت",
     "platform_setting.update": "ویرایش تنظیمات فروشگاه",
     "platform_setting.trial_plan": "تغییر پلن تست",
+    "platform_backup.create": "ساخت بکاپ کامل",
+    "platform_backup.auto_toggle": "تغییر ارسال خودکار بکاپ",
 }
 
 ENTITY_TYPE_FA = {
@@ -628,7 +630,30 @@ def platform_settings_view(settings: dict[str, Any]) -> tuple[str, InlineKeyboar
         ],
         [InlineKeyboardButton("🎁 انتخاب پلن تست", callback_data="settings:trialplan")],
         [InlineKeyboardButton("📝 پیام توقف فروش", callback_data="settings:edit:maintenance_message")],
+        [InlineKeyboardButton("🗄 بکاپ کامل", callback_data="menu:backup")],
         [InlineKeyboardButton("↩️ منوی اصلی", callback_data="menu:main")],
+    ]
+    return text, InlineKeyboardMarkup(rows)
+
+
+def backup_settings_view(settings: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+    auto = bool(settings.get("auto_backup_enabled"))
+    auto_label = "📤 ارسال خودکار: 🟢 فعال" if auto else "📤 ارسال خودکار: 🔴 غیرفعال"
+    last = str(settings.get("backup_last_at") or "هنوز بکاپی ثبت نشده")
+    text = (
+        "🗄 بکاپ کامل مستر\n\n"
+        "این بکاپ شامل دیتابیس کامل (لایسنس‌ها، مشتری‌ها، سفارش‌ها، اشتراک‌ها)\n"
+        "و فایل تنظیمات محیطی (.env) است و رمزنگاری‌شده ارسال می‌شود.\n\n"
+        f"📤 ارسال خودکار: {'🟢 فعال' if auto else '🔴 غیرفعال'}\n"
+        f"🕒 آخرین بکاپ: {last}"
+    )
+    rows = [
+        [InlineKeyboardButton(auto_label, callback_data="backup:auto:toggle")],
+        [
+            InlineKeyboardButton("📦 بکاپ فوری", callback_data="backup:now"),
+            InlineKeyboardButton("📥 بازیابی بکاپ", callback_data="backup:restore"),
+        ],
+        [InlineKeyboardButton("↩️ بازگشت", callback_data="menu:settings")],
     ]
     return text, InlineKeyboardMarkup(rows)
 

@@ -99,7 +99,10 @@ def test_application_registers_global_access_gate(conn) -> None:
     assert isinstance(app.bot_data["master_service"], MasterService)
     assert app.bot_data["license_job_runner"] is not None
     assert app.bot_data["tenant_runtime_gate"] is not None
-    assert [job.name for job in app.job_queue.jobs()] == ["license-service"]
+    assert [job.name for job in app.job_queue.jobs()] == [
+        "license-service",
+        "master-auto-backup",
+    ]
 
 
 def test_access_gate_allows_normal_customer_messages(conn) -> None:

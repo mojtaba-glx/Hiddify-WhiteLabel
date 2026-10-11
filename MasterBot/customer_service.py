@@ -978,6 +978,8 @@ class CustomerPortalService:
         self, actor_id: int, key: str, enabled: bool
     ) -> dict[str, Any]:
         require_master_admin(actor_id, self.master_admin_id)
+        if key not in {"sales_enabled", "trial_enabled", "auto_backup_enabled"}:
+            raise ValueError("invalid boolean setting")
         with transaction(self.conn):
             self.settings.set_bool(key, bool(enabled))
             AuditRepository(self.conn).append(
@@ -986,6 +988,41 @@ class CustomerPortalService:
                 entity_id=key, metadata={"enabled": bool(enabled)},
             )
         return self.settings.all()
+
+    def get_backup_status(self, actor_id: int) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        settings = self.settings.all()
+        return {
+            "auto_backup_enabled": bool(settings.get("auto_backup_enabled")),
+            "backup_last_at": str(settings.get("backup_last_at") or ""),
+        }
+
+    def set_backup_auto(self, actor_id: int, enabled: bool) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        with transaction(self.conn):
+            self.settings.set_bool("auto_backup_enabled", bool(enabled))
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id), tenant_id=None,
+                action="platform_backup.auto_toggle", entity_type="platform_setting",
+                entity_id="auto_backup_enabled", metadata={"enabled": bool(enabled)},
+            )
+        return self.get_backup_status(actor_id)
+
+    def record_backup_completed(
+        self, actor_id: int, *, filename: str, sha256: str
+    ) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        clean_name = str(filename or "")[:120]
+        clean_sha = str(sha256 or "")[:64]
+        with transaction(self.conn):
+            self.settings.set_text("backup_last_at", iso_utc(utcnow()), maximum=40)
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id), tenant_id=None,
+                action="platform_backup.create", entity_type="platform_setting",
+                entity_id="full-backup",
+                metadata={"filename": clean_name, "sha256": clean_sha},
+            )
+        return self.get_backup_status(actor_id)
 
     def get_payment_method_admin(self, actor_id: int, method_id: int) -> dict[str, Any]:
         require_master_admin(actor_id, self.master_admin_id)

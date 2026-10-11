@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -77,6 +79,12 @@ def build_application(
         first=settings.license_job_interval_seconds,
         name="license-service",
     )
+    application.job_queue.run_repeating(
+        run_backup_job,
+        interval=24 * 60 * 60,
+        first=24 * 60 * 60,
+        name="master-auto-backup",
+    )
     return application, connection
 
 
@@ -93,6 +101,87 @@ async def run_license_job(context) -> None:
         # RuntimeGate remains independent and fail-closed even if this cycle
         # cannot reach the database or Telegram.
         logger.error("License job cycle failed: %s", safe_format_exception(exc))
+
+
+AUTO_BACKUP_RETENTION = 7
+
+
+async def run_backup_job(context) -> None:
+    """Daily encrypted full backup when the owner enabled auto-send."""
+    from Ops.backup import BackupError, create_backup
+
+    portal = context.application.bot_data.get("customer_portal_service")
+    service = context.application.bot_data.get("master_service")
+    if portal is None or service is None:
+        return
+    try:
+        status = portal.get_backup_status(int(service.master_admin_id))
+    except Exception as exc:
+        logger.warning("Auto-backup status check failed: %s", safe_format_exception(exc))
+        return
+    if not bool(status.get("auto_backup_enabled")):
+        return
+    passphrase = str(os.environ.get("BACKUP_PASSPHRASE", "") or "")
+    if len(passphrase.encode("utf-8")) < 12:
+        logger.warning("Auto-backup skipped: BACKUP_PASSPHRASE is not configured")
+        return
+    from dotenv import dotenv_values
+
+    from Shared.settings import load_database_path
+
+    try:
+        env_file = ROOT / ".env"
+        values = (
+            {str(k): str(v or "") for k, v in dotenv_values(env_file).items()}
+            if env_file.is_file()
+            else dict(os.environ)
+        )
+        candidate = Path(load_database_path(values))
+        database = candidate if candidate.is_absolute() else ROOT / candidate
+    except Exception:
+        env_file = ROOT / ".env"
+        database = ROOT / "data" / "whitelabel.db"
+    if not database.is_file():
+        logger.warning("Auto-backup skipped: database file is missing")
+        return
+    try:
+        output = create_backup(
+            database_path=database,
+            environment_path=env_file if env_file.is_file() else None,
+            output_directory=ROOT / "backups" / "auto",
+            passphrase=passphrase,
+            version=(ROOT / "VERSION").read_text(encoding="utf-8").strip(),
+        )
+    except BackupError as exc:
+        logger.warning("Auto-backup creation failed: %s", safe_format_exception(exc))
+        return
+    except Exception as exc:
+        logger.warning("Auto-backup creation failed: %s", safe_format_exception(exc))
+        return
+    finally:
+        passphrase = ""
+    try:
+        digest = hashlib.sha256(output.read_bytes()).hexdigest()
+        portal.record_backup_completed(
+            int(service.master_admin_id), filename=output.name, sha256=digest
+        )
+        with open(output, "rb") as handle:
+            await context.bot.send_document(
+                chat_id=int(service.master_admin_id),
+                document=handle,
+                filename=output.name,
+                caption=f"📤 بکاپ خودکار\n📁 {output.name}",
+            )
+    except Exception as exc:
+        logger.warning("Auto-backup delivery failed: %s", safe_format_exception(exc))
+        return
+    try:
+        auto_dir = ROOT / "backups" / "auto"
+        snapshots = sorted(auto_dir.glob("whitelabel-*.wlbak"))
+        for stale in snapshots[:-AUTO_BACKUP_RETENTION]:
+            stale.unlink(missing_ok=True)
+    except Exception as exc:
+        logger.warning("Auto-backup retention cleanup failed: %s", safe_format_exception(exc))
 
 
 def main() -> None:

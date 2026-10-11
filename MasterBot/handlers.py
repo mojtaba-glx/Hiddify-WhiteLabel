@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import sqlite3
+from pathlib import Path
 from typing import Any, Optional
 
+from dotenv import dotenv_values
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -36,6 +41,7 @@ from Provisioning.service import PreparedBot, ProvisioningError
 from MasterBot.views import (
     audit_text,
     back_keyboard,
+    backup_settings_view,
     confirm_keyboard,
     license_detail,
     licenses_view,
@@ -58,8 +64,51 @@ from MasterBot.views import (
 )
 from Shared.access import is_master_admin
 from Shared.redaction import get_logger, safe_format_exception
+from Shared.settings import load_database_path
 
 logger = get_logger(__name__)
+
+MASTER_ROOT = Path(__file__).resolve().parents[1]
+MAX_RESTORE_UPLOAD_BYTES = 256 * 1024 * 1024
+
+
+def _master_env_file() -> Path:
+    return MASTER_ROOT / ".env"
+
+
+def _master_database_path() -> Path:
+    env_path = _master_env_file()
+    values: dict[str, str] = {}
+    try:
+        if env_path.is_file():
+            values = {
+                str(key): str(value or "")
+                for key, value in dotenv_values(env_path).items()
+            }
+    except Exception:
+        values = {}
+    configured = load_database_path(values)
+    candidate = Path(configured)
+    return candidate if candidate.is_absolute() else (MASTER_ROOT / candidate)
+
+
+def _backup_passphrase() -> str:
+    raw = str(os.environ.get("BACKUP_PASSPHRASE", "") or "")
+    if not raw:
+        try:
+            env_path = _master_env_file()
+            if env_path.is_file():
+                raw = str(dotenv_values(env_path).get("BACKUP_PASSPHRASE", "") or "")
+        except Exception:
+            raw = ""
+    return raw
+
+
+def _read_version() -> str:
+    try:
+        return (MASTER_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    except Exception:
+        return "unknown"
 
 
 def _actor_id(update: Update) -> Optional[int]:
@@ -399,6 +448,188 @@ async def _show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     settings = _portal(context).get_platform_settings(actor)
     text, keyboard = platform_settings_view(settings)
     await _render(update, text, keyboard)
+
+
+async def _show_backup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    actor = int(_actor_id(update) or 0)
+    settings = _portal(context).get_platform_settings(actor)
+    text, keyboard = backup_settings_view(settings)
+    await _render(update, text, keyboard)
+
+
+async def _do_full_backup(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, passphrase: str
+) -> None:
+    """Create an encrypted full backup and deliver it to the owner chat."""
+    from Ops.backup import BackupError, create_backup
+
+    actor = int(_actor_id(update) or 0)
+    if len(passphrase.encode("utf-8")) < 12:
+        await _render(
+            update,
+            "❌ رمز بکاپ باید حداقل ۱۲ کاراکتر باشد.",
+            back_keyboard("menu:backup"),
+        )
+        return
+    database = _master_database_path()
+    if not database.is_file():
+        await _render(
+            update,
+            "❌ فایل دیتابیس پیدا نشد؛ بکاپ ساخته نشد.",
+            back_keyboard("menu:backup"),
+        )
+        return
+    try:
+        output = create_backup(
+            database_path=database,
+            environment_path=_master_env_file()
+            if _master_env_file().is_file()
+            else None,
+            output_directory=MASTER_ROOT / "backups",
+            passphrase=passphrase,
+            version=_read_version(),
+        )
+    except BackupError as exc:
+        logger.warning("MasterBot full backup failed: %s", safe_format_exception(exc))
+        await _render(
+            update,
+            "❌ ساخت بکاپ ناموفق بود. دوباره تلاش کنید.",
+            back_keyboard("menu:backup"),
+        )
+        return
+    digest = hashlib.sha256(output.read_bytes()).hexdigest()
+    _portal(context).record_backup_completed(
+        actor, filename=output.name, sha256=digest
+    )
+    caption = (
+        "✅ بکاپ کامل ساخته شد\n\n"
+        f"📁 {output.name}\n"
+        f"🔑 SHA256: {digest[:16]}…\n"
+        "این فایل را در جای امن خارج از سرور نگه دارید؛ "
+        "رمز بکاپ جداگانه و امن نگهداری شود."
+    )
+    if update.effective_chat is not None:
+        with open(output, "rb") as handle:
+            await update.effective_chat.send_document(
+                document=handle, filename=output.name, caption=caption
+            )
+    await _show_backup(update, context)
+
+
+def _summarize_backup_manifest(manifest: dict[str, Any]) -> str:
+    files = manifest.get("files") if isinstance(manifest, dict) else None
+    names = ", ".join(sorted(files)) if isinstance(files, dict) else "—"
+    return (
+        f"نسخه: {manifest.get('version', '—')}\n"
+        f"زمان ساخت: {manifest.get('created_at', '—')}\n"
+        f"فایل‌ها: {names}"
+    )
+
+
+async def _verify_restored_backup(
+    update: Update, passphrase: str, backup_file: str
+) -> None:
+    from Ops.backup import BackupError, _decrypt_archive
+
+    path = Path(str(backup_file or ""))
+    if not path.is_file():
+        await _render(
+            update,
+            "❌ فایل بکاپ پیدا نشد؛ دوباره آپلود کنید.",
+            back_keyboard("menu:backup"),
+        )
+        return
+    if len(passphrase.encode("utf-8")) < 12:
+        await _render(
+            update,
+            "❌ رمز بکاپ باید حداقل ۱۲ کاراکتر باشد.",
+            back_keyboard("menu:backup"),
+        )
+        return
+    try:
+        content = _decrypt_archive(path, passphrase)
+        manifest = json.loads(content["manifest.json"].decode("utf-8"))
+    except BackupError:
+        await _render(
+            update,
+            "❌ رمز نادرست است یا فایل بکاپ خراب است.",
+            back_keyboard("menu:backup"),
+        )
+        return
+    except Exception as exc:
+        logger.warning("MasterBot backup verify failed: %s", safe_format_exception(exc))
+        await _render(
+            update,
+            "❌ بررسی فایل بکاپ ناموفق بود.",
+            back_keyboard("menu:backup"),
+        )
+        return
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    await _render(
+        update,
+        "✅ فایل بکاپ معتبر است\n\n"
+        f"{_summarize_backup_manifest(manifest)}\n"
+        f"🔑 SHA256: {digest[:16]}…\n\n"
+        "برای بازیابی نهایی (بعد از توقف سرویس‌ها):\n"
+        f"`python3 scripts/restore.py \"{path}\" --yes`\n\n"
+        "⚠️ بازیابی از تلگرام انجام نمی‌شود؛ حتماً از ترمینال و با سرویس‌های متوقف اجرا کنید.",
+        back_keyboard("menu:backup"),
+    )
+
+
+async def handle_backup_document(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    if not _is_owner(update, context):
+        return
+    flow = context.user_data.get("flow")
+    if not isinstance(flow, dict) or str(flow.get("kind") or "") != "backup_restore_upload":
+        return
+    message = update.effective_message
+    if message is None or message.document is None:
+        return
+    document = message.document
+    raw_name = str(getattr(document, "file_name", "") or "uploaded.wlbak")
+    safe_name = "".join(
+        ch for ch in Path(raw_name).name if ch.isalnum() or ch in "._-"
+    ).strip("._") or "uploaded.wlbak"
+    if not safe_name.endswith(".wlbak"):
+        await message.reply_text(
+            "❌ فقط فایل `.wlbak` قبول است.", reply_markup=back_keyboard("menu:backup")
+        )
+        return
+    size = int(getattr(document, "file_size", 0) or 0)
+    if size > MAX_RESTORE_UPLOAD_BYTES:
+        await message.reply_text(
+            "❌ حجم فایل بیش از حد مجاز است.", reply_markup=back_keyboard("menu:backup")
+        )
+        return
+    incoming = MASTER_ROOT / "backups" / "incoming"
+    try:
+        incoming.mkdir(parents=True, mode=0o700, exist_ok=True)
+    except Exception as exc:
+        logger.warning("MasterBot backup incoming dir failed: %s", safe_format_exception(exc))
+        await message.reply_text(
+            "❌ آماده‌سازی پوشه بکاپ ناموفق بود.", reply_markup=back_keyboard("menu:backup")
+        )
+        return
+    target = incoming / safe_name
+    try:
+        telegram_file = await context.bot.get_file(document.file_id)
+        await telegram_file.download_to_drive(str(target))
+        os.chmod(target, 0o600)
+    except Exception as exc:
+        logger.warning("MasterBot backup download failed: %s", safe_format_exception(exc))
+        await message.reply_text(
+            "❌ دانلود فایل بکاپ ناموفق بود.", reply_markup=back_keyboard("menu:backup")
+        )
+        return
+    context.user_data["flow"] = {"kind": "backup_restore_passphrase", "backup_file": str(target)}
+    await message.reply_text(
+        f"📥 فایل `{safe_name}` دریافت شد.\n\n"
+        "🔐 حالا رمز همان بکاپ را بفرستید؛ پیام بلافاصله حذف می‌شود.",
+        reply_markup=back_keyboard("menu:backup"),
+    )
 
 
 async def _show_payment_history(
@@ -1186,6 +1417,40 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             await _show_settings(update, context)
             return
+        if data == "menu:backup":
+            await _show_backup(update, context)
+            return
+        if data == "backup:auto:toggle":
+            status = _portal(context).get_backup_status(actor)
+            _portal(context).set_backup_auto(
+                actor, not bool(status["auto_backup_enabled"])
+            )
+            await _show_backup(update, context)
+            return
+        if data == "backup:now":
+            passphrase = _backup_passphrase()
+            if passphrase:
+                await _do_full_backup(update, context, passphrase)
+                passphrase = ""
+                return
+            context.user_data["flow"] = {"kind": "backup_passphrase"}
+            await _render(
+                update,
+                "🔐 رمز بکاپ را بفرستید (حداقل ۱۲ کاراکتر).\n"
+                "پیام شما بلافاصله حذف می‌شود و رمز هیچ‌جا ذخیره نمی‌شود.",
+                back_keyboard("menu:backup"),
+            )
+            return
+        if data == "backup:restore":
+            context.user_data["flow"] = {"kind": "backup_restore_upload"}
+            await _render(
+                update,
+                "📥 فایل بکاپ (`.wlbak`) را همین‌جا ارسال کنید.\n\n"
+                "بعد از آپلود، رمز بکاپ پرسیده می‌شود و فایل فقط بررسی و گزارش می‌شود.\n"
+                "بازیابی نهایی باید از ترمینال و با سرویس‌های متوقف انجام شود.",
+                back_keyboard("menu:backup"),
+            )
+            return
         raise ValueError("unknown callback")
     except (
         ValueError,
@@ -1566,6 +1831,39 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data.pop("flow", None)
             await _show_settings(update, context)
             return
+        if kind == "backup_passphrase":
+            passphrase = text
+            text = ""
+            try:
+                await update.effective_message.delete()
+            except Exception as exc:
+                logger.warning(
+                    "Could not delete the submitted backup passphrase: %s",
+                    safe_format_exception(exc),
+                )
+            context.user_data.pop("flow", None)
+            try:
+                await _do_full_backup(update, context, passphrase)
+            finally:
+                passphrase = ""
+            return
+        if kind == "backup_restore_passphrase":
+            passphrase = text
+            text = ""
+            try:
+                await update.effective_message.delete()
+            except Exception as exc:
+                logger.warning(
+                    "Could not delete the submitted restore passphrase: %s",
+                    safe_format_exception(exc),
+                )
+            backup_file = str(flow.get("backup_file") or "")
+            context.user_data.pop("flow", None)
+            try:
+                await _verify_restored_backup(update, passphrase, backup_file)
+            finally:
+                passphrase = ""
+            return
         if kind in ("license_new_tenant", "license_new_plan"):
             await update.effective_message.reply_text(
                 "👆 مشتری و پلن را فقط با دکمه‌های پیام بالا انتخاب کنید.",
@@ -1677,5 +1975,8 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("cancel", cancel), group=0)
     application.add_handler(CallbackQueryHandler(on_callback), group=0)
     application.add_handler(MessageHandler(filters.PHOTO, handle_customer_photo), group=0)
+    application.add_handler(
+        MessageHandler(filters.Document.ALL, handle_backup_document), group=0
+    )
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text), group=0)
     application.add_error_handler(on_error)

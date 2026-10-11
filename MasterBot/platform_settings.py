@@ -16,6 +16,8 @@ DEFAULTS: dict[str, str] = {
     "trial_enabled": "1",
     "trial_plan_id": "",
     "maintenance_message": "فروش موقتاً غیرفعال است. لطفاً کمی بعد دوباره تلاش کنید.",
+    "auto_backup_enabled": "0",
+    "backup_last_at": "",
 }
 
 EDITABLE_KEYS = frozenset(DEFAULTS)
@@ -49,6 +51,8 @@ class PlatformSettingsService:
                 int(self.get("trial_plan_id")) if self.get("trial_plan_id").isdigit() else None
             ),
             "maintenance_message": self.get("maintenance_message"),
+            "auto_backup_enabled": self.get_bool("auto_backup_enabled"),
+            "backup_last_at": self.get("backup_last_at"),
         }
 
     def set_text(self, key: str, value: str, *, maximum: int) -> str:
@@ -65,7 +69,7 @@ class PlatformSettingsService:
 
     def set_bool(self, key: str, enabled: bool) -> bool:
         name = str(key or "").strip()
-        if name not in {"sales_enabled", "trial_enabled"}:
+        if name not in {"sales_enabled", "trial_enabled", "auto_backup_enabled"}:
             raise ValueError("setting is not a boolean field")
         self._write(name, "1" if bool(enabled) else "0")
         return bool(enabled)
