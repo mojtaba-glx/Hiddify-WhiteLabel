@@ -108,12 +108,27 @@ def normalize_settings(settings: dict) -> dict:
     return result
 
 
+_HIDDIFY_UUID_RE = re.compile(
+    r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-'
+    r'[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+)
+
+
 def credential(kind: str, *, flavor: str = '', values: dict) -> str:
     if kind == 'hiddify':
         raw = str(values.get('secret') or '').strip()
-        if not raw or '/' in raw or any(c.isspace() for c in raw):
+        if not raw:
             raise ValueError('invalid Hiddify API key')
-        return raw
+        # Tolerate pasted admin links: pull the UUID out of a full URL.
+        uuid_match = _HIDDIFY_UUID_RE.search(raw)
+        if uuid_match:
+            return uuid_match.group(0)
+        # Whitespace is never legitimate inside a key; drop sloppy-copy
+        # artifacts (inner spaces/newlines) instead of rejecting the key.
+        condensed = ''.join(raw.split())
+        if not condensed or '/' in condensed:
+            raise ValueError('invalid Hiddify API key')
+        return condensed
     token = str(values.get('api_token') or '').strip()
     if token.lower().startswith('bearer '):
         token = token[7:].strip()

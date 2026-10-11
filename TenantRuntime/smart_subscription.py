@@ -476,6 +476,49 @@ class SmartSubscriptionHTTPServer:
                 self.end_headers()
                 self.wfile.write(encoded)
 
+            def _write_json(self, status: int, payload: dict) -> None:
+                import json as _json
+
+                encoded = _json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(int(status))
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.send_header("X-Frame-Options", "DENY")
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def do_POST(self) -> None:  # noqa: N802
+                from TenantRuntime import sms_webhook as _sms_webhook
+
+                parsed = urlparse(self.path)
+                parts = [part for part in parsed.path.split("/") if part]
+                if len(parts) != 3 or parts[0] != "payment" or parts[1] != "sms":
+                    self._write(404, "not found")
+                    return
+                try:
+                    declared = int(self.headers.get("Content-Length", "0") or "0")
+                except (TypeError, ValueError):
+                    declared = 0
+                if declared <= 0 or declared > _sms_webhook.MAX_BODY_BYTES:
+                    self._write_json(400, {"ok": False, "error": "invalid_body"})
+                    return
+                try:
+                    raw_body = self.rfile.read(declared)
+                except Exception:
+                    self._write_json(400, {"ok": False, "error": "unreadable_body"})
+                    return
+                try:
+                    status, payload = _sms_webhook.handle_sms_post(
+                        service.db_path,
+                        parts[2],
+                        dict(self.headers.items()),
+                        raw_body,
+                        cipher=service.cipher,
+                    )
+                except Exception:
+                    status, payload = 500, {"ok": False, "error": "internal_error"}
+                self._write_json(status, payload)
+
             def do_GET(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
                 parts = [part for part in parsed.path.split("/") if part]

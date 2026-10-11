@@ -50,7 +50,7 @@ def rows(business, *, subscription=None, server_id=None):
             )
             result.append(
                 [Button(
-                    ("f39b پلن پویا · " + server['label'])[:60],
+                    ("🎛 پلن پویا · " + server['label'])[:60],
                     callback_data=callback,
                 )]
             )
@@ -166,7 +166,11 @@ async def handle_callback(update, context, *, business, actor, settings):
     if data == "shop:buy":
         if not settings.get("enable_buy", True):
             raise TenantBusinessError("purchase is disabled")
-        from TenantRuntime.UserBot.handlers import _purchase_location_rows
+        from TenantRuntime.UserBot.handlers import (
+            _edit_md,
+            _purchase_location_rows,
+            _servers_list_default,
+        )
         servers = business.list_purchase_servers()
         if not servers:
             await update.callback_query.answer(
@@ -177,12 +181,10 @@ async def handle_callback(update, context, *, business, actor, settings):
         lrows = _purchase_location_rows(servers, settings)
         lrows.append([Button("🔙 منو", callback_data="runtime:home")])
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(
+        await _edit_md(
+            update.callback_query,
             str(settings.get("servers_list_text") or "").strip()
-            or (
-                "📡 لیست سرورها\n"
-                "لطفاً لوکیشن مورد نظر خود را انتخاب کنید:"
-            ),
+            or _servers_list_default(),
             reply_markup=InlineKeyboardMarkup(lrows),
         )
         return True
@@ -292,8 +294,6 @@ async def handle_callback(update, context, *, business, actor, settings):
         raise ValueError("invalid quote action")
 
     quote_days = int(quote["months"]) * 30 if month_mode else int(quote["days"])
-    price, currency = service.quote(sid, quote["gb"], quote_days)
-    price_disp, currency_disp = _display_price(price, currency)
     query = update.callback_query
 
     if action == "confirm":
@@ -308,29 +308,10 @@ async def handle_callback(update, context, *, business, actor, settings):
         oid = int(order["id"])
         context.user_data.pop(key, None)
         await query.answer()
-        # SellBot-parity: plan summary + payment method selection
-        await query.edit_message_text(
-            (
-                "📄 اطلاعات پلن انتخاب شده\n\n"
-                f"📊 حجم: {quote['gb']} گیگ\n"
-                f"📅 زمان: {quote_days} روز\n"
-                f"💰 قیمت: {price_disp:,} {currency_disp}"
-            ),
-            reply_markup=InlineKeyboardMarkup([
-                [Button(
-                    "💳 پرداخت مستقیم",
-                    callback_data=f"shop:paymethods:{oid}",
-                )],
-                [Button(
-                    "💰 پرداخت از کیف پول",
-                    callback_data=f"shop:walletpay:{oid}",
-                )],
-                [Button(
-                    "🔙 بازگشت",
-                    callback_data="runtime:home",
-                )],
-            ]),
-        )
+        # Shared SellBot-style plan summary (same screen as fixed plans).
+        from TenantRuntime.UserBot.handlers import _send_order_summary
+        settings = business.runtime_userbot_settings()
+        await _send_order_summary(query, business, actor, settings, oid)
         return True
 
     # Default: render builder with updated quote (gb/time +/- actions)

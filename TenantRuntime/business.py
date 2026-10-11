@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import secrets
 import sqlite3
@@ -65,6 +66,8 @@ USERBOT_SETTING_DEFAULTS: dict[str, Any] = {
     "renew_time_mode": "reset",
     "renew_max_days": 3,
     "renew_max_remaining_gb": 3,
+    # Missing-panel grace before a vanished subscription is purged.
+    "missing_service_delete_days": 7,
     "renew_unlimited_volume": False,
     "renew_unlimited_time": False,
     "renew_unlimited_volume_from_gb": 1000,
@@ -171,6 +174,10 @@ USERBOT_SETTING_DEFAULTS: dict[str, Any] = {
     "purchase_event_channel_id": "",
     "payment_event_channel_enabled": False,
     "payment_event_channel_id": "",
+    # Card-to-card options mirrored from Hiddify-SellBot payment settings.
+    "require_last4_for_card_receipt": False,
+    "random_tx_spec": False,
+    "card_to_card_text": "0",
     "system_event_channel_enabled": False,
     "system_event_channel_id": "",
     "auto_backup_enabled": True,
@@ -1104,7 +1111,13 @@ class TenantBusinessService:
                 try:
                     previous = self.secret_cipher.decrypt_secret(str(row["encrypted_secret"]))
                 except TokenCipherError as exc:
-                    raise TenantBusinessError("panel credential cannot be decrypted") from exc
+                    if credentials is None:
+                        raise TenantBusinessError("panel credential cannot be decrypted") from exc
+                    # A corrupt/undecryptable stored secret (e.g. backup
+                    # restored under a rotated TOKEN_ENCRYPTION_KEY) must not
+                    # block installing fresh credentials: the candidate is
+                    # still verified by a live panel probe before commit.
+                    previous = ""
         if credentials is None:
             if not previous:
                 raise TenantBusinessError("panel credential is not configured")
@@ -1589,6 +1602,9 @@ class TenantBusinessService:
                             f"{int(subscription_id)}:server:{server_id}"
                         ),
                         name=str(subscription.get("service_name") or ""),
+                        comment=self._subscription_panel_comment(
+                            int(subscription["customer_id"])
+                        ),
                     ),
                 )
                 if subscription["status"] == "disabled":
@@ -3227,13 +3243,16 @@ class TenantBusinessService:
         cursor = self.conn.execute(
             "INSERT INTO tenant_subscriptions "
             "(tenant_id, customer_id, plan_id, order_id, server_id, status, "
-            "usage_bytes, traffic_bytes, expires_at, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, NULL, 'pending_provisioning', 0, ?, ?, ?, ?)",
+            "service_code, service_name, usage_bytes, traffic_bytes,"
+            " expires_at, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, NULL, 'pending_provisioning', ?, ?, 0, ?, ?, ?, ?)",
             (
                 self.tenant_id,
                 int(order["customer_id"]),
                 int(order["plan_id"]),
                 int(order["id"]),
+                self._generate_service_code(),
+                self._generate_service_name(),
                 int(plan["traffic_gb"]) * 1024 * 1024 * 1024,
                 expires,
                 now,
@@ -3241,6 +3260,32 @@ class TenantBusinessService:
             ),
         )
         return int(cursor.lastrowid or 0)
+
+    def _generate_service_code(self) -> str:
+        """Unique 7-digit service code per tenant (SellBot parity)."""
+        for _ in range(50):
+            code = f"{random.randint(0, 9999999):07d}"
+            exists = self.conn.execute(
+                "SELECT 1 FROM tenant_subscriptions"
+                " WHERE tenant_id=? AND service_code=?",
+                (self.tenant_id, code),
+            ).fetchone()
+            if exists is None:
+                return code
+        return f"{random.randint(0, 9999999):07d}"
+
+    def _generate_service_name(self) -> str:
+        """Random vpn-###### service name, unique per tenant (SellBot parity)."""
+        for _ in range(200):
+            candidate = f"vpn-{random.randint(100000, 999999)}"
+            exists = self.conn.execute(
+                "SELECT 1 FROM tenant_subscriptions"
+                " WHERE tenant_id=? AND service_name=?",
+                (self.tenant_id, candidate),
+            ).fetchone()
+            if exists is None:
+                return candidate
+        return f"vpn-{int(utcnow().timestamp())}"
 
     def pay_order_with_wallet(
         self,
@@ -4550,6 +4595,63 @@ class TenantBusinessService:
             (self.tenant_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def list_pending_fulfillment_orders(self) -> list[dict[str, Any]]:
+        """System-level paid orders awaiting panel fulfillment (delivery loop).
+
+        Mirrors list_fulfillment_pending_admin without an admin actor and
+        with the customer contact fields the delivery notifier needs.
+        """
+        rows = self.conn.execute(
+            "SELECT o.*, c.telegram_user_id AS customer_telegram_id,"
+            " c.display_name AS customer_display_name,"
+            " c.username AS customer_username,"
+            " p.name AS plan_name, p.traffic_gb, p.duration_days,"
+            " srv.label AS selected_server_label,"
+            " ro.subscription_id AS renewal_subscription_id"
+            " FROM tenant_orders o"
+            " JOIN tenant_customers c ON c.id=o.customer_id"
+            " AND c.tenant_id=o.tenant_id"
+            " JOIN tenant_sale_plans p ON p.id=o.plan_id"
+            " AND p.tenant_id=o.tenant_id"
+            " LEFT JOIN tenant_servers srv ON srv.id=o.selected_server_id"
+            " AND srv.tenant_id=o.tenant_id"
+            " LEFT JOIN tenant_renewal_orders ro ON ro.order_id=o.id"
+            " AND ro.tenant_id=o.tenant_id"
+            " WHERE o.tenant_id=? AND o.status='paid' ORDER BY o.id",
+            (self.tenant_id,),
+        ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            if item.get("renewal_subscription_id") is None:
+                sub = self.conn.execute(
+                    "SELECT id FROM tenant_subscriptions"
+                    " WHERE tenant_id=? AND order_id=?",
+                    (self.tenant_id, int(item["id"])),
+                ).fetchone()
+                item["subscription_id"] = (
+                    int(sub["id"]) if sub is not None else 0
+                )
+            else:
+                item["subscription_id"] = int(item["renewal_subscription_id"])
+            items.append(item)
+        return items
+
+    def record_fulfillment_attempt(self, *, order_id: int, error: str = "") -> None:
+        with transaction(self.conn):
+            self.conn.execute(
+                "UPDATE tenant_orders SET fulfillment_attempts="
+                "COALESCE(fulfillment_attempts, 0) + 1,"
+                " fulfillment_error=?, updated_at=?"
+                " WHERE id=? AND tenant_id=?",
+                (
+                    _text(str(error or ""), 500, required=False),
+                    iso_utc(utcnow()),
+                    int(order_id),
+                    self.tenant_id,
+                ),
+            )
     def cancel_order(self, actor_id: int, *, order_id: int) -> dict[str, Any]:
         """Cancel one unpaid owned order and release any reserved coupon use."""
         customer = self._customer(actor_id, active=False)
@@ -4893,6 +4995,379 @@ class TenantBusinessService:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    # --- Bank-SMS auto-approval (Hiddify-SellBot parity, tenant scoped) ---
+
+    SMS_SECRET_BYTES = 32
+    SMS_DEFAULT_MAX_PENDING_AGE_MINUTES = 360
+    SMS_MANUAL_ATTACH_WINDOW_MINUTES = 120
+    SMS_RECEIPT_LOOKBACK_MINUTES = 30
+
+    @staticmethod
+    def mask_sms_secret(secret: object) -> str:
+        clean = str(secret or "").strip()
+        if not clean:
+            return "—"
+        if len(clean) <= 8:
+            return "••••"
+        return f"{clean[:4]}••••{clean[-4:]}"
+
+    def _sms_settings_row(self) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM tenant_sms_settings WHERE tenant_id=?",
+            (self.tenant_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def _tenant_public_id(self) -> str:
+        row = self.conn.execute(
+            "SELECT public_id FROM tenants WHERE id=?", (self.tenant_id,)
+        ).fetchone()
+        return str(row["public_id"]) if row is not None else str(self.tenant_id)
+
+    def sms_webhook_path(self) -> str:
+        return f"/payment/sms/{self._tenant_public_id()}"
+
+    def sms_status_admin(self, actor_id: int) -> dict[str, Any]:
+        self._admin(actor_id)
+        row = self._sms_settings_row()
+        secret = ""
+        if row is not None and row.get("encrypted_secret"):
+            if self.secret_cipher is None:
+                raise TenantBusinessError("sms encryption is unavailable")
+            try:
+                secret = self.secret_cipher.decrypt_secret(
+                    str(row["encrypted_secret"])
+                )
+            except TokenCipherError as exc:
+                raise TenantBusinessError(
+                    "sms secret cannot be decrypted"
+                ) from exc
+        return {
+            "enabled": bool(row and row.get("enabled")),
+            "has_secret": bool(secret),
+            "masked_secret": self.mask_sms_secret(secret),
+            "max_pending_age_minutes": int(
+                (row or {}).get("max_pending_age_minutes")
+                or self.SMS_DEFAULT_MAX_PENDING_AGE_MINUTES
+            ),
+            "webhook_path": self.sms_webhook_path(),
+        }
+
+    def _sms_ensure_secret_tx(self) -> str:
+        if self.secret_cipher is None:
+            raise TenantBusinessError("sms encryption is unavailable")
+        now = iso_utc(utcnow())
+        row = self._sms_settings_row()
+        if row is not None and row.get("encrypted_secret"):
+            try:
+                return self.secret_cipher.decrypt_secret(
+                    str(row["encrypted_secret"])
+                )
+            except TokenCipherError:
+                pass
+        secret = secrets.token_hex(self.SMS_SECRET_BYTES)
+        encrypted = self.secret_cipher.encrypt_secret(secret)
+        if row is None:
+            self.conn.execute(
+                "INSERT INTO tenant_sms_settings "
+                "(tenant_id, enabled, encrypted_secret, max_pending_age_minutes,"
+                " created_at, updated_at) VALUES (?, 0, ?, ?, ?, ?)",
+                (
+                    self.tenant_id,
+                    encrypted,
+                    self.SMS_DEFAULT_MAX_PENDING_AGE_MINUTES,
+                    now,
+                    now,
+                ),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE tenant_sms_settings SET encrypted_secret=?, updated_at=?"
+                " WHERE tenant_id=?",
+                (encrypted, now, self.tenant_id),
+            )
+        return secret
+
+    def set_sms_enabled_admin(self, actor_id: int, *, enabled: bool) -> dict[str, Any]:
+        self._admin(actor_id)
+        with transaction(self.conn):
+            if enabled:
+                self._sms_ensure_secret_tx()
+            now = iso_utc(utcnow())
+            row = self._sms_settings_row()
+            if row is None:
+                self.conn.execute(
+                    "INSERT INTO tenant_sms_settings "
+                    "(tenant_id, enabled, max_pending_age_minutes,"
+                    " created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        self.tenant_id,
+                        int(bool(enabled)),
+                        self.SMS_DEFAULT_MAX_PENDING_AGE_MINUTES,
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE tenant_sms_settings SET enabled=?, updated_at=?"
+                    " WHERE tenant_id=?",
+                    (int(bool(enabled)), now, self.tenant_id),
+                )
+        return self.sms_status_admin(actor_id)
+
+    def rotate_sms_secret_admin(self, actor_id: int) -> dict[str, Any]:
+        """Rotate the tenant SMS secret; returns the new plaintext once."""
+        self._admin(actor_id)
+        if self.secret_cipher is None:
+            raise TenantBusinessError("sms encryption is unavailable")
+        now = iso_utc(utcnow())
+        secret = secrets.token_hex(self.SMS_SECRET_BYTES)
+        encrypted = self.secret_cipher.encrypt_secret(secret)
+        with transaction(self.conn):
+            row = self._sms_settings_row()
+            if row is None:
+                self.conn.execute(
+                    "INSERT INTO tenant_sms_settings "
+                    "(tenant_id, enabled, encrypted_secret,"
+                    " max_pending_age_minutes, created_at, updated_at)"
+                    " VALUES (?, 1, ?, ?, ?, ?)",
+                    (
+                        self.tenant_id,
+                        encrypted,
+                        self.SMS_DEFAULT_MAX_PENDING_AGE_MINUTES,
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE tenant_sms_settings "
+                    "SET encrypted_secret=?, enabled=1, updated_at=?"
+                    " WHERE tenant_id=?",
+                    (encrypted, now, self.tenant_id),
+                )
+        status = self.sms_status_admin(actor_id)
+        status["new_secret"] = secret
+        return status
+
+    def sms_plain_secret_admin(self, actor_id: int) -> str:
+        self._admin(actor_id)
+        if self.secret_cipher is None:
+            raise TenantBusinessError("sms encryption is unavailable")
+        row = self._sms_settings_row()
+        if row is None or not row.get("encrypted_secret"):
+            raise TenantBusinessError("sms secret is not configured")
+        try:
+            return self.secret_cipher.decrypt_secret(
+                str(row["encrypted_secret"])
+            )
+        except TokenCipherError as exc:
+            raise TenantBusinessError(
+                "sms secret cannot be decrypted"
+            ) from exc
+
+    def sms_secret_matches(self, provided: object) -> bool:
+        """Constant-time tenant secret check for the HTTP webhook (no actor)."""
+        import hmac as _hmac
+
+        candidate = str(provided or "").strip()
+        if not candidate:
+            return False
+        row = self._sms_settings_row()
+        if row is None or not bool(row.get("enabled")):
+            return False
+        if not row.get("encrypted_secret") or self.secret_cipher is None:
+            return False
+        try:
+            expected = self.secret_cipher.decrypt_secret(
+                str(row["encrypted_secret"])
+            )
+        except TokenCipherError:
+            return False
+        return bool(expected) and _hmac.compare_digest(candidate, expected)
+
+    def record_sms_event(self, event: dict[str, Any]) -> tuple[bool, dict | None]:
+        """Idempotent per-tenant SMS event log. Returns (inserted, existing)."""
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            existing = self.conn.execute(
+                "SELECT * FROM tenant_sms_events WHERE tenant_id=? AND event_id=?",
+                (self.tenant_id, str(event.get("event_id") or "")),
+            ).fetchone()
+            if existing is not None:
+                return False, dict(existing)
+            self.conn.execute(
+                "INSERT INTO tenant_sms_events "
+                "(tenant_id, event_id, sender, amount_raw, currency_raw,"
+                " amount_toman, reference, card_last4, body, status, message,"
+                " received_at, device_time, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    self.tenant_id,
+                    str(event.get("event_id") or ""),
+                    str(event.get("sender") or ""),
+                    int(event.get("amount_raw") or 0),
+                    str(event.get("currency_raw") or ""),
+                    int(event.get("amount_toman") or 0),
+                    str(event.get("reference") or ""),
+                    str(event.get("card_last4") or ""),
+                    str(event.get("body") or ""),
+                    str(event.get("status") or "received"),
+                    str(event.get("message") or ""),
+                    int(event.get("received_at") or 0),
+                    int(event.get("device_time") or 0),
+                    now,
+                ),
+            )
+            return True, None
+
+    def update_sms_event(self, event_id: str, **fields: Any) -> None:
+        allowed = {
+            "status", "message", "amount_toman", "matched_receipt_id",
+        }
+        updates = []
+        args: list[Any] = []
+        for key in allowed:
+            if key in fields and fields[key] is not None:
+                updates.append(f"{key}=?")
+                args.append(fields[key])
+        if not updates:
+            return
+        with transaction(self.conn):
+            self.conn.execute(
+                "UPDATE tenant_sms_events SET " + ", ".join(updates)
+                + " WHERE tenant_id=? AND event_id=?",
+                (*args, self.tenant_id, str(event_id)),
+            )
+
+    @staticmethod
+    def _receipt_payer_last4(reference: object) -> str:
+        for part in reversed(str(reference or "").split("|")):
+            if re.fullmatch(r"\d{4}", part.strip()):
+                return part.strip()
+        return ""
+
+    @staticmethod
+    def _receipt_order_toman(receipt: dict[str, Any]) -> int:
+        try:
+            amount = int(receipt.get("order_amount") or 0)
+        except (TypeError, ValueError):
+            return 0
+        if str(receipt.get("order_currency") or "").upper() == "IRR":
+            return amount // 10
+        return 0
+
+    def find_pending_card_receipts_for_sms(
+        self,
+        amount_toman: int,
+        *,
+        card_last4: str = "",
+        max_age_minutes: int = 360,
+        sms_time_ms: int = 0,
+    ) -> list[dict[str, Any]]:
+        amount = int(amount_toman or 0)
+        if amount <= 0:
+            return []
+        age = max(5, int(max_age_minutes or 360))
+        cutoff = iso_utc(utcnow() - timedelta(minutes=age))
+        rows = self.conn.execute(
+            "SELECT r.*, o.amount AS order_amount, o.currency AS order_currency,"
+            " o.customer_id, c.display_name, c.username, c.telegram_user_id,"
+            " m.kind AS method_kind"
+            " FROM tenant_receipts r"
+            " JOIN tenant_orders o ON o.id=r.order_id AND o.tenant_id=r.tenant_id"
+            " JOIN tenant_customers c ON c.id=o.customer_id AND c.tenant_id=r.tenant_id"
+            " JOIN tenant_payment_methods m ON m.id=r.payment_method_id"
+            " AND m.tenant_id=r.tenant_id"
+            " WHERE r.tenant_id=? AND r.status='pending'"
+            " AND o.status='payment_review'"
+            " AND m.kind='card' AND r.created_at>=?"
+            " ORDER BY r.id DESC LIMIT 10",
+            (self.tenant_id, cutoff),
+        ).fetchall()
+        last4 = str(card_last4 or "").strip()
+        sms_dt = None
+        if int(sms_time_ms or 0) > 0:
+            try:
+                sms_dt = datetime.fromtimestamp(
+                    int(sms_time_ms) / 1000, tz=timezone.utc
+                ).replace(tzinfo=None)
+            except (TypeError, ValueError, OverflowError, OSError):
+                sms_dt = None
+        matched = []
+        for row in rows:
+            item = dict(row)
+            if self._receipt_order_toman(item) != amount:
+                continue
+            payer_last4 = self._receipt_payer_last4(item.get("reference"))
+            if last4:
+                if not payer_last4 or payer_last4 != last4:
+                    continue
+            elif payer_last4:
+                continue
+            if sms_dt is not None:
+                try:
+                    receipt_dt = parse_utc(str(item.get("created_at") or ""))
+                except Exception:
+                    continue
+                if sms_dt < receipt_dt - timedelta(
+                    minutes=self.SMS_RECEIPT_LOOKBACK_MINUTES
+                ):
+                    continue
+                if sms_dt > receipt_dt + timedelta(minutes=5):
+                    continue
+            matched.append(item)
+        return matched
+
+    def recently_approved_card_receipts_for_sms(
+        self,
+        amount_toman: int,
+        *,
+        max_age_minutes: int = 120,
+    ) -> list[dict[str, Any]]:
+        amount = int(amount_toman or 0)
+        if amount <= 0:
+            return []
+        window = max(5, min(1440, int(max_age_minutes or 120)))
+        lower = iso_utc(utcnow() - timedelta(minutes=window))
+        upper = iso_utc(utcnow() + timedelta(minutes=5))
+        rows = self.conn.execute(
+            "SELECT r.*, o.amount AS order_amount, o.currency AS order_currency"
+            " FROM tenant_receipts r"
+            " JOIN tenant_orders o ON o.id=r.order_id AND o.tenant_id=r.tenant_id"
+            " JOIN tenant_payment_methods m ON m.id=r.payment_method_id"
+            " AND m.tenant_id=r.tenant_id"
+            " WHERE r.tenant_id=? AND r.status='approved'"
+            " AND m.kind='card' AND COALESCE(r.reviewed_at, '')>=?"
+            " AND COALESCE(r.reviewed_at, '')<=?"
+            " ORDER BY r.id DESC LIMIT 5",
+            (self.tenant_id, lower, upper),
+        ).fetchall()
+        return [
+            dict(row)
+            for row in rows
+            if self._receipt_order_toman(dict(row)) == amount
+        ]
+
+    def approve_receipt_by_sms(
+        self,
+        receipt_id: int,
+        *,
+        event_id: str,
+        sender: str = "",
+    ) -> dict[str, Any]:
+        note = "تأیید خودکار SMS بانک"
+        if str(sender or "").strip():
+            note += f" ({str(sender).strip()})"
+        return self.review_receipt(
+            self.owner_telegram_id,
+            int(receipt_id),
+            approve=True,
+            note=note,
+            external_event_id=str(event_id),
+        )
+
     def _customer_subscription_rows(
         self,
         customer_id: int,
@@ -5193,6 +5668,9 @@ class TenantBusinessService:
                         f"tenant:{self.tenant_id}:subscription:{int(subscription_id)}"
                     ),
                     name=str(subscription.get("service_name") or ""),
+                    comment=self._subscription_panel_comment(
+                        int(subscription["customer_id"])
+                    ),
                 ),
             )
         except PanelError as exc:
@@ -5623,6 +6101,30 @@ class TenantBusinessService:
         if row is None:
             raise TenantBusinessError("subscription not found")
         return dict(row)
+
+    def _subscription_panel_comment(self, customer_id: int) -> str:
+        """SellBot-style panel note ``HiddifyBot:{telegram_id}`` (ASCII).
+
+        The panel keeps English digits so Hiddify can read/filter the note;
+        Telegram display converts to Persian digits via ``_display_safe_note``.
+        Returns "" when the customer cannot be resolved (caller falls back to
+        the bare WhiteLabel marker).
+        """
+        try:
+            row = self.conn.execute(
+                "SELECT telegram_user_id FROM tenant_customers "
+                "WHERE id=? AND tenant_id=?",
+                (int(customer_id), self.tenant_id),
+            ).fetchone()
+        except Exception:
+            return ""
+        if row is None:
+            return ""
+        try:
+            tgid = int(row["telegram_user_id"] or 0)
+        except (TypeError, ValueError, KeyError, IndexError):
+            return ""
+        return f"HiddifyBot:{tgid}" if tgid > 0 else ""
 
     @staticmethod
     def _subscription_is_due(
@@ -6106,6 +6608,225 @@ class TenantBusinessService:
             if changed.rowcount != 1:
                 raise TenantBusinessError("subscription state changed")
         return {"id": int(subscription_id), "status": "disabled"}
+
+    _PANEL_MISSING_MARKERS = (
+        "http 404",
+        "http 410",
+        "not found",
+        "user not found",
+        "does not exist",
+        "no such user",
+        "یافت نشد",
+        "پیدا نشد",
+        "وجود ندارد",
+    )
+
+    def delete_subscription_admin(
+        self, actor_id: int, *, subscription_id: int
+    ) -> dict[str, Any]:
+        """Fully remove a subscription from panels and the database.
+
+        Unlike delete_subscription_from_panel (which keeps a disabled row
+        for history), this drops the subscription row after its panel users
+        are gone. Orders, receipts, wallet ledger, customers and referral
+        history stay intact; only subscription-scoped rows are cleaned.
+
+        A panel user that is already missing counts as deleted. Any other
+        panel failure aborts and keeps the database row for a safe retry
+        (SellBot parity: never orphan a live panel user).
+        """
+        self._admin(actor_id)
+        subscription = self._admin_subscription(actor_id, subscription_id)
+        # Unlike the soft path, an explicitly confirmed full deletion also
+        # clears a pending credential rotation: the rotation row is removed
+        # in the same transaction below.
+        removed_refs: list[str] = []
+        if (
+            subscription["server_id"] is not None
+            and subscription["external_ref"]
+        ):
+            self._ensure_primary_subscription_node(subscription)
+            mappings = self.conn.execute(
+                "SELECT * FROM tenant_subscription_nodes "
+                "WHERE tenant_id=? AND subscription_id=?"
+                " AND external_ref IS NOT NULL "
+                "ORDER BY is_primary DESC, id",
+                (self.tenant_id, int(subscription_id)),
+            ).fetchall()
+            unresolved: list[str] = []
+            for mapping in mappings:
+                ref = str(mapping["external_ref"])
+                secret = ""
+                try:
+                    _, target, secret = self._panel_material(
+                        int(mapping["server_id"])
+                    )
+                    self.panel_adapter.delete_user(
+                        target=target,
+                        secret=secret,
+                        external_ref=ref,
+                    )
+                    removed_refs.append(ref)
+                except (PanelError, TenantBusinessError) as exc:
+                    if any(
+                        marker in str(exc).lower()
+                        for marker in self._PANEL_MISSING_MARKERS
+                    ):
+                        continue
+                    unresolved.append(
+                        f"{mapping['server_id']}: {str(exc)[:120]}"
+                    )
+                finally:
+                    secret = ""
+            if unresolved:
+                raise TenantBusinessError(
+                    "panel user deletion failed: " + "; ".join(unresolved[:3])
+                )
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            self.conn.execute(
+                "DELETE FROM tenant_subscription_rotations"
+                " WHERE tenant_id=? AND subscription_id=?",
+                (self.tenant_id, int(subscription_id)),
+            )
+            self.conn.execute(
+                "DELETE FROM tenant_renewal_orders"
+                " WHERE tenant_id=? AND subscription_id=?",
+                (self.tenant_id, int(subscription_id)),
+            )
+            self.conn.execute(
+                "DELETE FROM tenant_agent_subscriptions"
+                " WHERE tenant_id=? AND subscription_id=?",
+                (self.tenant_id, int(subscription_id)),
+            )
+            self.conn.execute(
+                "UPDATE tenant_trial_claims SET subscription_id=NULL,"
+                " status='failed', updated_at=?"
+                " WHERE tenant_id=? AND subscription_id=?",
+                (now, self.tenant_id, int(subscription_id)),
+            )
+            self.conn.execute(
+                "DELETE FROM tenant_smart_links"
+                " WHERE tenant_id=? AND target=?",
+                (self.tenant_id, f"subscription:{int(subscription_id)}"),
+            )
+            changed = self.conn.execute(
+                "DELETE FROM tenant_subscriptions WHERE id=? AND tenant_id=?",
+                (int(subscription_id), self.tenant_id),
+            )
+            if changed.rowcount != 1:
+                raise TenantBusinessError("subscription state changed")
+        return {
+            "id": int(subscription_id),
+            "status": "deleted",
+            "panel_removed": len(removed_refs),
+        }
+
+    @staticmethod
+    def _older_than_days(raw: object, days: int) -> bool:
+        """True when a '%Y-%m-%d %H:%M:%S' timestamp is at least days old."""
+        text = str(raw or "").strip()
+        if not text:
+            return False
+        moment = None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                moment = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+        if moment is None:
+            return False
+        return (utcnow().replace(tzinfo=None) - moment) >= timedelta(
+            days=max(1, int(days or 1))
+        )
+
+    def mark_service_seen(self, subscription_id: int) -> None:
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            self.conn.execute(
+                "INSERT INTO tenant_service_probe "
+                "(tenant_id, subscription_id, missing_streak, first_missing_at,"
+                " last_seen_at, last_missing_at, updated_at)"
+                " VALUES (?, ?, 0, NULL, ?, NULL, ?)"
+                " ON CONFLICT(tenant_id, subscription_id) DO UPDATE SET"
+                " missing_streak=0, first_missing_at=NULL,"
+                " last_seen_at=excluded.last_seen_at, last_missing_at=NULL,"
+                " updated_at=excluded.updated_at",
+                (self.tenant_id, int(subscription_id), now, now),
+            )
+
+    def mark_service_missing(self, subscription_id: int) -> dict[str, Any]:
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            row = self.conn.execute(
+                "SELECT missing_streak, first_missing_at"
+                " FROM tenant_service_probe WHERE tenant_id=? AND subscription_id=?",
+                (self.tenant_id, int(subscription_id)),
+            ).fetchone()
+            streak = int((row["missing_streak"] if row else 0) or 0) + 1
+            first_missing_at = (
+                str((row["first_missing_at"] if row else "") or "").strip() or now
+            )
+            self.conn.execute(
+                "INSERT INTO tenant_service_probe "
+                "(tenant_id, subscription_id, missing_streak, first_missing_at,"
+                " last_missing_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(tenant_id, subscription_id) DO UPDATE SET"
+                " missing_streak=excluded.missing_streak,"
+                " first_missing_at=COALESCE(tenant_service_probe.first_missing_at,"
+                " excluded.first_missing_at),"
+                " last_missing_at=excluded.last_missing_at,"
+                " updated_at=excluded.updated_at",
+                (
+                    self.tenant_id,
+                    int(subscription_id),
+                    streak,
+                    first_missing_at,
+                    now,
+                    now,
+                ),
+            )
+        return {
+            "missing_streak": streak,
+            "first_missing_at": first_missing_at,
+            "last_missing_at": now,
+        }
+
+    def subscription_panel_identities(
+        self, actor_id: int, subscription_id: int
+    ) -> list[tuple[int, str]]:
+        """Panel targets used by the presence probe (server_id, external_ref)."""
+        customer = self._customer(actor_id, active=False)
+        row = self.conn.execute(
+            "SELECT * FROM tenant_subscriptions"
+            " WHERE id=? AND tenant_id=? AND customer_id=?",
+            (int(subscription_id), self.tenant_id, int(customer["id"])),
+        ).fetchone()
+        if row is None:
+            raise TenantBusinessError("subscription not found")
+        targets = [
+            (int(item["server_id"]), str(item["external_ref"]))
+            for item in self.conn.execute(
+                "SELECT server_id, external_ref FROM tenant_subscription_nodes"
+                " WHERE tenant_id=? AND subscription_id=?"
+                " AND external_ref IS NOT NULL"
+                " ORDER BY is_primary DESC, id",
+                (self.tenant_id, int(subscription_id)),
+            ).fetchall()
+        ]
+        if not targets and row["server_id"] is not None and row["external_ref"]:
+            targets = [
+                (int(row["server_id"]), str(row["external_ref"]))
+            ]
+        return targets
+
+    def purge_missing_subscription(self, subscription_id: int) -> dict[str, Any]:
+        """System purge of a long-vanished subscription (owner actor)."""
+        return self.delete_subscription_admin(
+            self.owner_telegram_id, subscription_id=int(subscription_id)
+        )
     def subscription_configs(
         self, actor_id: int, *, subscription_id: int
     ) -> list[dict[str, str]]:

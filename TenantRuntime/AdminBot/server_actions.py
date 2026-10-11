@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import uuid
 from datetime import timedelta
 from html import escape
@@ -423,14 +424,80 @@ def _expiry_text(raw) -> str:
     if not raw:
         return "نامشخص"
     try:
-        seconds = (parse_utc(raw) - utcnow()).total_seconds()
+        end_date = parse_utc(raw).date()
+        today = utcnow().date()
     except (ValueError, TypeError):
         return local_time(raw)
-    if seconds < 0:
-        days = max(0, math.ceil(abs(seconds) / 86400))
-        return f"منقضی شده ({days} روز پیش)"
-    days = max(1, math.ceil(seconds / 86400))
-    return f"{days} روز دیگر"
+    days_left = (end_date - today).days
+    if days_left < 0:
+        return f"منقضی شده ({abs(days_left)} روز پیش)"
+    return f"{days_left} روز دیگر"
+
+
+def _display_safe_note(note) -> str:
+    """Persian digits after HiddifyBot: (SellBot parity, avoids auto-link)."""
+    raw = str(note or "").strip()
+    if not raw:
+        return "—"
+    fa_digits = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+    return re.sub(
+        r"(?i)\b(HiddifyBot:\s*[\u200c\u200d\u200e\u200f]*)([0-9]+)\b",
+        lambda m: f"{m.group(1)}{m.group(2).translate(fa_digits)}",
+        raw,
+    )
+
+
+def _relative_last_online(raw) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return "📶آخرین اتصال: نامشخص"
+    try:
+        moment = parse_utc(text)
+    except (TypeError, ValueError):
+        return "📶آخرین اتصال: نامشخص"
+    delta = utcnow() - moment
+    days = delta.days
+    seconds = delta.seconds
+    if days <= 0:
+        if seconds < 60:
+            rel = "چند ثانیه پیش"
+        elif seconds < 3600:
+            rel = f"{seconds // 60} دقیقه پیش"
+        else:
+            rel = f"{seconds // 3600} ساعت پیش"
+    elif days < 30:
+        rel = f"{days} روز پیش"
+    elif days < 365:
+        rel = f"{days // 30} ماه پیش"
+    else:
+        rel = f"{days // 365} سال پیش"
+    return f"📶آخرین اتصال: {rel}"
+
+
+def _panel_last_online_line(row: dict, status: str) -> str:
+    raw = str((row or {}).get("last_online") or "").strip()
+    if raw:
+        try:
+            moment = parse_utc(raw)
+            age = (utcnow() - moment).total_seconds()
+            if 0 <= age <= 90 and status == "active":
+                return "📶آخرین اتصال: آنلاین"
+            return _relative_last_online(raw)
+        except (TypeError, ValueError):
+            pass
+    return "📶آخرین اتصال: نامشخص"
+
+
+def _account_status_line(status: str) -> str:
+    return {
+        "active": "🟢وضعیت حساب: فعال",
+        "disabled": "⚫وضعیت حساب: غیرفعال",
+        "expired": "🔴وضعیت حساب: منقضی",
+        "pending": "🟡وضعیت حساب: در انتظار",
+    }.get(
+        str(status or "").strip().lower(),
+        f"وضعیت: {status}",
+    )
 
 
 def _panel_native_link(business, sid: int, external_ref: str) -> str:
@@ -489,6 +556,7 @@ def _user_detail_text(service, actor: int, sid: int, uid: int, row: dict) -> str
         if labels
         else f"⬖ سرور: {escape(str(service.b.server(sid).get('label') or 'نامشخص'))}"
     )
+    status = user_status(row)
     return "\n".join(
         [
             header,
@@ -500,9 +568,9 @@ def _user_detail_text(service, actor: int, sid: int, uid: int, row: dict) -> str
                 else f"📊مصرف: {usage:.1f} گیگابایت (نامحدود)"
             ),
             f"📆انقضا: {escape(_expiry_text(row.get('expires_at')))}",
-            f"📶 وضعیت حساب: {STATUS_LABELS.get(user_status(row),'در انتظار')}",
-            f"📶 آخرین اتصال: {escape(local_time(row.get('last_online')))}",
-            f"📝یادداشت: {escape(row.get('comment') or '—')}",
+            escape(_account_status_line(status)),
+            escape(_panel_last_online_line(row, status)),
+            f"📝یادداشت: {escape(_display_safe_note(row.get('comment')))}",
         ]
     )
 
@@ -721,6 +789,7 @@ def user_text(row, server):
     """Compatibility formatter for list/search callers without service context."""
     limit = int(row.get("traffic_bytes") or 0) / 1024**3
     usage = int(row.get("usage_bytes") or 0) / 1024**3
+    status = user_status(row)
     return "\n".join(
         [
             f"👤 کاربر: {escape(row['name'])}",
@@ -732,9 +801,9 @@ def user_text(row, server):
                 else f"📊مصرف: {usage:.1f} گیگابایت (نامحدود)"
             ),
             f"📆انقضا: {escape(_expiry_text(row.get('expires_at')))}",
-            f"📶 وضعیت حساب: {STATUS_LABELS.get(user_status(row),'در انتظار')}",
-            f"📶 آخرین اتصال: {escape(local_time(row.get('last_online')))}",
-            f"📝یادداشت: {escape(row.get('comment') or '—')}",
+            escape(_account_status_line(status)),
+            escape(_panel_last_online_line(row, status)),
+            f"📝یادداشت: {escape(_display_safe_note(row.get('comment')))}",
         ]
     )
 

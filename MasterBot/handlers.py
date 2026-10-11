@@ -253,6 +253,12 @@ async def _show_license_plan_picker(
         ])
     rows.append([
         InlineKeyboardButton(
+            "➕ ساخت پلن جدید",
+            callback_data="license:new:create-plan",
+        )
+    ])
+    rows.append([
+        InlineKeyboardButton(
             "⬅️ تغییر مشتری",
             callback_data="license:new:tenant-page:0",
         )
@@ -262,7 +268,7 @@ async def _show_license_plan_picker(
         + (
             "📦 پلن لایسنس را انتخاب کنید:"
             if plans
-            else "❌ هیچ پلن فعالی وجود ندارد. ابتدا یک پلن فعال بسازید."
+            else "❌ هیچ پلن فعالی وجود ندارد. با «➕ ساخت پلن جدید» یکی بسازید."
         )
     )
     keyboard = InlineKeyboardMarkup(rows)
@@ -944,6 +950,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "برای بدون مهلت، 0 بفرستید:"
             )
             return
+        if data == "license:new:create-plan":
+            flow = context.user_data.get("flow")
+            if not isinstance(flow, dict) or str(flow.get("kind") or "") != "license_new_plan":
+                raise ValueError("license plan selection expired")
+            tenant = service.get_tenant(actor, int(flow.get("tenant_id") or 0))
+            context.user_data["flow"] = {
+                "kind": "plan_new_name",
+                "cancel_target": "licenses",
+                "license_tenant_id": int(tenant["id"]),
+            }
+            await _prompt_flow(update, "📦 نام پلن را وارد کنید:")
+            return
         if data == "license:search":
             context.user_data["flow"] = {"kind": "license_search"}
             await _render(
@@ -1456,6 +1474,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         if kind == "plan_new_max_users":
             max_users = _parse_int(text, "max users")
+            license_tenant_id = int(flow.get("license_tenant_id") or 0)
             row = service.create_plan(
                 actor,
                 name=str(flow["name"]),
@@ -1464,6 +1483,25 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 max_servers=int(flow["max_servers"]),
                 max_users=max_users,
             )
+            if license_tenant_id:
+                # Came from license issuance: auto-select the new plan and
+                # continue the flow instead of dropping the tenant context.
+                tenant = service.get_tenant(actor, license_tenant_id)
+                context.user_data["flow"] = {
+                    "kind": "license_new_grace",
+                    "tenant_id": license_tenant_id,
+                    "plan_id": int(row["id"]),
+                    "cancel_target": "licenses",
+                }
+                await _remove_flow_keyboard(update, "✅ پلن ثبت شد.")
+                await update.effective_message.reply_text(
+                    "✅ مشتری: "
+                    f"{tenant['name']} (#{license_tenant_id})\n"
+                    f"✅ پلن: {row['name']} · {int(row['duration_days'])} روز\n\n"
+                    "⏱ تعداد روز مهلت بعد از پایان لایسنس را وارد کنید.\n"
+                    "برای بدون مهلت، 0 بفرستید:"
+                )
+                return
             context.user_data.pop("flow", None)
             await _remove_flow_keyboard(update, "✅ پلن ثبت شد.")
             await _show_plan(update, context, int(row["id"]))

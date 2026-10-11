@@ -134,6 +134,9 @@ def test_every_direct_inline_callback_has_a_registered_route() -> None:
             prefixes=admin_prefix,
         )
     )
+    # Cross-bot push messages (e.g. the UserBot payment report sent to the
+    # AdminBot with working review buttons) are routed by the other role's
+    # handlers, which is legitimate and covered by the review-chain tests.
     missing_user = sorted(
         route
         for route in user_buttons
@@ -141,6 +144,11 @@ def test_every_direct_inline_callback_has_a_registered_route() -> None:
             route,
             exact=user_exact,
             prefixes=user_prefix,
+        )
+        and not _route_is_handled(
+            route,
+            exact=admin_exact,
+            prefixes=admin_prefix,
         )
     )
 

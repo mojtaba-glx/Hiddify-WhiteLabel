@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -318,9 +319,110 @@ async def _refresh_search_inventory(business: Any, actor: int) -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+def _format_usage_current(value: Any) -> str:
+    """Trimmed decimals like SellBot (0.00 -> 0.0)."""
+    try:
+        text = f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return "نامشخص"
+    if text.endswith("00"):
+        return f"{float(value):.1f}"
+    if text.endswith("0"):
+        return text[:-1]
+    return text
+
+
+def _format_usage_limit(value: Any) -> str:
+    try:
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return "نامشخص"
+
+
+def _panel_expiry_line(expires_at: Any) -> str:
+    """Calendar-day expiry like SellBot (date difference, not ceil)."""
+    raw = str(expires_at or "").strip()
+    if not raw:
+        return "📆انقضا: نامشخص"
+    try:
+        end_date = parse_utc(raw).date()
+        today = utcnow().date()
+    except (TypeError, ValueError):
+        return f"📆انقضا: {raw}"
+    days_left = (end_date - today).days
+    if days_left < 0:
+        return f"📆انقضا: منقضی شده ({abs(days_left)} روز پیش)"
+    return f"📆انقضا: {days_left} روز دیگر"
+
+
+def _panel_last_online_line(row: dict[str, Any], status: str) -> str:
+    raw = str(row.get("last_online") or "").strip()
+    if raw:
+        try:
+            moment = parse_utc(raw)
+            age = (utcnow() - moment).total_seconds()
+            if 0 <= age <= 90 and status == "active":
+                return "📶آخرین اتصال: آنلاین"
+            return _relative_last_online(raw)
+        except (TypeError, ValueError):
+            pass
+    return "📶آخرین اتصال: نامشخص"
+
+
+def _relative_last_online(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return "📶آخرین اتصال: نامشخص"
+    try:
+        moment = parse_utc(text)
+    except (TypeError, ValueError):
+        return "📶آخرین اتصال: نامشخص"
+    delta = utcnow() - moment
+    days = delta.days
+    seconds = delta.seconds
+    if days <= 0:
+        if seconds < 60:
+            rel = "چند ثانیه پیش"
+        elif seconds < 3600:
+            rel = f"{seconds // 60} دقیقه پیش"
+        else:
+            rel = f"{seconds // 3600} ساعت پیش"
+    elif days < 30:
+        rel = f"{days} روز پیش"
+    elif days < 365:
+        rel = f"{days // 30} ماه پیش"
+    else:
+        rel = f"{days // 365} سال پیش"
+    return f"📶آخرین اتصال: {rel}"
+
+
+def _display_safe_note(note: Any) -> str:
+    """Persian digits after HiddifyBot: (SellBot parity, avoids auto-link)."""
+    raw = str(note or "").strip()
+    if not raw:
+        return "—"
+    fa_digits = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+    return re.sub(
+        r"(?i)\b(HiddifyBot:\s*[\u200c\u200d\u200e\u200f]*)([0-9]+)\b",
+        lambda m: f"{m.group(1)}{m.group(2).translate(fa_digits)}",
+        raw,
+    )
+
+
+def _panel_user_page_url(server: dict[str, Any], external_ref: str) -> str:
+    base = str(server.get("endpoint") or "").strip().rstrip("/")
+    path = str(server.get("admin_path") or "").strip().strip("/")
+    ref = str(external_ref or "").strip()
+    if not base or not ref:
+        return ""
+    url = f"{base}/{path}/{ref}/" if path else f"{base}/{ref}/"
+    return escape(url, quote=True)
+
+
 async def _panel_search_detail_view(
     business: Any, actor: int, server_id: int, panel_user_id: int
-) -> tuple[str, InlineKeyboardMarkup]:
+) -> tuple[str, InlineKeyboardMarkup, str]:
+    """Panel-user detail with HTML name link (SellBot parity)."""
     service = ServerAdminService(business)
     warning = ""
     try:
@@ -341,29 +443,30 @@ async def _panel_search_detail_view(
         "expired": "🔴وضعیت حساب: منقضی",
         "pending": "🟡وضعیت حساب: در انتظار",
     }.get(status, f"وضعیت: {status}")
-    expiry = str(row.get("expires_at") or "نامشخص")
-    if row.get("expires_at"):
-        try:
-            delta = parse_utc(str(row["expires_at"])) - utcnow()
-            days = int(delta.total_seconds() // 86400)
-            expiry = (
-                f"منقضی شده ({abs(days)} روز پیش)"
-                if delta.total_seconds() < 0
-                else f"{max(0, days)} روز دیگر"
-            )
-        except (TypeError, ValueError):
-            pass
+    if limit_bytes:
+        usage_line = (
+            f"📊مصرف: {_format_usage_current(usage)} از "
+            f"{_format_usage_limit(limit)} گیگابایت"
+        )
+    else:
+        usage_line = f"📊مصرف: {_format_usage_current(usage)} گیگابایت (نامحدود)"
+    name = str(row.get("name") or "کاربر")
+    page_url = _panel_user_page_url(server, row.get("external_ref"))
+    header = (
+        f"👤 کاربر:  <a href=\"{page_url}\">{escape(name)}</a>"
+        if page_url
+        else f"👤 کاربر:  {escape(name)}"
+    )
     text = (
         warning
-        + f"👤 کاربر:  {row.get('name') or 'کاربر'}\n"
+        + header + "\n"
         + "❖⬩╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍⬩❖\n"
-        + f"⬖ سرور:  {server.get('label') or 'ثبت نشده'}\n"
-        + f"📊مصرف: {usage:.2f} از {f'{limit:.2f}' if limit else 'نامحدود'} گیگابایت\n"
-        + f"📆انقضا: {expiry}\n"
+        + f"⬖ سرور:  {escape(str(server.get('label') or 'ثبت نشده'))}\n"
+        + usage_line + "\n"
+        + _panel_expiry_line(row.get("expires_at")) + "\n"
         + f"{status_text}\n"
-        + f"📶آخرین اتصال: {row.get('last_online') or 'ثبت نشده'}\n"
-        + f"📝یادداشت: {row.get('comment') or '—'}\n"
-        + f"🔑 شناسه پنل: {row.get('external_ref')}"
+        + _panel_last_online_line(row, status) + "\n"
+        + f"📝یادداشت: {_display_safe_note(row.get('comment'))}"
     )
     rows = [
         [InlineKeyboardButton("کانفیگ ها📄", callback_data=f"srv:pconfigs:{server_id}:{panel_user_id}")],
@@ -372,7 +475,7 @@ async def _panel_search_detail_view(
         [InlineKeyboardButton("حذف کاربر🗑️", callback_data=f"srv:pdelete:{server_id}:{panel_user_id}")],
         [InlineKeyboardButton("بازگشت🔙", callback_data="search:results")],
     ]
-    return text, InlineKeyboardMarkup(rows)
+    return text, InlineKeyboardMarkup(rows), "HTML"
 
 
 def _tracking_items(
@@ -449,6 +552,45 @@ def _search_results_view(
     return text, InlineKeyboardMarkup(rows)
 
 
+def _subscription_note_for_item(business: Any, item: dict[str, Any]) -> str:
+    """Panel note for a subscription: live inventory comment or SellBot-style synthetic.
+
+    SellBot stores ``HiddifyBot:{telegram_id}`` on the panel (English digits,
+    readable/filterable on Hiddify) and only converts to Persian digits for
+    display (avoids auto-link). WhiteLabel keeps the same contract: the panel
+    keeps ASCII, the bot display uses :func:`_display_safe_note`.
+    """
+    try:
+        server_id = int(item.get("server_id") or 0)
+    except (TypeError, ValueError):
+        server_id = 0
+    ref = str(item.get("external_ref") or "").strip()
+    if server_id > 0 and ref:
+        try:
+            row = business.conn.execute(
+                "SELECT comment FROM tenant_panel_users "
+                "WHERE tenant_id=? AND server_id=? AND external_ref=? "
+                "AND state!='deleted' LIMIT 1",
+                (business.tenant_id, server_id, ref),
+            ).fetchone()
+        except Exception:
+            row = None
+        if row is not None:
+            try:
+                comment = str(row["comment"] or "").strip()
+            except (KeyError, IndexError, TypeError):
+                comment = ""
+            if comment:
+                return comment
+    try:
+        tgid = int(item.get("telegram_user_id") or 0)
+    except (TypeError, ValueError):
+        tgid = 0
+    if tgid > 0:
+        return f"HiddifyBot:{tgid}"
+    return ""
+
+
 def _subscription_detail_view(
     business, actor: int, subscription_id: int
 ) -> tuple[str, InlineKeyboardMarkup]:
@@ -462,30 +604,33 @@ def _subscription_detail_view(
         "expired": "🔴وضعیت حساب: منقضی",
         "pending_provisioning": "🟡وضعیت حساب: در انتظار ساخت",
     }.get(status, f"وضعیت: {status}")
-    expiry = str(item.get("expires_at") or "")
-    expire_text = "نامشخص"
-    if expiry:
-        try:
-            delta = parse_utc(expiry) - utcnow()
-            days = int(delta.total_seconds() // 86400)
-            expire_text = (
-                f"منقضی شده ({abs(days)} روز پیش)"
-                if delta.total_seconds() < 0
-                else f"{max(0, days)} روز دیگر"
-            )
-        except Exception:
-            expire_text = expiry
-    last_online = str(item.get("last_online") or "ثبت نشده")
+    if limit:
+        usage_line = (
+            f"📊مصرف: {_format_usage_current(usage)} از "
+            f"{_format_usage_limit(limit)} گیگابایت"
+        )
+    else:
+        usage_line = f"📊مصرف: {_format_usage_current(usage)} گیگابایت (نامحدود)"
+    expire_line = _panel_expiry_line(item.get("expires_at"))
+    last_online_line = _panel_last_online_line(
+        {"last_online": item.get("last_online")}, status,
+    )
+    note_line = f"📝یادداشت: {_display_safe_note(_subscription_note_for_item(business, item))}"
+    ref = str(item.get("external_ref") or "").strip()
+    if ref:
+        id_line = f"🔑 شناسه پنل: {ref}"
+    else:
+        id_line = f"🔑 شناسه سرویس: {int(item['id'])}"
     text = (
         f"👤 کاربر:  {item.get('display_name') or 'کاربر'}\n"
         "❖⬩╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍⬩❖\n"
         f"⬖ سرور:  {item.get('server_label') or 'ثبت نشده'}\n"
-        f"📊مصرف: {usage:.2f} از {limit:.2f} گیگابایت\n"
-        f"📆انقضا: {expire_text}\n"
+        f"{usage_line}\n"
+        f"{expire_line}\n"
         f"{status_text}\n"
-        f"📶آخرین اتصال: {last_online}\n"
-        f"📝یادداشت: —\n"
-        f"🔑 شناسه سرویس: {int(item['id'])}"
+        f"{last_online_line}\n"
+        f"{note_line}\n"
+        f"{id_line}"
     )
     if status == "pending_provisioning":
         rows = [
@@ -513,6 +658,100 @@ def _subscription_detail_view(
             [InlineKeyboardButton("بازگشت به نتایج🔙", callback_data="search:results")],
         ]
     return text, InlineKeyboardMarkup(rows)
+
+
+_EXPIRED_PAGE_SIZE = 15
+
+
+def _expired_days(item: dict[str, Any]) -> int | None:
+    """Days since time-expiry; None for volume-only expiry or bad dates."""
+    raw = str(item.get("expires_at") or "").strip()
+    if not raw:
+        return None
+    try:
+        delta = utcnow() - parse_utc(raw)
+    except Exception:
+        return None
+    if delta.total_seconds() < 0:
+        return None
+    return int(delta.total_seconds() // 86400)
+
+
+def _expired_age_line(item: dict[str, Any]) -> str:
+    days = _expired_days(item)
+    if days is None:
+        return "📆انقضا: منقضی/غیرفعال در پنل"
+    if days <= 0:
+        return "📆انقضا: منقضی شده (امروز)"
+    return f"📆انقضا: منقضی شده ({days} روز پیش)"
+
+
+def _expired_label(item: dict[str, Any]) -> str:
+    label = str(
+        item.get("service_name")
+        or item.get("display_name")
+        or item.get("plan_name")
+        or ""
+    ).strip()[:12].rstrip()
+    if not label or not any(
+        ch.isalnum() or "\u0600" <= ch <= "\u06ff" for ch in label
+    ):
+        label = str(
+            item.get("service_name") or f"اشتراک #{int(item.get('id') or 0)}"
+        )[:12].rstrip()
+    return label or f"#{int(item.get('id') or 0)}"
+
+
+def _expired_items(business: Any, actor: int, days: int = 0) -> list[dict[str, Any]]:
+    items = business.list_subscriptions_tracking_admin(actor, status="expired")
+    if int(days) <= 0:
+        return items
+    return [x for x in items if (_expired_days(x) or -1) >= int(days)]
+
+
+def _expired_list_view(
+    items: list[dict[str, Any]], page: int = 1
+) -> tuple[str, InlineKeyboardMarkup]:
+    """SellBot-style expired-subscriptions page (15 per page)."""
+    total = len(items)
+    pages = max(1, (total + _EXPIRED_PAGE_SIZE - 1) // _EXPIRED_PAGE_SIZE)
+    page = max(1, min(int(page or 1), pages))
+    selected = items[(page - 1) * _EXPIRED_PAGE_SIZE:page * _EXPIRED_PAGE_SIZE]
+    buttons = [
+        InlineKeyboardButton(
+            f"🔴 {_expired_label(x)}",
+            callback_data=f"search:expired:{int(x['id'])}:{page}",
+        )
+        for x in selected
+    ]
+    rows = [list(reversed(buttons[i:i + 3])) for i in range(0, len(buttons), 3)]
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"search:expiredpage:{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{page}/{pages}", callback_data="search:noop"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"search:expiredpage:{page + 1}"))
+    rows.append(nav)
+    rows += [
+        [InlineKeyboardButton("🗑 حذف همه اشتراک‌های منقضی‌شده", callback_data="search:expiredbulk:0")],
+        [InlineKeyboardButton("🗑 حذف منقضی‌شده‌های بیشتر از ۳ روز", callback_data="search:expiredbulk:3")],
+        [InlineKeyboardButton("🗑 حذف منقضی‌شده‌های بیشتر از ۷ روز", callback_data="search:expiredbulk:7")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="search:back")],
+    ]
+    return (
+        f"♻️ اشتراک‌های منقضی‌شده\nتعداد کل: {total}\nصفحه: {page}/{pages}",
+        InlineKeyboardMarkup(rows),
+    )
+
+
+def _expired_detail_view(
+    business: Any, actor: int, subscription_id: int, page: int
+) -> tuple[str, InlineKeyboardMarkup]:
+    text, _ = _subscription_detail_view(business, actor, int(subscription_id))
+    return text, InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑 حذف اشتراک", callback_data=f"search:expireddelete:{int(subscription_id)}:{page}")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"search:expiredpage:{page}")],
+    ])
 
 
 def _daily_report_text(report: dict) -> str:
@@ -1164,12 +1403,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     ]
                     title = "[⚠️لیست کاربران منقضی شده]"
                 else:
-                    # The profile-oriented list remains a UserBot subscription
-                    # view, but effective expiry also considers time/traffic.
-                    items = business.list_subscriptions_tracking_admin(
-                        actor, status="expired"
-                    )
-                    title = "♻️ اشتراک‌های منقضی‌شده"
+                    # SellBot-style dedicated expired-subscriptions page with
+                    # bulk-delete actions (not the generic search grid).
+                    items = _expired_items(business, actor)
+                    text, kb = _expired_list_view(items, page=1)
+                    await update.callback_query.edit_message_text(text, reply_markup=kb)
+                    return
                 context.user_data["smart_search_results"] = items
                 context.user_data["search_results_title"] = title
                 text, kb = _search_results_view(items, title=title)
@@ -1209,6 +1448,83 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if action == "noop":
                 await update.callback_query.answer()
                 return
+            if action == "expiredpage" and len(parts) == 3:
+                text, kb = _expired_list_view(
+                    _expired_items(business, actor), page=int(parts[2])
+                )
+                await update.callback_query.edit_message_text(text, reply_markup=kb)
+                return
+            if action == "expired" and len(parts) == 4:
+                try:
+                    text, kb = _expired_detail_view(
+                        business, actor, int(parts[2]), int(parts[3])
+                    )
+                except TenantBusinessError:
+                    await update.callback_query.edit_message_text(
+                        "❌ اشتراک یافت نشد.",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔙 بازگشت", callback_data="search:expiredpage:1"),
+                        ]]),
+                    )
+                    return
+                await update.callback_query.edit_message_text(text, reply_markup=kb)
+                return
+            if action == "expireddelete" and len(parts) == 4:
+                sid, page = int(parts[2]), int(parts[3])
+                await update.callback_query.edit_message_text(
+                    "❓ این اشتراک از سرور اصلی، همه نودها و دیتابیس سرویس حذف شود؟\n"
+                    "سابقه سفارش‌ها، تراکنش‌ها، کیف پول و پروفایل کاربر باقی می‌ماند.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ بله، حذف شود", callback_data=f"search:expireddeleteok:{sid}:{page}"),
+                        InlineKeyboardButton("لغو ❌", callback_data=f"search:expired:{sid}:{page}"),
+                    ]]),
+                )
+                return
+            if action == "expireddeleteok" and len(parts) == 4:
+                sid, page = int(parts[2]), int(parts[3])
+                try:
+                    business.delete_subscription_admin(actor, subscription_id=sid)
+                except TenantBusinessError:
+                    await update.callback_query.answer("❌ حذف کامل انجام نشد.", show_alert=True)
+                    await update.callback_query.edit_message_text("❌ حذف اشتراک انجام نشد.")
+                    return
+                await update.callback_query.answer("✅ اشتراک حذف شد.", show_alert=True)
+                text, kb = _expired_list_view(_expired_items(business, actor), page=page)
+                await update.callback_query.edit_message_text(text, reply_markup=kb)
+                return
+            if action == "expiredbulk" and len(parts) == 3:
+                days = max(0, int(parts[2]))
+                count = len(_expired_items(business, actor, days=days))
+                title = "همه اشتراک‌های منقضی‌شده" if days == 0 else f"اشتراک‌های منقضی‌شده بیش از {days} روز"
+                await update.callback_query.edit_message_text(
+                    f"⚠️ حذف گروهی {title}\nتعداد فعلی: {count}\n\n"
+                    "فقط سرویس و نودهای آن حذف می‌شود؛ پروفایل‌ها، سفارش‌ها، تراکنش‌ها و کیف پول باقی می‌مانند.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ تایید حذف", callback_data=f"search:expiredbulkok:{days}"),
+                        InlineKeyboardButton("لغو ❌", callback_data="search:expiredpage:1"),
+                    ]]),
+                )
+                return
+            if action == "expiredbulkok" and len(parts) == 3:
+                days = max(0, int(parts[2]))
+                await update.callback_query.answer("⏳ حذف گروهی شروع شد...")
+                deleted = failed = 0
+                for item in _expired_items(business, actor, days=days):
+                    try:
+                        business.delete_subscription_admin(
+                            actor, subscription_id=int(item["id"])
+                        )
+                    except TenantBusinessError:
+                        failed += 1
+                    else:
+                        deleted += 1
+                await update.callback_query.edit_message_text(
+                    f"✅ عملیات حذف گروهی تمام شد.\n🗑 حذف‌شده: {deleted}\n⚠️ حذف‌نشده/خطادار: {failed}",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("♻️ بازگشت به منقضی‌شده‌ها", callback_data="search:expiredpage:1"),
+                    ]]),
+                )
+                return
             if action == "back":
                 context.user_data.pop("smart_search_results", None)
                 await update.callback_query.edit_message_text(
@@ -1242,10 +1558,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await update.callback_query.edit_message_text(text, reply_markup=kb)
                 return
             if action == "panel" and len(parts) == 4:
-                text, kb = await _panel_search_detail_view(
+                text, kb, mode = await _panel_search_detail_view(
                     business, actor, int(parts[2]), int(parts[3])
                 )
-                await update.callback_query.edit_message_text(text, reply_markup=kb)
+                await update.callback_query.edit_message_text(
+                    text, reply_markup=kb, parse_mode=mode,
+                    disable_web_page_preview=True,
+                )
                 return
             if action == "sel" and len(parts) == 3:
                 text, kb = _subscription_detail_view(
@@ -1403,11 +1722,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 return
             if action == "deleteok" and len(parts) == 3:
                 sid = int(parts[2])
-                business.delete_subscription_from_panel(
-                    actor, subscription_id=sid
+                try:
+                    business.delete_subscription_admin(
+                        actor, subscription_id=sid
+                    )
+                except TenantBusinessError:
+                    await update.callback_query.answer(
+                        "❌ حذف کامل انجام نشد.", show_alert=True
+                    )
+                    await update.callback_query.edit_message_text(
+                        "❌ حذف اشتراک انجام نشد."
+                    )
+                    return
+                await update.callback_query.answer(
+                    "✅ اشتراک حذف شد.", show_alert=True
                 )
                 await update.callback_query.edit_message_text(
-                    "✅ کاربر از پنل‌ها حذف شد و رکورد سرویس برای تاریخچه حفظ شد.",
+                    "✅ اشتراک از پنل و دیتابیس حذف شد.",
                     reply_markup=InlineKeyboardMarkup([[
                         InlineKeyboardButton("بازگشت🔙", callback_data="search:results")
                     ]]),
@@ -3192,7 +3523,7 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 exact = items[0]
                 context.user_data.pop("biz_flow", None)
                 if exact.get("_result_type") == "panel":
-                    detail, kb = await _panel_search_detail_view(
+                    detail, kb, mode = await _panel_search_detail_view(
                         business,
                         actor,
                         int(exact["server_id"]),
@@ -3202,12 +3533,19 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     detail, kb = _subscription_detail_view(
                         business, actor, int(exact["id"])
                     )
+                    mode = None
                 await update.effective_message.reply_text(
                     "✅اشتراک یافت شد", reply_markup=admin_main_keyboard()
                 )
-                await update.effective_message.reply_text(
-                    detail, reply_markup=kb
-                )
+                if mode:
+                    await update.effective_message.reply_text(
+                        detail, reply_markup=kb, parse_mode=mode,
+                        disable_web_page_preview=True,
+                    )
+                else:
+                    await update.effective_message.reply_text(
+                        detail, reply_markup=kb
+                    )
                 return
             if kind == "search_smart":
                 items = _smart_search_items(business, actor, text)

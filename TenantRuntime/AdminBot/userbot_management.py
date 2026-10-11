@@ -8,8 +8,10 @@ WhiteLabel business service. No callback can escape the current tenant.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import math
+import os
 import re
 import secrets
 from io import BytesIO
@@ -173,19 +175,13 @@ def build_users_search_menu_keyboard() -> InlineKeyboardMarkup:
 
 def build_payments_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅لیست تراکنشات تایید شده", callback_data="userbot:payments:list:approved")],
+        [InlineKeyboardButton("🚫لیست تراکنشات رد شده", callback_data="userbot:payments:list:rejected")],
         [InlineKeyboardButton("⏳لیست تراکنشات در انتظار", callback_data="userbot:payments:list:pending")],
-        [
-            InlineKeyboardButton("✅لیست تراکنشات تایید شده", callback_data="userbot:payments:list:approved"),
-            InlineKeyboardButton("🚫لیست تراکنشات رد شده", callback_data="userbot:payments:list:rejected"),
-        ],
-        [
-            InlineKeyboardButton("💳لیست تراکنشات کارت به کارت", callback_data="userbot:payments:list:card"),
-            InlineKeyboardButton("🪙لیست تراکنشات Crypto", callback_data="userbot:payments:list:crypto"),
-        ],
-        [
-            InlineKeyboardButton("➕شارژهای کیف پول", callback_data="userbot:payments:list:wallet_topup"),
-            InlineKeyboardButton("💰پرداخت‌های کیف پول", callback_data="userbot:payments:list:wallet_order"),
-        ],
+        [InlineKeyboardButton("💳لیست تراکنشات کارت به کارت", callback_data="userbot:payments:list:card")],
+        [InlineKeyboardButton("🪙لیست تراکنشات Crypto", callback_data="userbot:payments:list:crypto")],
+        [InlineKeyboardButton("➕شارژهای کیف پول", callback_data="userbot:payments:list:wallet_topup")],
+        [InlineKeyboardButton("💰پرداخت‌های کیف پول", callback_data="userbot:payments:list:wallet_order")],
         [InlineKeyboardButton("🔍جستجوی تراکنش", callback_data="userbot:payments:search")],
         [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:menu")],
     ])
@@ -258,6 +254,170 @@ def _settings_menu(settings: dict[str, Any]) -> InlineKeyboardMarkup:
 
 def _bool_icon(value: Any) -> str:
     return "✅" if bool(value) else "❌"
+
+
+def _card_methods(business: Any, actor: int) -> list[dict[str, Any]]:
+    """Active-family card methods (card_manual provider)."""
+    return [
+        m for m in business.list_payment_methods_admin(actor)
+        if str(m.get("kind") or m.get("provider_key") or "")
+        in {"card", "card_manual"}
+    ]
+
+
+def _crypto_methods(business: Any, actor: int) -> list[dict[str, Any]]:
+    return [
+        m for m in business.list_payment_methods_admin(actor)
+        if str(m.get("kind") or m.get("provider_key") or "")
+        in {"crypto", "crypto_manual"}
+    ]
+
+
+def _card_number_of(method: dict[str, Any]) -> str:
+    return str(method.get("destination") or "").split("|")[0].strip()
+
+
+def _card_owner_of(method: dict[str, Any]) -> str:
+    parts = str(method.get("destination") or "").split("|")
+    if len(parts) > 1 and parts[1].strip():
+        return parts[1].strip()
+    return str(method.get("title") or "").strip()
+
+
+def _card_digits(number: str) -> str:
+    return re.sub(r"\D", "", str(number or ""))
+
+
+def _find_card_method(
+    business: Any, actor: int, number: str
+) -> dict[str, Any] | None:
+    digits = _card_digits(number)
+    if len(digits) != 16:
+        return None
+    for method in _card_methods(business, actor):
+        if _card_digits(_card_number_of(method)) == digits:
+            return method
+    return None
+
+
+def _sms_public_base() -> str:
+    return str(os.getenv("SMART_SUB_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+
+
+def _sms_webhook_url(business: Any, actor: int) -> str:
+    path = business.sms_webhook_path()
+    base = _sms_public_base()
+    return f"{base}{path}" if base else path
+
+
+async def _payment_sms_menu(update: Update, business: Any, actor: int) -> None:
+    """SellBot-style SMS auto-approval submenu (tenant scoped)."""
+    status = business.sms_status_admin(actor)
+    enabled = "✅ روشن" if bool(status.get("enabled")) else "❌ خاموش"
+    secret_status = str(status.get("masked_secret") or "—")
+    age = int(status.get("max_pending_age_minutes") or 360)
+    endpoint = _sms_webhook_url(business, actor)
+    await _edit_or_send(
+        update,
+        "🤖 تایید خودکار کارت‌به‌کارت با SMS بانک\n\n"
+        f"وضعیت: {enabled}\n"
+        f"Secret Key: {secret_status}\n"
+        f"مهلت تطبیق پرداخت: {age} دقیقه\n\n"
+        "آدرس Webhook برای اپ اندروید:\n"
+        f"<pre><code>{html.escape(endpoint)}</code></pre>\n\n"
+        "Secret و وضعیت روشن/خاموش از همین منو ساخته می‌شود و مخصوص همین Tenant است.",
+        InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                f"تایید خودکار SMS | {_bool_icon(status.get('enabled'))}",
+                callback_data="userbot:settings:payment:card:sms:toggle",
+            )],
+            [InlineKeyboardButton(
+                "🔑 ساخت / تعویض Secret",
+                callback_data="userbot:settings:payment:card:sms:regen",
+            )],
+            [InlineKeyboardButton(
+                "👁 نمایش Secret برای اپ",
+                callback_data="userbot:settings:payment:card:sms:show",
+            )],
+            [InlineKeyboardButton(
+                "📱 راهنمای اتصال اپ",
+                callback_data="userbot:settings:payment:card:sms:help",
+            )],
+            [InlineKeyboardButton(
+                "🔙بازگشت", callback_data="userbot:settings:payment:card"
+            )],
+        ]),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+async def _payment_crypto_menu(update: Update, business: Any, actor: int) -> None:
+    """Crypto submenu: bulk toggle plus per-method rows."""
+    methods = _crypto_methods(business, actor)
+    icon = "✅" if any(m.get("status") == "active" for m in methods) else "❌"
+    rows = [
+        [InlineKeyboardButton(
+            f"پرداخت ارز دیجیتال | {icon}",
+            callback_data="userbot:settings:payment:crypto:toggle_all",
+        )]
+    ]
+    rows.extend([
+        [InlineKeyboardButton(
+            f"{'✅' if m.get('status') == 'active' else '❌'} "
+            f"🪙 {m['title']} · {m['currency']}",
+            callback_data=f"userbot:settings:payment:method:{int(m['id'])}",
+        )]
+        for m in methods
+    ])
+    rows.append([InlineKeyboardButton(
+        "➕ افزودن روش ارز دیجیتال",
+        callback_data="userbot:settings:payment:add",
+    )])
+    rows.append([InlineKeyboardButton(
+        "🔙بازگشت", callback_data="userbot:settings:payment"
+    )])
+    await _edit_or_send(
+        update, "🔗تنظیمات پرداخت ارز دیجیتال", InlineKeyboardMarkup(rows)
+    )
+
+
+async def _payment_card_menu(update: Update, business: Any, actor: int) -> None:
+    """Re-render the card-to-card submenu (SellBot parity)."""
+    s = business.userbot_settings_admin(actor)
+    cards = _card_methods(business, actor)
+    icon = "✅" if any(m.get("status") == "active" for m in cards) else "❌"
+    await _edit_or_send(
+        update,
+        "💳تنظیمات کارت به کارت",
+        InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                f"پرداخت کارت به کارت | {icon}",
+                callback_data="userbot:settings:payment:card:toggle_all",
+            )],
+            [InlineKeyboardButton(
+                f"🔐 الزام ۴ رقم آخر کارت | {_bool_icon(s.get('require_last4_for_card_receipt'))}",
+                callback_data="userbot:settings:payment:card:require_last4",
+            )],
+            [InlineKeyboardButton(
+                f"🔢مشخصه تصادفی تراکنش | {_bool_icon(s.get('random_tx_spec'))}",
+                callback_data="userbot:settings:payment:card:random_tx_spec",
+            )],
+            [InlineKeyboardButton(
+                "🤖 تایید خودکار SMS بانک",
+                callback_data="userbot:settings:payment:card:sms",
+            )],
+            [InlineKeyboardButton(
+                "💳لیست کارت‌ها",
+                callback_data="userbot:settings:payment:card:list",
+            )],
+            [InlineKeyboardButton(
+                "📝تنظیم متن کارت به کارت",
+                callback_data="userbot:settings:payment:card:text",
+            )],
+            [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:payment")],
+        ]),
+    )
 
 
 def _trial_settings_text(growth: dict[str, Any]) -> str:
@@ -495,6 +655,38 @@ def _user_profile_text(business: Any, actor: int, customer_id: int) -> str:
     )
 
 
+def _service_detail_keyboard(
+    customer_id: int, subscription_id: int
+) -> list[list[InlineKeyboardButton]]:
+    """SellBot-style service detail rows (configs/edit/renew/delete/backs)."""
+    return [
+        [InlineKeyboardButton(
+            "📄کانفیگ ها",
+            callback_data=f"userbot:svc:{subscription_id}:configs",
+        )],
+        [InlineKeyboardButton(
+            "✏️ویرایش کاربر",
+            callback_data=f"search:edit:{subscription_id}",
+        )],
+        [InlineKeyboardButton(
+            "∞تمدید اشتراک",
+            callback_data=f"search:renew:{subscription_id}",
+        )],
+        [InlineKeyboardButton(
+            "🗑حذف کاربر",
+            callback_data=f"search:delete:{subscription_id}",
+        )],
+        [InlineKeyboardButton(
+            "📋بازگشت به سرویس‌ها",
+            callback_data=f"userbot:user:{customer_id}:services",
+        )],
+        [InlineKeyboardButton(
+            "👤بازگشت به پروفایل",
+            callback_data=f"userbot:user:{customer_id}",
+        )],
+    ]
+
+
 def _user_profile_keyboard(customer_id: int, *, back: str = "userbot:users_menu") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 لیست سرویس‌ها", callback_data=f"userbot:user:{customer_id}:services")],
@@ -560,6 +752,134 @@ async def _send_user_profile(update: Update, business: Any, actor: int, customer
     )
 
 
+def _detail_format_usage_current(value: Any) -> str:
+    """Trimmed decimals like SellBot (0.00 -> 0.0)."""
+    try:
+        text = f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return "نامشخص"
+    if text.endswith("00"):
+        return f"{float(value):.1f}"
+    if text.endswith("0"):
+        return text[:-1]
+    return text
+
+
+def _detail_format_usage_limit(value: Any) -> str:
+    try:
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return "نامشخص"
+
+
+def _detail_expiry_line(expires_at: Any) -> str:
+    """Calendar-day expiry like SellBot (date difference, not ceil)."""
+    from Shared.timeutils import parse_utc
+
+    raw = str(expires_at or "").strip()
+    if not raw:
+        return "📆انقضا: نامشخص"
+    try:
+        end_date = parse_utc(raw).date()
+        today = utcnow().date()
+    except (TypeError, ValueError):
+        return f"📆انقضا: {raw}"
+    days_left = (end_date - today).days
+    if days_left < 0:
+        return f"📆انقضا: منقضی شده ({abs(days_left)} روز پیش)"
+    return f"📆انقضا: {days_left} روز دیگر"
+
+
+def _detail_relative_last_online(raw: Any) -> str:
+    from Shared.timeutils import parse_utc
+
+    text = str(raw or "").strip()
+    if not text:
+        return "📶آخرین اتصال: نامشخص"
+    try:
+        moment = parse_utc(text)
+    except (TypeError, ValueError):
+        return "📶آخرین اتصال: نامشخص"
+    delta = utcnow() - moment
+    days = delta.days
+    seconds = delta.seconds
+    if days <= 0:
+        if seconds < 60:
+            rel = "چند ثانیه پیش"
+        elif seconds < 3600:
+            rel = f"{seconds // 60} دقیقه پیش"
+        else:
+            rel = f"{seconds // 3600} ساعت پیش"
+    elif days < 30:
+        rel = f"{days} روز پیش"
+    elif days < 365:
+        rel = f"{days // 30} ماه پیش"
+    else:
+        rel = f"{days // 365} سال پیش"
+    return f"📶آخرین اتصال: {rel}"
+
+
+def _detail_last_online_line(item: dict[str, Any], status: str) -> str:
+    from Shared.timeutils import parse_utc
+
+    raw = str(item.get("last_online") or "").strip()
+    if raw:
+        try:
+            moment = parse_utc(raw)
+            age = (utcnow() - moment).total_seconds()
+            if 0 <= age <= 90 and status == "active":
+                return "📶آخرین اتصال: آنلاین"
+            return _detail_relative_last_online(raw)
+        except (TypeError, ValueError):
+            pass
+    return "📶آخرین اتصال: نامشخص"
+
+
+def _detail_display_safe_note(note: Any) -> str:
+    """Persian digits after HiddifyBot: (SellBot parity, avoids auto-link)."""
+    raw = str(note or "").strip()
+    if not raw:
+        return "—"
+    fa_digits = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+    return re.sub(
+        r"(?i)\b(HiddifyBot:\s*[\u200c\u200d\u200e\u200f]*)([0-9]+)\b",
+        lambda m: f"{m.group(1)}{m.group(2).translate(fa_digits)}",
+        raw,
+    )
+
+
+def _detail_note_for_item(business: Any, item: dict[str, Any]) -> str:
+    try:
+        server_id = int(item.get("server_id") or 0)
+    except (TypeError, ValueError):
+        server_id = 0
+    ref = str(item.get("external_ref") or "").strip()
+    if server_id > 0 and ref:
+        try:
+            row = business.conn.execute(
+                "SELECT comment FROM tenant_panel_users "
+                "WHERE tenant_id=? AND server_id=? AND external_ref=? "
+                "AND state!='deleted' LIMIT 1",
+                (business.tenant_id, server_id, ref),
+            ).fetchone()
+        except Exception:
+            row = None
+        if row is not None:
+            try:
+                comment = str(row["comment"] or "").strip()
+            except (KeyError, IndexError, TypeError):
+                comment = ""
+            if comment:
+                return comment
+    try:
+        tgid = int(item.get("telegram_user_id") or 0)
+    except (TypeError, ValueError):
+        tgid = 0
+    if tgid > 0:
+        return f"HiddifyBot:{tgid}"
+    return ""
+
+
 async def _send_service_detail(
     update: Update,
     business: Any,
@@ -576,16 +896,28 @@ async def _send_service_detail(
         "expired": "🔴وضعیت حساب: منقضی",
         "pending_provisioning": "🟡وضعیت حساب: در انتظار ساخت",
     }.get(status, f"وضعیت: {status}")
+    if limit:
+        usage_line = (
+            f"📊مصرف: {_detail_format_usage_current(usage)} از "
+            f"{_detail_format_usage_limit(limit)} گیگابایت"
+        )
+    else:
+        usage_line = f"📊مصرف: {_detail_format_usage_current(usage)} گیگابایت (نامحدود)"
+    ref = str(item.get("external_ref") or "").strip()
+    if ref:
+        id_line = f"🔑 شناسه پنل: {ref}"
+    else:
+        id_line = f"🔑 شناسه سرویس: {int(item['id'])}"
     text = (
         f"👤 کاربر:  {item.get('display_name') or 'کاربر'}\n"
         "❖⬩╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍⬩❖\n"
         f"⬖ سرور:  {item.get('server_label') or 'ثبت نشده'}\n"
-        f"📊مصرف: {usage:.2f} از {limit:.2f} گیگابایت\n"
-        f"📆انقضا: {item.get('expires_at') or 'نامشخص'}\n"
+        f"{usage_line}\n"
+        f"{_detail_expiry_line(item.get('expires_at'))}\n"
         f"{status_text}\n"
-        f"📶آخرین اتصال: {item.get('last_online') or 'ثبت نشده'}\n"
-        f"📝یادداشت: —\n"
-        f"🔑 شناسه سرویس: {int(item['id'])}"
+        f"{_detail_last_online_line(item, status)}\n"
+        f"📝یادداشت: {_detail_display_safe_note(_detail_note_for_item(business, item))}\n"
+        f"{id_line}"
     )
     customer_id = int(item["customer_id"])
     if status == "pending_provisioning":
@@ -604,32 +936,7 @@ async def _send_service_detail(
             )],
         ]
     else:
-        rows = [
-            [InlineKeyboardButton(
-                "📄کانفیگ ها",
-                callback_data=f"userbot:svc:{subscription_id}:configs",
-            )],
-            [InlineKeyboardButton(
-                "✏️ویرایش کاربر",
-                callback_data=f"search:edit:{subscription_id}",
-            )],
-            [InlineKeyboardButton(
-                "∞تمدید اشتراک",
-                callback_data=f"search:renew:{subscription_id}",
-            )],
-            [InlineKeyboardButton(
-                "🗑حذف کاربر",
-                callback_data=f"search:delete:{subscription_id}",
-            )],
-            [InlineKeyboardButton(
-                "👤پروفایل کاربر",
-                callback_data=f"userbot:user:{customer_id}",
-            )],
-            [InlineKeyboardButton(
-                "📋بازگشت به سرویس‌ها",
-                callback_data=f"userbot:user:{customer_id}:services",
-            )],
-        ]
+        rows = _service_detail_keyboard(customer_id, subscription_id)
     await _edit_or_send(update, text, InlineKeyboardMarkup(rows))
 
 
@@ -765,6 +1072,105 @@ async def _send_payments_page(
     )
 
 
+def _payment_detail_text(pay: dict[str, Any], last4: str = "") -> str:
+    """SellBot-style payment detail body (no internal-only rows)."""
+    status_title = {
+        "approved": "✅ تایید شده",
+        "rejected": "❌ رد شده",
+        "pending": "⏳ در انتظار",
+    }.get(str(pay.get("status")), str(pay.get("status")))
+    try:
+        raw_amount = int(pay.get("amount") or 0)
+    except (TypeError, ValueError):
+        raw_amount = 0
+    if str(pay.get("currency") or "").upper() == "IRR":
+        amount_line = f"◈ مبلغ تراکنش: {raw_amount // 10:,} تومان"
+    else:
+        amount_line = f"◈ مبلغ تراکنش: {raw_amount:,} {pay.get('currency') or ''}".strip()
+    try:
+        from Shared.timeutils import format_tehran, parse_utc
+
+        created_line = format_tehran(parse_utc(str(pay.get("created_at") or "")))
+    except Exception:
+        created_line = str(pay.get("created_at") or "-")
+    method_title = str(
+        pay.get("provider_title") or pay.get("payment_title")
+        or pay.get("kind") or "کارت به کارت"
+    )
+    username_raw = str(pay.get("username") or "").strip().lstrip("@")
+    full_name = str(pay.get("display_name") or "").strip()
+    tg_id = str(pay.get("telegram_user_id") or "-")
+    return (
+        f"◈ شناسه تراکنش: {pay['payment_key']}\n"
+        f"👤 کاربر: {full_name or '-'}\n"
+        f"◈ نام کاربری: {'@' + username_raw if username_raw else '-'}\n"
+        f"◈ شناسه کاربر: {tg_id}\n"
+        f"◈ تاریخ تراکنش: {created_line}\n"
+        f"{amount_line}\n"
+        "❖ • -------------------------- • ❖\n"
+        f"◈ وضعیت: {status_title}\n"
+        f"◈ روش تراکنش: {method_title}"
+        + (f"\n◈ ۴ رقم آخر کارت مبدا: {last4}" if last4 else "")
+    )
+
+
+def _payment_user_label(pay: dict[str, Any]) -> str:
+    username_raw = str(pay.get("username") or "").strip().lstrip("@")
+    full_name = str(pay.get("display_name") or "").strip()
+    tg_id = str(pay.get("telegram_user_id") or "-")
+    return full_name or (f"@{username_raw}" if username_raw else tg_id)
+
+
+async def _send_review_result(
+    update: Update,
+    business: Any,
+    actor: int,
+    payment_key: str | int,
+) -> None:
+    """Replace the pending report with the receipt photo + final detail.
+
+    SellBot parity: the pending message is deleted and the receipt photo
+    (when archived) is sent with the approved/rejected detail caption.
+    """
+    pay = business.payment_admin(actor, payment_key=payment_key)
+    last4 = business._receipt_payer_last4(pay.get("reference"))
+    text = _payment_detail_text(pay, last4)
+    rows = [[InlineKeyboardButton(
+        f"👤 {_payment_user_label(pay)}",
+        callback_data=f"userbot:user:{int(pay['customer_id'])}",
+    )]]
+    rows.append([InlineKeyboardButton(
+        "🔙بازگشت", callback_data="userbot:payments_menu"
+    )])
+    markup = InlineKeyboardMarkup(rows)
+    query = update.callback_query
+    if query is not None and query.message is not None:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+    media_bytes: bytes | None = None
+    try:
+        media = business.payment_receipt_media_admin(
+            actor, payment_key=pay["payment_key"]
+        )
+        if media is not None:
+            media_bytes = bytes(media["media"])
+    except (TenantBusinessError, ValueError, KeyError, TypeError):
+        media_bytes = None
+    if media_bytes and update.effective_chat is not None:
+        try:
+            stream = BytesIO(media_bytes)
+            stream.name = "receipt.jpg"
+            await update.effective_chat.send_photo(
+                photo=stream, caption=text, reply_markup=markup
+            )
+            return
+        except (BadRequest, Forbidden, NetworkError, TimedOut):
+            pass
+    await _edit_or_send(update, text, markup)
+
+
 async def _send_payment_detail(
     update: Update,
     business: Any,
@@ -772,19 +1178,10 @@ async def _send_payment_detail(
     payment_key: str | int,
 ) -> None:
     pay = business.payment_admin(actor, payment_key=payment_key)
-    status_title = {
-        "approved": "✅ تایید شده",
-        "rejected": "❌ رد شده",
-        "pending": "⏳ در انتظار",
-    }.get(str(pay.get("status")), str(pay.get("status")))
-    source_title = {
-        "order": "سفارش",
-        "wallet_topup": "شارژ کیف پول",
-        "wallet_order": "پرداخت مستقیم کیف پول",
-    }.get(str(pay.get("source") or ""), str(pay.get("source") or "-"))
+    last4 = business._receipt_payer_last4(pay.get("reference"))
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(
-            "👤 پروفایل کاربر",
+            f"👤 {_payment_user_label(pay)}",
             callback_data=f"userbot:user:{int(pay['customer_id'])}",
         )]
     ]
@@ -802,18 +1199,7 @@ async def _send_payment_detail(
     rows.append([InlineKeyboardButton("🔙بازگشت", callback_data="userbot:payments_menu")])
     await _edit_or_send(
         update,
-        f"◈ شناسه تراکنش: {pay['payment_key']}\n"
-        f"👤 کاربر: {pay.get('display_name') or '-'}\n"
-        f"◈ نام کاربری: {'@' + str(pay.get('username')).lstrip('@') if pay.get('username') else '-'}\n"
-        f"◈ شناسه کاربر: {pay.get('telegram_user_id') or '-'}\n"
-        f"◈ تاریخ تراکنش: {pay.get('created_at') or '-'}\n"
-        f"◈ مبلغ تراکنش: {int(pay.get('amount') or 0):,} {pay.get('currency') or ''}\n"
-        "❖ • -------------------------- • ❖\n"
-        f"◈ وضعیت: {status_title}\n"
-        f"◈ نوع: {source_title}\n"
-        f"◈ Provider: {pay.get('provider_icon') or ''} {pay.get('provider_title') or pay.get('payment_title') or '-'}\n"
-        f"◈ پیگیری: {pay.get('reference') or ('تصویر رسید' if pay.get('telegram_file_id') else '-')}\n"
-        f"◈ یادداشت بررسی: {pay.get('review_note') or '-'}",
+        _payment_detail_text(pay, last4),
         InlineKeyboardMarkup(rows),
     )
     media = business.payment_receipt_media_admin(
@@ -1093,7 +1479,7 @@ async def _send_tickets(update: Update, business: Any, actor: int, status: str |
     cur: list[InlineKeyboardButton] = []
     for item in selected:
         cur.append(InlineKeyboardButton(
-            f"#{item['id']}",
+            f"{int(item['id'])}",
             callback_data=f"userbot:ticket:detail:{int(item['id'])}:{status}:{page}",
         ))
         if len(cur) == 3:
@@ -1353,17 +1739,68 @@ async def _send_system_event(
         return
 
 
+async def _notify_reviewed_user(
+    business: Any,
+    pay: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    approve: bool,
+    order_delivered: bool = False,
+) -> None:
+    """SellBot-parity user DM after an admin approve/reject (best-effort)."""
+    try:
+        chat_id = int((pay or {}).get("telegram_user_id") or 0)
+        if chat_id <= 0:
+            return
+        source = str((result or {}).get("source") or (pay or {}).get("source") or "")
+        if approve:
+            if source == "wallet_topup":
+                try:
+                    raw_amount = int((pay or {}).get("amount") or 0)
+                except (TypeError, ValueError):
+                    raw_amount = 0
+                if str((pay or {}).get("currency") or "").upper() == "IRR":
+                    amount_text = f"{raw_amount // 10:,} تومان"
+                else:
+                    amount_text = f"{raw_amount:,} {(pay or {}).get('currency') or ''}".strip()
+                text = (
+                    "✅ پرداخت شما تایید شد.\n"
+                    f"💰 مبلغ شارژ: {amount_text}\n"
+                    "🎉 کیف پول شما با موفقیت شارژ شد."
+                )
+            elif order_delivered:
+                return
+            else:
+                text = (
+                    "✅ پرداخت شما تایید شد.\n"
+                    "⏳ فعال‌سازی ادامه دارد؛ اشتراک شما به‌زودی آماده و ارسال می‌شود."
+                )
+        else:
+            text = (
+                "❌ پرداخت شما رد شد.\n"
+                "در صورت نیاز با پشتیبانی تماس بگیرید."
+            )
+        await _send_via_userbot(business, chat_id, text=text)
+    except Exception:
+        return
+
+
 async def _send_via_userbot(
     business: Any,
     chat_id: int | str,
     *,
     text: str,
     photo_bytes: bytes | None = None,
+    preview: bool = True,
 ) -> None:
     token = _sibling_user_bot_token(business)
     try:
         async with Bot(token=token) as bot:
-            await bot.send_message(chat_id=chat_id, text=text)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                disable_web_page_preview=not preview,
+            )
             payload = bytes(photo_bytes or b"")
             if payload:
                 stream = BytesIO(payload)
@@ -1684,9 +2121,9 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
 
     Button labels and callback namespaces intentionally follow Hiddify-SellBot.
     Provider-specific features that do not exist in WhiteLabel (for example
-    ZarinPal/PerfectMoney/SMS webhook credentials) are not exposed as dead
-    buttons; card and crypto are managed through the generic tenant payment
-    model below.
+    ZarinPal/PerfectMoney credentials) are not exposed as dead buttons; card,
+    crypto and the tenant-scoped bank-SMS webhook are managed through the
+    tenant payment model below.
     """
     s = business.userbot_settings_admin(actor)
 
@@ -1736,7 +2173,7 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
                 callback_data="userbot:settings:sub_link_status:show_direct_config",
             )],
             [InlineKeyboardButton(
-                f"اشتراک خودکار | {_bool_icon(s.get('show_auto_sub_link'))}",
+                f"لینک اشتراک خودکار | {_bool_icon(s.get('show_auto_sub_link'))}",
                 callback_data="userbot:settings:sub_link_status:show_auto_sub_link",
             )],
             [InlineKeyboardButton(
@@ -1797,7 +2234,7 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
                 callback_data="userbot:settings:buy_renew:show_renew_in_main_menu",
             )],
             [InlineKeyboardButton(
-                f"تنظیم شیوه تمدید | {policy_title}",
+                "تنظیم شیوه تمدید",
                 callback_data="userbot:settings:buy_renew:renew_mode_info",
             )],
             [
@@ -2122,37 +2559,34 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
         return
 
     if section == "payment":
-        methods = business.list_payment_methods_admin(actor)
         rows: list[list[InlineKeyboardButton]] = [
             [InlineKeyboardButton(
-                f"{'✅' if x['status']=='active' else '❌'} "
-                f"{x.get('provider_icon') or '💳'} {x['title']} · {x['currency']}",
-                callback_data=f"userbot:settings:payment:method:{int(x['id'])}",
-            )]
-            for x in methods
-        ]
-        rows.append([
-            InlineKeyboardButton(
+                "💳تنظیمات کارت به کارت",
+                callback_data="userbot:settings:payment:card",
+            )],
+            [InlineKeyboardButton(
+                "🔗تنظیمات پرداخت ارز دیجیتال",
+                callback_data="userbot:settings:payment:crypto",
+            )],
+            [InlineKeyboardButton(
                 "➕ افزودن روش پرداخت",
                 callback_data="userbot:settings:payment:add",
-            )
-        ])
-        rows.append([
-            InlineKeyboardButton(
-                _bool_icon(s.get("payment_event_channel_enabled")),
-                callback_data="userbot:settings:payment:event_channel_toggle",
-            ),
-            InlineKeyboardButton(
-                "📢تنظیم کانال رویداد",
-                callback_data="userbot:settings:payment:event_channel_set",
-            ),
-        ])
-        rows.append([InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")])
+            )],
+            [
+                InlineKeyboardButton(
+                    _bool_icon(s.get("payment_event_channel_enabled")),
+                    callback_data="userbot:settings:payment:event_channel_toggle",
+                ),
+                InlineKeyboardButton(
+                    "📢تنظیم کانال رویداد",
+                    callback_data="userbot:settings:payment:event_channel_set",
+                ),
+            ],
+            [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
+        ]
         await _edit_or_send(
             update,
-            "💳 تنظیمات پرداخت Tenant\n"
-            "ترتیب نمایش با Priority است. Provider مستقل از UserBot ذخیره می‌شود؛ "
-            "درگاه یا تأییدکننده جدید بعداً از همین لایه اضافه می‌شود.",
+            "💳تنظیمات پرداخت",
             InlineKeyboardMarkup(rows),
         )
         return
@@ -2169,8 +2603,10 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
                     f"ارسال خودکار بکاپ | {_bool_icon(s.get('auto_backup_enabled', True))}",
                     callback_data="userbot:settings:backup_restore:auto_toggle",
                 )],
-                [InlineKeyboardButton("📩دریافت فایل بکاپ", callback_data="userbot:settings:backup:download")],
-                [InlineKeyboardButton("📤بازیابی فایل بکاپ", callback_data="userbot:settings:backup:restore")],
+            [
+                InlineKeyboardButton("📩دریافت فایل بکاپ", callback_data="userbot:settings:backup:download"),
+                InlineKeyboardButton("📩بازیابی بکاپ", callback_data="userbot:settings:backup:restore"),
+            ],
                 [
                     InlineKeyboardButton(
                         _bool_icon(s.get("system_event_channel_enabled")),
@@ -2456,6 +2892,10 @@ async def handle_callback(
         raw = data[len("userbot:pay:review:"):]
         payment_key, decision = raw.rsplit(":", 1)
         approve = decision == "yes"
+        try:
+            pay = business.payment_admin(actor, payment_key=payment_key)
+        except TenantBusinessError:
+            pay = {}
         result = business.review_payment_admin(
             actor, payment_key=payment_key, approve=approve
         )
@@ -2465,6 +2905,7 @@ async def handle_callback(
                 actor,
                 payment_key=payment_key,
             )
+        delivered = False
         if approve and result.get("source") == "order" and result.get("status") == "paid":
             try:
                 fulfilled = business.fulfill_paid_order(
@@ -2478,9 +2919,31 @@ async def handle_callback(
                     order_id=int(result["order_id"]),
                     result=fulfilled,
                 )
-            except TenantBusinessError:
+                customer_chat = int((pay or {}).get("telegram_user_id") or 0)
+                if customer_chat > 0:
+                    from TenantRuntime.UserBot.handlers import (
+                        _delivery_access_text,
+                    )
+
+                    access = _delivery_access_text(
+                        business,
+                        customer_chat,
+                        fulfilled,
+                        business.runtime_userbot_settings(),
+                    )
+                    await _send_via_userbot(
+                        business,
+                        customer_chat,
+                        text="✅ سرویس شما آماده شد!\n\n" + access,
+                        preview=False,
+                    )
+                    delivered = True
+            except (TenantBusinessError, ValueError):
                 pass
-        await _send_payment_detail(update, business, actor, payment_key)
+        await _notify_reviewed_user(
+            business, pay, result, approve=approve, order_delivered=delivered
+        )
+        await _send_review_result(update, business, actor, payment_key)
         return True
 
     if data == "userbot:gifts_menu":
@@ -3610,6 +4073,266 @@ async def handle_callback(
         )
         return True
 
+    if data == "userbot:settings:payment:card":
+        s = business.userbot_settings_admin(actor)
+        cards = _card_methods(business, actor)
+        icon = "✅" if any(m.get("status") == "active" for m in cards) else "❌"
+        await _edit_or_send(
+            update,
+            "💳تنظیمات کارت به کارت",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    f"پرداخت کارت به کارت | {icon}",
+                    callback_data="userbot:settings:payment:card:toggle_all",
+                )],
+                [InlineKeyboardButton(
+                    f"🔐 الزام ۴ رقم آخر کارت | {_bool_icon(s.get('require_last4_for_card_receipt'))}",
+                    callback_data="userbot:settings:payment:card:require_last4",
+                )],
+                [InlineKeyboardButton(
+                    f"🔢مشخصه تصادفی تراکنش | {_bool_icon(s.get('random_tx_spec'))}",
+                    callback_data="userbot:settings:payment:card:random_tx_spec",
+                )],
+                [InlineKeyboardButton(
+                    "🤖 تایید خودکار SMS بانک",
+                    callback_data="userbot:settings:payment:card:sms",
+                )],
+                [InlineKeyboardButton(
+                    "💳لیست کارت‌ها",
+                    callback_data="userbot:settings:payment:card:list",
+                )],
+                [InlineKeyboardButton(
+                    "📝تنظیم متن کارت به کارت",
+                    callback_data="userbot:settings:payment:card:text",
+                )],
+                [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:payment")],
+            ]),
+        )
+        return True
+    if data == "userbot:settings:payment:card:toggle_all":
+        cards = _card_methods(business, actor)
+        enable = not any(m.get("status") == "active" for m in cards)
+        for method in cards:
+            business.set_payment_method_status_admin(
+                actor, method_id=int(method["id"]), enabled=enable
+            )
+        await _payment_card_menu(update, business, actor)
+        return True
+    if data == "userbot:settings:payment:card:require_last4":
+        business.toggle_userbot_setting_admin(
+            actor, key="require_last4_for_card_receipt"
+        )
+        await _payment_card_menu(update, business, actor)
+        return True
+    if data == "userbot:settings:payment:card:random_tx_spec":
+        business.toggle_userbot_setting_admin(actor, key="random_tx_spec")
+        await _payment_card_menu(update, business, actor)
+        return True
+    if data == "userbot:settings:payment:card:list":
+        cards = _card_methods(business, actor)
+        rows: list[list[InlineKeyboardButton]] = []
+        for method in cards:
+            number = _card_number_of(method)
+            if not number:
+                continue
+            rows.append([InlineKeyboardButton(
+                number,
+                callback_data=f"userbot:settings:payment:card:item:{int(method['id'])}",
+            )])
+        rows.append([InlineKeyboardButton(
+            "افزودن کارت➕",
+            callback_data="userbot:settings:payment:card:add",
+        )])
+        rows.append([InlineKeyboardButton(
+            "حذف کارت➖",
+            callback_data="userbot:settings:payment:card:delete",
+        )])
+        rows.append([InlineKeyboardButton(
+            "🔙بازگشت", callback_data="userbot:settings:payment:card"
+        )])
+        await _edit_or_send(update, "💳لیست کارت‌ها", InlineKeyboardMarkup(rows))
+        return True
+    if data.startswith("userbot:settings:payment:card:item:"):
+        mid = int(data.rsplit(":", 1)[1])
+        item = business.payment_method_admin(actor, method_id=mid)
+        number = _card_number_of(item) or "-"
+        owner = _card_owner_of(item) or "-"
+        await _edit_or_send(
+            update,
+            f"❖ شماره کارت: <code>{number}</code>\n"
+            f"❖ نام صاحب کارت: {owner}",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "💳ویرایش شماره کارت",
+                    callback_data=f"userbot:settings:payment:card:edit_number:{mid}",
+                )],
+                [InlineKeyboardButton(
+                    "🧑ویرایش نام صاحب کارت",
+                    callback_data=f"userbot:settings:payment:card:edit_owner:{mid}",
+                )],
+                [InlineKeyboardButton(
+                    "🔙بازگشت",
+                    callback_data="userbot:settings:payment:card:list",
+                )],
+            ]),
+            parse_mode="HTML",
+        )
+        return True
+    if data.startswith("userbot:settings:payment:card:edit_number:"):
+        mid = int(data.rsplit(":", 1)[1])
+        business.payment_method_admin(actor, method_id=mid)
+        context.user_data[FLOW_KEY] = {
+            "kind": "payment_card_edit",
+            "method_id": mid,
+            "field": "number",
+        }
+        await query.message.reply_text(
+            "💳 شماره کارت جدید را وارد کنید:",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+    if data.startswith("userbot:settings:payment:card:edit_owner:"):
+        mid = int(data.rsplit(":", 1)[1])
+        business.payment_method_admin(actor, method_id=mid)
+        context.user_data[FLOW_KEY] = {
+            "kind": "payment_card_edit",
+            "method_id": mid,
+            "field": "owner",
+        }
+        await query.message.reply_text(
+            "👤 نام جدید صاحب کارت را وارد کنید:",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+    if data == "userbot:settings:payment:card:add":
+        context.user_data[FLOW_KEY] = {"kind": "payment_card_number"}
+        await query.message.reply_text(
+            "⬇️ لطفا اطلاعات زیر را برای افزودن کارت وارد کنید\n"
+            "💳 لطفا شماره کارت را وارد کنید:",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+    if data == "userbot:settings:payment:card:delete":
+        context.user_data[FLOW_KEY] = {"kind": "payment_card_delete"}
+        await query.message.reply_text(
+            "➖ حذف کارت\nشماره کارت را ارسال کنید:",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+    if data == "userbot:settings:payment:card:text":
+        current = str(
+            business.userbot_settings_admin(actor).get("card_to_card_text") or ""
+        ).strip()
+        if current.lower() in {"none", "null"}:
+            current = ""
+        current = current or "0"
+        await query.message.reply_text(
+            "⚙️ در تعریف متن کارت به کارت، به جایگذاری مقادیر زیر توجه کنید:\n"
+            "- شماره کارت: {CARD}\n"
+            "- صاحب کارت: {HOLDER}\n"
+            "- نام بانک: {BANK}\n"
+            "- مقدار تومانی: {AMOUNT}\n"
+            "- مقدار ریالی: {RIAL}\n"
+            "❗️در بخش موردنظر، مقدار درج‌شده را همراه با کاراکترهای {} درج کنید تا مقدار موردنظر جایگزین شود.",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        context.user_data[FLOW_KEY] = {"kind": "payment_card_text"}
+        await query.message.reply_text(
+            f"📝 مقدار فعلی: {current}",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+    if data == "userbot:settings:payment:card:sms":
+        await _payment_sms_menu(update, business, actor)
+        return True
+    if data == "userbot:settings:payment:card:sms:toggle":
+        business.set_sms_enabled_admin(
+            actor,
+            enabled=not bool(
+                business.sms_status_admin(actor).get("enabled")
+            ),
+        )
+        await update.callback_query.answer("ذخیره شد.", show_alert=True)
+        await _payment_sms_menu(update, business, actor)
+        return True
+    if data == "userbot:settings:payment:card:sms:regen":
+        result = business.rotate_sms_secret_admin(actor)
+        await update.callback_query.answer("Secret جدید ساخته شد.")
+        await _payment_sms_menu(update, business, actor)
+        new_secret = str(result.get("new_secret") or "")
+        if new_secret:
+            copy_text = (
+                "🔐 Secret Key جدید اپ\n"
+                "برای کپی، متن داخل کادر را انتخاب کنید:\n\n"
+                f"<pre><code>{html.escape(new_secret)}</code></pre>"
+            )
+            try:
+                await update.callback_query.message.reply_text(
+                    copy_text, parse_mode="HTML"
+                )
+            except Exception:
+                pass
+        return True
+    if data == "userbot:settings:payment:card:sms:show":
+        try:
+            secret = business.sms_plain_secret_admin(actor)
+        except TenantBusinessError:
+            await update.callback_query.answer(
+                "Secret هنوز ساخته نشده است. اول «ساخت Secret» را بزنید.",
+                show_alert=True,
+            )
+            return True
+        endpoint = _sms_webhook_url(business, actor)
+        text = (
+            "🔐 Secret Key اپ\n"
+            "برای کپی، متن داخل کادر را انتخاب کنید:\n\n"
+            f"<pre><code>{html.escape(secret)}</code></pre>\n\n"
+            "Webhook URL:\n"
+            f"<pre><code>{html.escape(endpoint)}</code></pre>"
+        )
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.message.reply_text(
+                text, parse_mode="HTML", disable_web_page_preview=True
+            )
+        except Exception:
+            pass
+        return True
+    if data == "userbot:settings:payment:card:sms:help":
+        endpoint = _sms_webhook_url(business, actor)
+        text = (
+            "📱 راهنمای اتصال اپ SMS Verifier\n\n"
+            "داخل اپ این مقدارها را وارد کنید:\n\n"
+            "Webhook URL:\n"
+            f"<pre><code>{html.escape(endpoint)}</code></pre>\n\n"
+            "Secret Key:\n"
+            "از دکمه «👁 نمایش Secret برای اپ» کپی کنید.\n\n"
+            "سرشماره بانک:\n"
+            "مثلاً برای نمونه‌های فعلی: <code>20004861</code>\n\n"
+            "اگر بانک چهار رقم کارت را داخل SMS می‌فرستد، فیلتر چهار رقم کارت را روشن کنید؛ اگر نمی‌فرستد خاموش بگذارید."
+        )
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.message.reply_text(
+                text, parse_mode="HTML", disable_web_page_preview=True
+            )
+        except Exception:
+            pass
+        return True
+    if data == "userbot:settings:payment:crypto":
+        await _payment_crypto_menu(update, business, actor)
+        return True
+    if data == "userbot:settings:payment:crypto:toggle_all":
+        methods = _crypto_methods(business, actor)
+        enable = not any(m.get("status") == "active" for m in methods)
+        for method in methods:
+            business.set_payment_method_status_admin(
+                actor, method_id=int(method["id"]), enabled=enable
+            )
+        await update.callback_query.answer()
+        await _payment_crypto_menu(update, business, actor)
+        return True
+
     if data == "userbot:settings:backup_restore:auto_toggle":
         business.toggle_userbot_setting_admin(
             actor,
@@ -3710,8 +4433,13 @@ async def handle_callback(
             "method_id": mid,
             "field": field,
         }
+        hint = "مقدار جدید را ارسال کنید:"
+        if field == "destination" and str(
+            item.get("kind") or item.get("provider_key") or ""
+        ) in {"card", "card_manual"}:
+            hint = "شماره کارت | نام صاحب کارت | بانک (بانک اختیاری):"
         await query.message.reply_text(
-            f"✏️ مقدار فعلی: {current or '-'}\nمقدار جدید را ارسال کنید:",
+            f"✏️ مقدار فعلی: {current or '-'}\n{hint}",
             reply_markup=userbot_cancel_keyboard(),
         )
         return True
@@ -4603,6 +5331,90 @@ async def handle_text(
             context.user_data.pop(FLOW_KEY,None)
             await update.effective_message.reply_text(
                 "✅ روش پرداخت اضافه شد.",reply_markup=admin_main_keyboard()
+            ); return True
+        if kind=="payment_card_number":
+            if len(_card_digits(text)) != 16:
+                raise ValueError("card number must be 16 digits")
+            flow["number"]=text.strip(); flow["kind"]="payment_card_owner"
+            await update.effective_message.reply_text(
+                "👤 نام صاحب کارت را وارد کنید (برای رد شدن - بفرستید):",
+                reply_markup=userbot_cancel_keyboard(),
+            ); return True
+        if kind=="payment_card_owner":
+            flow["owner"]="" if text in {"-","—"} else text.strip()
+            flow["kind"]="payment_card_currency"
+            await update.effective_message.reply_text(
+                "💱 ارز کارت را وارد کنید (پیش‌فرض IRR؛ برای همان 0 بفرستید):",
+                reply_markup=userbot_cancel_keyboard(),
+            ); return True
+        if kind=="payment_card_currency":
+            currency=text.strip().upper()
+            if currency in {"0","-","—",""}:
+                currency="IRR"
+            if not 3<=len(currency)<=8: raise ValueError("payment currency")
+            number=str(flow["number"])
+            owner=str(flow.get("owner") or "")
+            destination=number if not owner else f"{number} | {owner}"
+            business.add_payment_method(
+                actor,
+                provider_key="card_manual",
+                kind="card",
+                title=f"کارت {_card_digits(number)[-4:]}",
+                currency=currency,
+                destination=destination,
+            )
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text(
+                "✅ کارت اضافه شد.",reply_markup=admin_main_keyboard()
+            ); return True
+        if kind=="payment_card_delete":
+            method=_find_card_method(business,actor,text)
+            if method is None:
+                raise ValueError("card not found")
+            mid=int(method["id"])
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text(
+                f"⚠️ حذف کارت «{_card_number_of(method)}»؟\n"
+                "اگر سابقه مالی داشته باشد حذف نمی‌شود و فقط غیرفعال خواهد شد.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "✅ تأیید",
+                        callback_data=f"userbot:settings:payment:remove_confirm:{mid}",
+                    )],
+                    [InlineKeyboardButton(
+                        "❌ لغو",
+                        callback_data="userbot:settings:payment:card:list",
+                    )],
+                ]),
+            ); return True
+        if kind=="payment_card_edit":
+            mid=int(flow["method_id"])
+            item=business.payment_method_admin(actor, method_id=mid)
+            parts=str(item.get("destination") or "").split("|")
+            number=parts[0].strip() if parts else ""
+            owner=parts[1].strip() if len(parts)>1 else ""
+            bank=parts[2].strip() if len(parts)>2 else ""
+            if str(flow.get("field"))=="owner":
+                owner="" if text in {"-","—"} else text.strip()
+            else:
+                if len(_card_digits(text)) != 16:
+                    raise ValueError("card number must be 16 digits")
+                number=text.strip()
+            destination=" | ".join(p for p in (number,owner,bank) if p)
+            business.update_payment_method_admin(
+                actor, method_id=mid, destination=destination
+            )
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text(
+                "✅ کارت ویرایش شد.",reply_markup=admin_main_keyboard()
+            ); return True
+        if kind=="payment_card_text":
+            business.set_userbot_setting_admin(
+                actor, key="card_to_card_text", value=text
+            )
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text(
+                "✅ متن کارت به کارت ذخیره شد.",reply_markup=admin_main_keyboard()
             ); return True
     except (ValueError,TenantBusinessError):
         await update.effective_message.reply_text("❌ مقدار یا وضعیت معتبر نیست. دوباره تلاش کنید.",reply_markup=userbot_cancel_keyboard())

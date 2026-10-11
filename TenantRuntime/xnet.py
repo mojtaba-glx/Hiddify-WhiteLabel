@@ -35,6 +35,7 @@ from TenantRuntime.panels import (
     ProvisionResult,
     RenewRequest,
     UsageResult,
+    panel_comment,
 )
 
 _UUID_NAMESPACE = uuid.UUID("4d16e0f9-0a8d-4e23-a0f7-fbcb18f97d9a")
@@ -1135,10 +1136,7 @@ class XnetPanelAdapter:
                 "expireDate": expire_date,
                 "autoDisableOnExpiration": True,
                 "maxConnections": 0,
-                "remark": (
-                    f"WhiteLabel tenant={int(request.tenant_id)} "
-                    f"subscription={int(request.subscription_id)}"
-                ),
+                "remark": panel_comment(request),
             }
             if len(target_ids) > 1:
                 body["extraInboundIds"] = target_ids[1:]

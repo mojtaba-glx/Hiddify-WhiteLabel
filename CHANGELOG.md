@@ -4,6 +4,26 @@ All notable changes to Hiddify-WhiteLabel are documented here.
 
 ---
 
+## [v1.3.0] – 2026-10-11
+
+### Changed (SellBot-parity: subscription detail text, panel note, vpn names, missing-service hiding)
+
+**Files:** `TenantRuntime/AdminBot/handlers.py`, `TenantRuntime/AdminBot/userbot_management.py`, `TenantRuntime/AdminBot/server_actions.py`, `TenantRuntime/UserBot/handlers.py`, `TenantRuntime/business.py`, `TenantRuntime/panels.py`, `TenantRuntime/hiddify.py`, `TenantRuntime/xui.py`, `TenantRuntime/xnet.py`
+
+| # | تغییر | قبل | جدید |
+|---|---|---|---|
+| 1 | متن جزئیات اشتراک ادمین | مصرف `0.00 از 20.00`، آخرین اتصال خام، یادداشت همیشه `—`، انقضای floor | مصرف `0.0 از 20.0`، آخرین اتصال نسبی (`22 ساعت پیش`) + `آنلاین`، یادداشت واقعی پنل، انقضای تقویمی مثل SellBot |
+| 2 | یادداشت پنل هنگام ساخت | فقط `WhiteLabel tenant=.. subscription=..` | `HiddifyBot:{telegram_id} \| WhiteLabel tenant=.. subscription=..` (انگلیسی روی پنل، فارسی در نمایش) |
+| 3 | نام پنل X-UI | همیشه `wl-t-s` (نادیده گرفتن اسم سرویس) | اسم سرویس `vpn-######` مثل Hiddify/X-NET؛ fallback قدیمی فقط وقتی اسم خالی است |
+| 4 | اشتراک حذف‌شده در UserBot | دکمه مستقیم وضعیت، اشتراک حذف‌شده را نشان می‌داد | مخفی + streak مثل SellBot؛ پاک‌سازی از دیتابیس بعد از ۷ روز، بازگشت خودکار اگر روی پنل پیدا شود |
+
+### Fixed
+
+- `shop:substatus` مستقیم و لیست `shop:subs` حالا از همان فیلتر `missing/unreachable` استفاده می‌کنند
+- تست `test_missing_service_sweep_phase19` آداپتر صحیح را به سرویس تزریق می‌کند (به‌جای monkeypatch بی‌اثر)
+
+---
+
 ## [v1.2.7] – 2026-10-09
 
 ### Changed (SellBot-parity: dynamic plan builder + invite menu)

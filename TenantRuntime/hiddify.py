@@ -29,6 +29,7 @@ from TenantRuntime.panels import (
     ProvisionResult,
     RenewRequest,
     UsageResult,
+    panel_comment,
 )
 
 _GIB = 1024 ** 3
@@ -671,10 +672,7 @@ class HiddifyPanelAdapter:
             "current_usage_GB": 0,
             "last_reset_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             "is_active": True,
-            "comment": (
-                f"WhiteLabel tenant={int(request.tenant_id)} "
-                f"subscription={int(request.subscription_id)}"
-            ),
+            "comment": panel_comment(request),
         }
         body = _normalize_state_payload(payload, self._major(target, secret))
         try:

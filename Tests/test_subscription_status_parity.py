@@ -113,8 +113,8 @@ def test_single_subscription_status_opens_four_actions_directly(
     assert '📊میزان استفاده:' in text
     assert '⏳زمان باقی مانده:' in text
     assert '💰قیمت اشتراک:' in text
-    assert f'🔑شناسه: <code>{sid}</code>' in text
-    assert kwargs['parse_mode'] == 'HTML'
+    assert f'🔑شناسه: `{sid}`' in text
+    assert kwargs['parse_mode'] == 'Markdown'
     assert callbacks(kwargs['reply_markup']) == [
         f'shop:configmenu:{sid}',
         f'shop:renew:{sid}',
@@ -156,12 +156,12 @@ def test_status_detail_matches_sellbot_fields_and_rename_still_works(
     )
     for shown in (
         '📄اطلاعات اشتراک شما',
-        '👤نام: اشتراک &lt;جدید&gt;',
+        '👤نام: اشتراک <جدید>',
         '📡سرور:',
         '📊میزان استفاده:',
         '⏳زمان باقی مانده:',
         '💰قیمت اشتراک:',
-        f'🔑شناسه: <code>{sid}</code>',
+        f'🔑شناسه: `{sid}`',
     ):
         assert shown in text
     for hidden in (
@@ -300,7 +300,7 @@ def test_customer_buttons_rename_cancel_and_rotation_confirm_once(monkeypatch, c
         detail = message.sent[-1][0]
         assert detail.startswith('📄اطلاعات اشتراک شما')
         assert '📊میزان استفاده:' in detail
-        assert f'🔑شناسه: <code>{sid}</code>' in detail
+        assert f'🔑شناسه: `{sid}`' in detail
         await click(update, context, f'shop:subrename:{sid}')
         update.callback_query = None
         message.text = 'نام جدید'

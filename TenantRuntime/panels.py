@@ -45,6 +45,30 @@ class ProvisionRequest:
     idempotency_key: str
     external_ref: str = ""
     name: str = ""
+    comment: str = ""
+
+
+def panel_comment(request: ProvisionRequest) -> str:
+    """Panel note: SellBot-style ``HiddifyBot:{tgid}`` plus WhiteLabel marker.
+
+    SellBot writes ``HiddifyBot:{telegram_id}`` (ASCII, readable/filterable on
+    Hiddify) and only converts to Persian digits for Telegram display. The
+    WhiteLabel ``tenant=/subscription=`` marker must stay as a substring so
+    identity-recovery (``marker in comment``) keeps working. New provisions
+    therefore store ``HiddifyBot:{tgid} | WhiteLabel tenant=.. subscription=..``;
+    when no comment is supplied the legacy bare marker is kept (backward
+    compatible with existing rows and tests).
+    """
+    marker = (
+        f"WhiteLabel tenant={int(request.tenant_id)} "
+        f"subscription={int(request.subscription_id)}"
+    )
+    base = str(getattr(request, "comment", "") or "").strip()
+    if base:
+        if marker in base:
+            return base[:1000]
+        return f"{base} | {marker}"[:1000]
+    return marker
 
 
 @dataclass(frozen=True)

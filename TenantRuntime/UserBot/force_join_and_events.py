@@ -173,24 +173,10 @@ def register_background_tasks(
     except Exception as exc:
         logger.warning("Failed to start direct-buy delivery loop: %s", exc)
 
-    # 2. Pending card payment admin notifier job
-    try:
-        from TenantRuntime.UserBot.card_payment import pending_card_admin_notify_job  # noqa: F401
-        jq = application.job_queue
-        key = "_card_notify_job_registered"
-        if jq is not None and not application.bot_data.get(key):
-            jq.run_repeating(
-                pending_card_admin_notify_job,
-                interval=25,
-                first=8,
-                name=f"pending-card-admin-notifier-{business.tenant_id}",
-            )
-            application.bot_data[key] = True
-            logger.info(
-                "Card admin notifier job registered tenant=%s", business.tenant_id
-            )
-    except Exception as exc:
-        logger.warning("Failed to register card notifier job: %s", exc)
+    # NOTE: the old 25s pending-card reminder job was removed with the
+    # deleted card_payment module. Receipt submits now push an instant
+    # approve/reject report to the AdminBot instead (see handlers:
+    # _notify_receipt_submitted), so a polling reminder is obsolete.
 
 
 async def shutdown_background_tasks(application: Application) -> None:

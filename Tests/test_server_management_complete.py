@@ -753,6 +753,10 @@ def test_fresh_and_upgrade_migrations_preserve_subscription_data(tmp_path):
         "0033_legacy_sellbot_restore",
         "0034_admin_panel_smart_subscription",
         "0035_wallet_sellbot_parity",
+        "0036_sms_webhook",
+        "0037_fulfillment_attempts",
+        "0038_subscription_service_code",
+        "0039_service_probe",
     ]
     conn = connect(db)
     assert (
@@ -817,7 +821,13 @@ def test_wallet_currency_migration_repairs_numeric_admin_currency(tmp_path):
     conn.commit()
     conn.close()
 
-    assert migrate(db) == ["0035_wallet_sellbot_parity"]
+    assert migrate(db) == [
+        "0035_wallet_sellbot_parity",
+        "0036_sms_webhook",
+        "0037_fulfillment_attempts",
+        "0038_subscription_service_code",
+        "0039_service_probe",
+    ]
     conn = connect(db)
     account = conn.execute(
         "SELECT currency,balance FROM tenant_wallet_accounts "

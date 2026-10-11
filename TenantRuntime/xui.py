@@ -34,6 +34,7 @@ from TenantRuntime.panels import (
     ProvisionResult,
     RenewRequest,
     UsageResult,
+    panel_comment,
 )
 
 _GIB = 1024 ** 3
@@ -315,6 +316,20 @@ def _select_inbounds(
 
 
 def _safe_email(request: ProvisionRequest) -> str:
+    """X-UI client email: SellBot-style service name (vpn-######) when set.
+
+    SellBot names every user subscription ``vpn-`` + random digits and reuses
+    that name as the panel identity. WhiteLabel generates the same
+    ``service_name`` at order time and passes it as ``request.name``; honor it
+    here (sanitized to X-UI-safe characters) so Hiddify/X-UI/X-NET identities
+    stay consistent. Fall back to the legacy ``wl-t-s`` label only when no
+    name was supplied (older call sites / tests).
+    """
+    raw = str(getattr(request, "name", "") or "").strip()
+    if raw:
+        safe = re.sub(r"[^A-Za-z0-9._@+-]+", "-", raw).strip("-._@+")
+        if safe:
+            return safe[:64]
     return f"wl-t{int(request.tenant_id)}-s{int(request.subscription_id)}"[:64]
 
 
@@ -1123,10 +1138,7 @@ class XuiPanelAdapter:
                     expires_at=request.expires_at,
                     sanaei=True,
                 )
-                client["comment"] = (
-                    f"WhiteLabel tenant={int(request.tenant_id)} "
-                    f"subscription={int(request.subscription_id)}"
-                )
+                client["comment"] = panel_comment(request)
                 try:
                     session.request(
                         "POST",
@@ -1203,10 +1215,7 @@ class XuiPanelAdapter:
                         expires_at=request.expires_at,
                         sanaei=session.flavor == "sanaei",
                     )
-                    client["comment"] = (
-                        f"WhiteLabel tenant={int(request.tenant_id)} "
-                        f"subscription={int(request.subscription_id)}"
-                    )
+                    client["comment"] = panel_comment(request)
                     client_id = _client_identity(client, protocol)
                     session.request(
                         "POST",

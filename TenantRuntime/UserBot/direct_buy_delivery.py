@@ -3,7 +3,6 @@ Phase 3 — Direct-buy payment delivery loop.
 Ported from Hiddify-SellBot UserBot/main.py:
   _direct_buy_delivery_loop
   _process_approved_direct_buy_payments
-  _deliver_direct_buy_after_sms_notice
   _warn_admin_direct_delivery_exhausted
 
 Multi-tenant adapter:
@@ -81,52 +80,6 @@ async def _warn_admin_direct_delivery_exhausted(
         token = ""
 
 
-async def _warn_admin_pending_node_sync(
-    business: Any,
-    *,
-    server_id: int,
-    failed_servers: list[str],
-    service_label: str,
-) -> None:
-    """
-    اگر تمدید/ساخت روی بعضی نودها با خطا مواجه شد، به ادمین هشدار بده.
-    معادل SellBot: _warn_admin_pending_node_sync
-    """
-    from TenantRuntime.UserBot.handlers import _sibling_admin_bot_token  # noqa: F401
-
-    if not failed_servers:
-        return
-    token = ""
-    try:
-        token = _sibling_admin_bot_token(business)
-        fail_lines = "\n".join(
-            f"\u2022 {t}" for t in list(dict.fromkeys(failed_servers))[:10]
-        )
-        async with Bot(token=token) as bot:
-            await bot.send_message(
-                chat_id=int(business.owner_telegram_id),
-                text=(
-                    f"\u26a0\ufe0f {service_label} \u0631\u0648\u06cc \u0628\u0639\u0636\u06cc \u0646\u0648\u062f\u0647\u0627 \u062a\u062d\u0648\u06cc\u0644 \u0646\u0634\u062f.\n\n"
-                    f"\u0633\u0631\u0648\u0631\u0647\u0627\u06cc \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u0628\u0648\u062f\u0646\u062f:\n{fail_lines}\n\n"
-                    "\u0633\u0631\u0648\u06cc\u0633 \u0631\u0648\u06cc \u0628\u0642\u06cc\u0647 \u0646\u0648\u062f\u0647\u0627 \u062a\u062d\u0648\u06cc\u0644 \u062f\u0627\u062f\u0647 \u0634\u062f."
-                    " \u0628\u0639\u062f \u0627\u0632 \u0628\u0627\u0632\u06af\u0634\u062a \u0622\u0646 \u0633\u0631\u0648\u0631\u0647\u0627\u060c"
-                    " \u0628\u0631\u0631\u0633\u06cc \u06a9\u0646\u06cc\u062f \u0648 \u06a9\u0627\u0631\u0628\u0631\u0627\u0646 \u062c\u0627\u0627\u0641\u062a\u0627\u062f\u0647 \u0631\u0627 \u0628\u0633\u0627\u0632\u06cc\u062f."
-                ),
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton(
-                        "\U0001f504 \u0647\u0645\u06af\u0627\u0645\u200c\u0633\u0627\u0632\u06cc \u0646\u0648\u062f\u0647\u0627",
-                        callback_data=f"admin:server:{server_id}:sync_nodes_missing",
-                    )
-                ]]),
-            )
-    except Exception as exc:
-        logger.warning(
-            "Failed to warn admin node_sync server_id=%s: %s",
-            server_id, exc,
-        )
-    finally:
-        token = ""
-
 
 # -----------------------------------------------------------
 # Core delivery processing
@@ -160,7 +113,9 @@ async def _process_approved_direct_buy_payments(
         attempts = int(order.get("fulfillment_attempts") or 0)
 
         try:
-            result = business.fulfill_order(order_id=order_id)
+            result = business.fulfill_paid_order(
+                business.owner_telegram_id, order_id=order_id
+            )
             if not result:
                 continue
 
@@ -237,62 +192,6 @@ async def _process_approved_direct_buy_payments(
                 order_id, exc,
             )
 
-
-async def _deliver_direct_buy_after_sms_notice(
-    context: ContextTypes.DEFAULT_TYPE,
-    *,
-    business: Any,
-    telegram_id: int,
-    order_id: int,
-) -> None:
-    """
-    ارائه فوری سرویس وقتی پرداخت auto-approve شد (بدون نیاز به بررسی ادمین).
-    معادل SellBot: _deliver_direct_buy_after_sms_notice
-
-    فراخوانی‌پذیر بلافاصله بعد از تأیید خودکار کارت‌به‌کارت.
-    """
-    try:
-        result = business.fulfill_order(order_id=order_id)
-        if not result:
-            return
-
-        settings = business.runtime_userbot_settings()
-        from TenantRuntime.UserBot.handlers import _delivery_access_text  # noqa: F401
-        access_text = _delivery_access_text(business, telegram_id, result, settings)
-
-        await context.bot.send_message(
-            chat_id=telegram_id,
-            text="\u2705 \u067e\u0631\u062f\u0627\u062e\u062a \u062a\u0623\u06cc\u06cc\u062f \u0634\u062f! \u0633\u0631\u0648\u06cc\u0633 \u0634\u0645\u0627 \u0622\u0645\u0627\u062f\u0647 \u0627\u0633\u062a:\n\n" + access_text,
-            disable_web_page_preview=True,
-        )
-
-        # Event channel (best-effort)
-        try:
-            from TenantRuntime.UserBot.handlers import _send_purchase_event_report  # noqa: F401
-            order_info = business.customer_order(telegram_id, order_id=order_id)
-            display_name = str(
-                order_info.get("customer_display_name") or str(telegram_id)
-            )
-            await _send_purchase_event_report(
-                business,
-                telegram_id=telegram_id,
-                display_name=display_name,
-                order=order_info,
-                result=result,
-            )
-        except Exception:
-            pass
-
-    except TenantBusinessError as exc:
-        logger.warning(
-            "Immediate delivery failed order=%s user=%s: %s",
-            order_id, telegram_id, exc,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Unexpected error in immediate delivery order=%s: %s",
-            order_id, exc,
-        )
 
 
 # -----------------------------------------------------------

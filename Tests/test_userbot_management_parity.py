@@ -1101,13 +1101,17 @@ def test_broadcast_segments_are_tenant_scoped(conn, factories, cipher) -> None:
 
 
 def test_stage9_marketing_controls_map_to_real_user_actions() -> None:
-    enabled = user_handlers._checkout_markup(
+    enabled = user_handlers._order_summary_markup(
         55,
-        {"enable_discount_code": True},
+        "shop:buy",
+        {"colored_buttons": True, "button_theme": "smart"},
+        show_coupon=True,
     )
-    disabled = user_handlers._checkout_markup(
+    disabled = user_handlers._order_summary_markup(
         55,
-        {"enable_discount_code": False},
+        "shop:buy",
+        {"colored_buttons": True, "button_theme": "smart"},
+        show_coupon=False,
     )
     enabled_callbacks = [
         button.callback_data
