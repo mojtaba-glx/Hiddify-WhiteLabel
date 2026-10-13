@@ -2582,16 +2582,32 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
         growth = business.growth_settings(actor)
         rows = [
             [InlineKeyboardButton(
-                f"🎟 کد تخفیف | {_bool_icon(s.get('enable_discount_code'))}",
+                f"🛍 اعمال کد تخفیف | {_bool_icon(s.get('enable_discount_code'))}",
                 callback_data="userbot:settings:marketing:toggle:enable_discount_code",
             )],
             [InlineKeyboardButton(
-                f"🎁 نمایش دکمه هدیه | {_bool_icon(s.get('show_gift_button'))}",
+                f"🔼 اعمال کد افزایشی | {_bool_icon(s.get('enable_increase_code'))}",
+                callback_data="userbot:settings:marketing:toggle:enable_increase_code",
+            )],
+            [InlineKeyboardButton(
+                f"🎁 دکمه هدیه | {_bool_icon(s.get('show_gift_button'))}",
                 callback_data="userbot:settings:marketing:toggle:show_gift_button",
             )],
             [InlineKeyboardButton(
-                f"📊 نمایش وضعیت | {_bool_icon(s.get('show_user_status'))}",
+                f"👤 نمایش وضعیت کاربر | {_bool_icon(s.get('show_user_status'))}",
                 callback_data="userbot:settings:marketing:toggle:show_user_status",
+            )],
+            [InlineKeyboardButton(
+                f"🚀 استفاده آنی هدیه کوپن | {_bool_icon(s.get('instant_gift_coupon'))}",
+                callback_data="userbot:settings:marketing:toggle:instant_gift_coupon",
+            )],
+            [InlineKeyboardButton(
+                "⚙️تنظیم متن هدایای اتوماتیک",
+                callback_data="userbot:settings:marketing:edit:auto_gift_text",
+            )],
+            [InlineKeyboardButton(
+                "⚙️حداقل شارژ هدیه اتوماتیک",
+                callback_data="userbot:settings:marketing:edit:min_auto_gift_charge",
             )],
             [InlineKeyboardButton(
                 f"🤝 رفرال | {_bool_icon(growth.get('referral_enabled'))}",
@@ -2605,7 +2621,7 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
             [InlineKeyboardButton("🏷 مدیریت کدهای هدیه", callback_data="userbot:gifts:coupons")],
             [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
         ]
-        await _edit_or_send(update, "🎯 تنظیمات بازاریابی", InlineKeyboardMarkup(rows))
+        await _edit_or_send(update, "🎯تنظیمات بازاریابی", InlineKeyboardMarkup(rows))
         return
 
     if section == "force_join":
@@ -3559,8 +3575,10 @@ async def handle_callback(
         "userbot:settings:tx_plans:plan_categories_enabled": ("plan_categories_enabled", "tx_plans"),
         "userbot:settings:tx_plans:plan_sort_by_priority": ("plan_sort_by_priority", "tx_plans"),
         "userbot:settings:marketing:toggle:enable_discount_code": ("enable_discount_code", "marketing"),
+        "userbot:settings:marketing:toggle:enable_increase_code": ("enable_increase_code", "marketing"),
         "userbot:settings:marketing:toggle:show_gift_button": ("show_gift_button", "marketing"),
         "userbot:settings:marketing:toggle:show_user_status": ("show_user_status", "marketing"),
+        "userbot:settings:marketing:toggle:instant_gift_coupon": ("instant_gift_coupon", "marketing"),
         "userbot:settings:force_join:toggle": ("force_join_enabled", "force_join"),
         "userbot:settings:ui:colored_buttons": ("colored_buttons", "ui"),
     }
@@ -3631,6 +3649,39 @@ async def handle_callback(
         await query.message.reply_text(
             f"📝 مقدار فعلی:\n{current}\n\n"
             "متن جدید را ارسال کنید. برای بازگشت به متن پیش‌فرض، 0 بفرستید:",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+
+    if data == "userbot:settings:marketing:edit:auto_gift_text":
+        current = str(
+            business.userbot_settings_admin(actor).get("auto_gift_text") or ""
+        ).strip()
+        context.user_data[FLOW_KEY] = {
+            "kind": "marketing_edit",
+            "key": "auto_gift_text",
+        }
+        await query.message.reply_text(
+            "⚙️ تنظیم متن هدایای اتوماتیک\n"
+            f"📌 متن فعلی:\n{current or '—'}\n\n"
+            "متن جدید را ارسال کنید.",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+    if data == "userbot:settings:marketing:edit:min_auto_gift_charge":
+        current = business.userbot_settings_admin(actor).get("min_auto_gift_charge")
+        try:
+            current = int(current)
+        except (TypeError, ValueError):
+            current = 100000
+        context.user_data[FLOW_KEY] = {
+            "kind": "marketing_edit",
+            "key": "min_auto_gift_charge",
+        }
+        await query.message.reply_text(
+            "⚙️ حداقل شارژ هدیه اتوماتیک\n"
+            f"📌 مقدار فعلی: {current:,} تومان\n\n"
+            "مقدار جدید را به تومان ارسال کنید.",
             reply_markup=userbot_cancel_keyboard(),
         )
         return True
@@ -5269,6 +5320,37 @@ async def handle_text(
             )
             await _settings_section(update,business,actor,"tx_plans")
             return True
+        if kind=="marketing_edit":
+            key=str(flow.get("key") or "")
+            if key=="auto_gift_text":
+                business.set_userbot_setting_admin(actor, key=key, value=text)
+                context.user_data.pop(FLOW_KEY,None)
+                await update.effective_message.reply_text(
+                    "✅ متن هدایای اتوماتیک ذخیره شد.",
+                    reply_markup=admin_main_keyboard(),
+                )
+                await _settings_section(update,business,actor,"marketing")
+                return True
+            if key=="min_auto_gift_charge":
+                try:
+                    value=int(text.replace(",",""))
+                    if value<0:
+                        raise ValueError("min auto gift charge")
+                except (TypeError,ValueError):
+                    await update.effective_message.reply_text(
+                        "❌ لطفاً عدد صحیح معتبر (۰ یا بیشتر) وارد کنید.",
+                        reply_markup=userbot_cancel_keyboard(),
+                    )
+                    return True
+                business.set_userbot_setting_admin(actor, key=key, value=value)
+                context.user_data.pop(FLOW_KEY,None)
+                await update.effective_message.reply_text(
+                    f"✅ حداقل شارژ هدیه اتوماتیک روی {value:,} تومان تنظیم شد.",
+                    reply_markup=admin_main_keyboard(),
+                )
+                await _settings_section(update,business,actor,"marketing")
+                return True
+            raise ValueError("marketing edit")
         if kind=="renew_setting_int":
             key=str(flow["key"])
             try:

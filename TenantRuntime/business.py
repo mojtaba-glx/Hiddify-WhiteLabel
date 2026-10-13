@@ -152,10 +152,14 @@ USERBOT_SETTING_DEFAULTS: dict[str, Any] = {
         "لازم برای بررسی عضویت کاربران را داشته باشد."
     ),
 
-    # Marketing / visibility.
+    # Marketing / visibility (SellBot parity).
     "show_gift_button": True,
     "show_user_status": True,
     "enable_discount_code": True,
+    "enable_increase_code": False,
+    "instant_gift_coupon": False,
+    "auto_gift_text": "🎁 هدیه شما فعال شد. از همراهی‌تان متشکریم.",
+    "min_auto_gift_charge": 100000,
 
     # Force join and event/channel settings.
     # Keep force_join_channel + event_channel_* as legacy compatibility keys.
@@ -8233,7 +8237,8 @@ class TenantBusinessService:
             clean: Any = bool(value)
         elif isinstance(USERBOT_SETTING_DEFAULTS[name], int):
             clean = int(value)
-            if clean < 1:
+            minimum = 0 if name == "min_auto_gift_charge" else 1
+            if clean < minimum:
                 raise ValueError("setting must be positive")
             if name in ("plan_columns", "server_columns") and clean > 3:
                 raise ValueError("layout columns out of range")

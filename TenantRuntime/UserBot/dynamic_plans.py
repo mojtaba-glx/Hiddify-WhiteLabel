@@ -18,6 +18,16 @@ from TenantRuntime.business import TenantBusinessError
 from TenantRuntime.server_admin import ServerAdminService
 
 
+def _dynamic_direct_mode(sales: dict) -> bool:
+    """Dynamic/mixed priced servers open the builder directly (SellBot).
+
+    Fixed servers fall through so the fixed list renders. In mixed mode the
+    builder carries a «ready plans» row (SellBot's combined mixed screen).
+    """
+    time_price = sales["price_month"] if _month_mode(sales) else sales["price_day"]
+    return sales["mode"] in {"dynamic", "mixed"} and sales["price_gb"] + time_price > 0
+
+
 def _month_mode(sales: dict) -> bool:
     return sales.get("pricing_model") == "sellbot_month"
 
@@ -142,13 +152,24 @@ async def _render_builder(
             Button(f"💰 قیمت: {price_disp:,} {currency_disp}", callback_data="noop"),
         ],
         [Button("💳 تایید و خرید", callback_data=cb("confirm"))],
+    ]
+    # SellBot mixed screen: ready-made plans row under the custom confirm,
+    # back row under it. Buy flow only (renewals keep their own screens).
+    if sales["mode"] == "mixed" and not subid:
+        keyboard.append(
+            [Button(
+                "📋 پلن های آماده",
+                callback_data=f"shop:mixed:{sid}:fixed",
+            )]
+        )
+    keyboard.append(
         [
             Button(
                 "🔙 بازگشت",
                 callback_data=f"shop:subrefresh:{subid}" if subid else "shop:buy",
             )
         ],
-    ]
+    )
     await query.answer()
     from TenantRuntime.UserBot.handlers import _edit_subscription
 
@@ -189,10 +210,11 @@ async def handle_callback(update, context, *, business, actor, settings):
         )
         return True
 
-    # SellBot-parity: shop:buyloc:{sid} -> skip plan list for dynamic sales.
-    # Fixed-only servers must fall back to handlers.py, which renders their
-    # normal plan/category list. Without this guard every location callback
-    # was treated as a dynamic quote and could break fixed-plan purchases.
+    # SellBot-parity: shop:buyloc:{sid} opens the builder for dynamic and
+    # mixed sales (mixed carries the ready-plans row). Fixed-only servers
+    # fall back to handlers.py, which renders their normal plan/category
+    # list. Without this guard every location callback was treated as a
+    # dynamic quote and could break fixed-plan purchases.
     if data.startswith("shop:buyloc:"):
         sid_str = data.rsplit(":", 1)[-1]
         if not sid_str.isdigit():
@@ -201,15 +223,7 @@ async def handle_callback(update, context, *, business, actor, settings):
         if not settings.get("enable_buy", True):
             raise TenantBusinessError("purchase is disabled")
         sales = ServerAdminService(business).sales(sid)
-        time_price = (
-            sales["price_month"]
-            if _month_mode(sales)
-            else sales["price_day"]
-        )
-        if (
-            sales["mode"] not in {"dynamic", "mixed"}
-            or sales["price_gb"] + time_price <= 0
-        ):
+        if not _dynamic_direct_mode(sales):
             return False
         await _open_plan_builder(
             update.callback_query,
@@ -222,8 +236,53 @@ async def handle_callback(update, context, *, business, actor, settings):
         )
         return True
 
-    if not data.startswith("shop:dynamic:"):
+    if not data.startswith("shop:dynamic:") and not data.startswith("shop:mixed:"):
         return False
+
+    if data.startswith("shop:mixed:"):
+        # SellBot wiz:{sid}:show_fixed parity: flat ready-made plan list.
+        parts = data.split(":")
+        if len(parts) != 4 or parts[3] != "fixed" or not parts[2].isdigit():
+            return False
+        sid = int(parts[2])
+        if not settings.get("enable_buy", True):
+            raise TenantBusinessError("purchase is disabled")
+        sales = ServerAdminService(business).sales(sid)
+        if sales["mode"] != "mixed":
+            await update.callback_query.answer(
+                "این گزینه فقط در حالت ترکیبی فعال است.",
+                show_alert=True,
+            )
+            return True
+        plans = [
+            p for p in business.list_plans()
+            if not str(p.get("name") or "").startswith("__WHITELABEL_")
+            and p.get("server_id") in (None, sid)
+        ]
+        if not plans:
+            await update.callback_query.answer(
+                "❌ پلن آماده‌ای برای این سرور وجود ندارد.",
+                show_alert=True,
+            )
+            return True
+        from TenantRuntime.UserBot.handlers import (
+            _button,
+            _edit_md,
+            _plan_buttons,
+            _plans_list_default,
+        )
+        rows = _plan_buttons(plans, settings, server_id=sid)
+        rows.append([
+            _button("🔙بازگشت", callback_data="shop:buy", settings=settings)
+        ])
+        await update.callback_query.answer()
+        await _edit_md(
+            update.callback_query,
+            str(settings.get("plans_list_text") or "").strip()
+            or _plans_list_default(),
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return True
 
     parts = data.split(":")
     sid = int(parts[2])

@@ -806,7 +806,9 @@ def test_deep_settings_callbacks_are_wired_to_real_runtime() -> None:
 
     assert 'data == "shop:renewmenu"' in runtime
     assert 'settings.get("show_renew_in_main_menu", True)' in runtime
-    assert 'settings.get("enable_discount_code", True)' in runtime
+    assert "_coupon_usable(settings)" in runtime
+    assert 'values.get("enable_discount_code")' in runtime
+    assert 'values.get("enable_increase_code")' in runtime
     for callback in (
         "shop:guide:android",
         "shop:guide:ios",
@@ -1192,10 +1194,12 @@ def test_stage9_admin_actions_are_wired_and_no_dead_marketing_options() -> None:
         assert callback in sales
     assert 'kind == "coupon_edit"' in sales
 
-    # These SellBot keys have no meaningful customer execution path, so phase
-    # 9 intentionally does not expose them as WhiteLabel admin controls.
-    assert "instant_gift_coupon" not in gifts
-    assert "enable_increase_code" not in gifts
+    # SellBot parity (v1.3.5): these marketing keys are exposed as admin
+    # controls exactly like the reference bot.
+    assert "userbot:settings:marketing:toggle:enable_increase_code" in gifts
+    assert "userbot:settings:marketing:toggle:instant_gift_coupon" in gifts
+    assert "userbot:settings:marketing:edit:auto_gift_text" in gifts
+    assert "userbot:settings:marketing:edit:min_auto_gift_charge" in gifts
 
 
 def test_admin_forms_use_bottom_cancel_and_not_pipe_for_core_new_flows() -> None:

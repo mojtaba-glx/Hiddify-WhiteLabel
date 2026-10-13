@@ -1172,6 +1172,14 @@ def _order_summary_text(order: dict) -> str:
     return "\n".join(lines)
 
 
+def _coupon_usable(settings: dict | None) -> bool:
+    """SellBot parity: discount OR increase code enables the coupon flow."""
+    values = dict(settings or {})
+    return bool(values.get("enable_discount_code")) or bool(
+        values.get("enable_increase_code")
+    )
+
+
 def _order_summary_markup(
     order_id: int,
     back_callback: str,
@@ -1219,7 +1227,7 @@ async def _send_order_summary(
             int(order_id),
             _summary_back_callback(order),
             settings,
-            show_coupon=bool(settings.get("enable_discount_code", True)),
+            show_coupon=_coupon_usable(settings),
         ),
     )
 
@@ -1409,7 +1417,7 @@ async def _receipt_go_back(update, business: Any, actor: int, spec, flow: dict) 
             int(flow["order_id"]),
             _summary_back_callback(order),
             settings,
-            show_coupon=bool(settings.get("enable_discount_code", True)),
+            show_coupon=_coupon_usable(settings),
         ),
     )
 
@@ -3591,7 +3599,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     server_id=server_id,
                 )
             from TenantRuntime.UserBot import dynamic_plans
-            rows.extend(dynamic_plans.rows(business, server_id=server_id))
+            from TenantRuntime.server_admin import ServerAdminService
+            # Fallback path for fixed servers and unpriced mixed/dynamic
+            # servers (priced dynamic/mixed open the builder directly).
+            # When the dynamic entry is available in mixed mode it comes
+            # first, mirroring the builder-first mixed screen.
+            mixed = (
+                ServerAdminService(business).sales(server_id)["mode"] == "mixed"
+            )
+            dynamic_rows = dynamic_plans.rows(business, server_id=server_id)
+            rows = dynamic_rows + rows if mixed else rows + dynamic_rows
             back_row = [[
                 _button(
                     "🔙 بازگشت به لوکیشن‌ها",
@@ -3612,10 +3629,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
                 return
             rows.extend(back_row)
+            if mixed and dynamic_rows:
+                header = (
+                    "🛒 **خرید اشتراک**\n\n"
+                    "🎛 **بسته دلخواه خود را بسازید یا از پلن‌های آماده استفاده کنید:**"
+                )
+            else:
+                header = (
+                    str(settings.get("plans_list_text") or "").strip()
+                    or _plans_list_default()
+                )
             await _edit_md(
                 update.callback_query,
-                str(settings.get("plans_list_text") or "").strip()
-                or _plans_list_default(),
+                header,
                 reply_markup=InlineKeyboardMarkup(rows),
             )
             return
@@ -3810,7 +3836,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 update.callback_query, business, actor, settings, order_id
             ); return
         if data.startswith("shop:coupon:"):
-            if not bool(settings.get("enable_discount_code", True)):
+            if not _coupon_usable(settings):
                 raise TenantBusinessError("discount codes are disabled")
             order_id = int(data.rsplit(":", 1)[1])
             order = business.order(actor, order_id)
@@ -4471,7 +4497,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     ])
             else:
                 rows = _renew_plan_buttons(plans, settings, subscription_id)
-            rows.extend(dynamic_plans.rows(business, subscription=owned))
+            dynamic_rows = dynamic_plans.rows(business, subscription=owned)
+            # SellBot parity: mixed renewal shows the dynamic entry together
+            # with the fixed list, dynamic entry first.
+            rows = dynamic_rows + rows if sales["mode"] == "mixed" else rows + dynamic_rows
             if not rows:
                 rows = [[
                     InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")

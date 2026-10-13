@@ -7,11 +7,18 @@ and the exact SellBot empty-catalog texts in the UserBot buy flow.
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 
 from TenantRuntime.business import TenantBusinessService
 from TenantRuntime.server_admin import ServerAdminService
 from TenantRuntime.AdminBot import server_actions
+from TenantRuntime.UserBot import handlers as user_handlers
+from TenantRuntime.UserBot import dynamic_plans
+from Tests.test_server_connection_parity import Messages, Query
+from Tests.test_user_account_status_phase6 import _service
 
 
 @pytest.fixture()
@@ -110,3 +117,184 @@ def test_userbot_empty_catalog_texts_match_sellbot() -> None:
     ).read()
     assert "❌ پلن ثابت برای این سرور یافت نشد." in source
     assert "❌ دسته‌بندی برای این سرور یافت نشد." in source
+
+
+def test_dynamic_direct_mode_opens_builder_for_dynamic_and_mixed() -> None:
+    priced_dynamic = {
+        "mode": "dynamic", "price_gb": 1000, "price_day": 0,
+        "price_month": 30000, "pricing_model": "sellbot_month",
+    }
+    assert dynamic_plans._dynamic_direct_mode(priced_dynamic) is True
+    assert dynamic_plans._dynamic_direct_mode({**priced_dynamic, "mode": "mixed"}) is True
+    assert dynamic_plans._dynamic_direct_mode({**priced_dynamic, "mode": "fixed"}) is False
+    assert dynamic_plans._dynamic_direct_mode(
+        {**priced_dynamic, "price_gb": 0, "price_month": 0}
+    ) is False
+
+
+def _userbot_ui(monkeypatch, business):
+    message = Messages()
+    context = SimpleNamespace(user_data={})
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=7101),
+        effective_message=message,
+        effective_chat=message,
+        callback_query=None,
+    )
+    monkeypatch.setattr(
+        user_handlers,
+        "_services",
+        lambda _: (SimpleNamespace(role="user"), None, None, business),
+    )
+    return update, context, message
+
+
+async def _userbot_click(update, context, data):
+    update.callback_query = Query(data, update.effective_message)
+    await user_handlers.on_callback(update, context)
+    update.callback_query = None
+
+
+def _flat_callbacks(message):
+    return [
+        button.callback_data
+        for text, kwargs in message.sent
+        for row in kwargs["reply_markup"].inline_keyboard
+        for button in row
+    ]
+
+
+def test_mixed_location_opens_builder_with_ready_plans_row(
+    monkeypatch, conn, factories, cipher
+) -> None:
+    """SellBot mixed screen: builder + ready-plans row under confirm."""
+    service, _, _, _, _ = _service(conn, factories, cipher)
+    server = service.list_servers()[0]
+    sid = int(server["id"])
+    admin = ServerAdminService(service)
+    admin.set_sales(7001, sid, {"mode": "mixed", "price_gb": 1000})
+
+    update, context, message = _userbot_ui(monkeypatch, service)
+
+    async def run():
+        await _userbot_click(update, context, f"shop:buyloc:{sid}")
+
+    asyncio.run(run())
+    text, kwargs = message.sent[-1]
+    assert text == "📦بسته مورد نیاز خود را جهت خرید تنظیم کنید"
+    rows = kwargs["reply_markup"].inline_keyboard
+    labels = [[button.text for button in row] for row in rows]
+    callbacks = [[button.callback_data for button in row] for row in rows]
+    flat_labels = [label for row in labels for label in row]
+    flat_callbacks = [cb for row in callbacks for cb in row]
+    # Confirm row, then ready-plans row, then back row (SellBot order).
+    confirm_at = flat_labels.index("💳 تایید و خرید")
+    ready_at = flat_labels.index("📋 پلن های آماده")
+    back_at = flat_labels.index("🔙 بازگشت")
+    assert confirm_at < ready_at < back_at
+    assert flat_callbacks[ready_at] == f"shop:mixed:{sid}:fixed"
+    assert flat_callbacks[back_at] == "shop:buy"
+
+
+def test_mixed_ready_plans_opens_flat_fixed_list(
+    monkeypatch, conn, factories, cipher
+) -> None:
+    service, _, _, _, _ = _service(conn, factories, cipher)
+    server = service.list_servers()[0]
+    sid = int(server["id"])
+    admin = ServerAdminService(service)
+    admin.set_sales(7001, sid, {"mode": "mixed", "price_gb": 1000})
+
+    update, context, message = _userbot_ui(monkeypatch, service)
+
+    async def run():
+        await _userbot_click(update, context, f"shop:mixed:{sid}:fixed")
+
+    asyncio.run(run())
+    text, kwargs = message.sent[-1]
+    assert "پلن" in text
+    callbacks = _flat_callbacks(message)
+    assert any(cb.startswith("shop:plan:") for cb in callbacks)
+    assert "shop:buy" in callbacks
+    assert not any(cb.startswith("shop:dynamic:") for cb in callbacks)
+
+
+def test_mixed_ready_plans_alerts_when_not_mixed(
+    monkeypatch, conn, factories, cipher
+) -> None:
+    service, _, _, _, _ = _service(conn, factories, cipher)
+    server = service.list_servers()[0]
+    sid = int(server["id"])
+    admin = ServerAdminService(service)
+    admin.set_sales(7001, sid, {"mode": "fixed"})
+
+    answers: list[tuple] = []
+
+    class AlertQuery(Query):
+        async def answer(self, *args, **kwargs):
+            answers.append((args, kwargs))
+
+    message = Messages()
+    context = SimpleNamespace(user_data={})
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=7101),
+        effective_message=message,
+        effective_chat=message,
+        callback_query=None,
+    )
+    monkeypatch.setattr(
+        user_handlers,
+        "_services",
+        lambda _: (SimpleNamespace(role="user"), None, None, service),
+    )
+    settings = service.runtime_userbot_settings()
+
+    async def run():
+        update.callback_query = AlertQuery(f"shop:mixed:{sid}:fixed", message)
+        handled = await dynamic_plans.handle_callback(
+            update, context, business=service, actor=7101, settings=settings
+        )
+        assert handled is True
+
+    asyncio.run(run())
+    assert answers and answers[0][1].get("show_alert") is True
+    assert "ترکیبی" in answers[0][0][0]
+
+
+def test_dynamic_location_still_opens_builder_directly(
+    monkeypatch, conn, factories, cipher
+) -> None:
+    service, _, _, _, _ = _service(conn, factories, cipher)
+    server = service.list_servers()[0]
+    sid = int(server["id"])
+    admin = ServerAdminService(service)
+    admin.set_sales(7001, sid, {"mode": "dynamic", "price_gb": 1000})
+
+    update, context, message = _userbot_ui(monkeypatch, service)
+
+    async def run():
+        await _userbot_click(update, context, f"shop:buyloc:{sid}")
+
+    asyncio.run(run())
+    text, _ = message.sent[-1]
+    assert text == "📦بسته مورد نیاز خود را جهت خرید تنظیم کنید"
+
+
+def test_fixed_location_hides_dynamic_entry(
+    monkeypatch, conn, factories, cipher
+) -> None:
+    service, _, _, _, _ = _service(conn, factories, cipher)
+    server = service.list_servers()[0]
+    sid = int(server["id"])
+    admin = ServerAdminService(service)
+    admin.set_sales(7001, sid, {"mode": "fixed"})
+
+    update, context, message = _userbot_ui(monkeypatch, service)
+
+    async def run():
+        await _userbot_click(update, context, f"shop:buyloc:{sid}")
+
+    asyncio.run(run())
+    callbacks = _flat_callbacks(message)
+    assert not any(cb.startswith("shop:dynamic:") for cb in callbacks)
+    assert any(cb.startswith("shop:plan:") or cb.startswith("shop:buycat:") for cb in callbacks)
