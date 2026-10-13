@@ -52,6 +52,7 @@ ROUTES = {
     "plans",
     "plan",
     "planadd",
+    "seedplans",
     "planfield",
     "plantoggle",
     "planarchive",
@@ -185,12 +186,15 @@ def _plan_mode_title(mode):
     }.get(mode, "نامشخص")
 
 
-def _plans_root_view(business, service, sid):
+def _plans_root_view(business, service, actor, sid):
     sales = service.sales(sid)
     mode = sales["mode"]
     rows = []
+    has_fixed_plans = bool(service.plans(actor, sid))
     if mode in {"fixed", "mixed"}:
         rows.append(button("📂 لیست دسته‌های پلن", f"srv:categories:{sid}"))
+    if mode in {"fixed", "mixed"} and not has_fixed_plans:
+        rows.append(button("✨ ساخت پلن‌های نمونه", f"srv:seedplans:{sid}"))
     rows.append(button("⚙️تنظیمات پلن‌ها", f"srv:settings:{sid}"))
     if mode in {"dynamic", "mixed"}:
         rows.append(button("🎛 مدیریت حرفه‌ای تخفیف‌ها", f"srv:discounts:{sid}"))
@@ -1355,8 +1359,25 @@ async def handle_callback(update, context, *, business, actor):
                 ),
             )
     elif action == "plans":
-        text, rows = _plans_root_view(business, service, sid)
+        text, rows = _plans_root_view(business, service, actor, sid)
         await show(text, rows)
+    elif action == "seedplans":
+        report = business.seed_sample_plans(actor, server_id=sid)
+        if report["created_plans"]:
+            lines = [
+                "✅ پلن‌های نمونه ساخته شد:",
+                "",
+                *[
+                    f"• {p['name']} · {int(p['price']):,} {p.get('currency') or ''}"
+                    for p in report["plans"]
+                ],
+                "",
+                "از «📂 لیست دسته‌های پلن» می‌توانید آن‌ها را ویرایش کنید.",
+            ]
+        else:
+            lines = ["ℹ️ برای این سرور قبلاً پلن ثابت ثبت شده است؛ چیزی اضافه نشد."]
+        text, rows = _plans_root_view(business, service, actor, sid)
+        await show("\n".join(lines) + "\n\n" + text, rows)
     elif action == "plan":
         if len(parts) == 3:
             await plan_list(query, context, service, actor, sid)
@@ -1489,11 +1510,19 @@ async def handle_callback(update, context, *, business, actor):
                 ],
             )
     elif action == "categories":
+        cats = business.list_plan_categories(public=False)
+        header = (
+            "📂 لیست دسته‌های پلن\n"
+            "برای این سرور هنوز هیچ دسته‌ای ثبت نشده است.\n"
+            "می‌توانید یک دسته جدید اضافه کنید."
+            if not cats
+            else "📂 لیست دسته‌های پلن"
+        )
         await show(
-            "📂 لیست دسته‌های پلن",
+            header,
             [
                 button(c["title"], f'srv:category:{sid}:{c["id"]}')
-                for c in business.list_plan_categories(public=False)
+                for c in cats
             ]
             + [
                 button("سایر پلن‌ها", f"srv:category:{sid}:0"),

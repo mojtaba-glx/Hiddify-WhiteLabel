@@ -256,6 +256,49 @@ def _bool_icon(value: Any) -> str:
     return "✅" if bool(value) else "❌"
 
 
+def _buy_plan_columns_rows(s: dict[str, Any]) -> list[list[InlineKeyboardButton]]:
+    col = int(s.get("plan_columns") or 1)
+    one_icon = "✅" if col == 1 else "❌"
+    two_icon = "✅" if col == 2 else "❌"
+    return [
+        [
+            InlineKeyboardButton(
+                f"{one_icon} | یک",
+                callback_data="userbot:settings:buy_renew:plan_columns:set:1",
+            ),
+            InlineKeyboardButton(
+                f"{two_icon} | دو",
+                callback_data="userbot:settings:buy_renew:plan_columns:set:2",
+            ),
+        ],
+        [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:buy_renew")],
+    ]
+
+
+def _buy_server_columns_rows(s: dict[str, Any]) -> list[list[InlineKeyboardButton]]:
+    col = int(s.get("server_columns") or 1)
+    one_icon = "✅" if col == 1 else "❌"
+    two_icon = "✅" if col == 2 else "❌"
+    three_icon = "✅" if col == 3 else "❌"
+    return [
+        [
+            InlineKeyboardButton(
+                f"{one_icon} | یک",
+                callback_data="userbot:settings:buy_renew:server_columns:set:1",
+            ),
+            InlineKeyboardButton(
+                f"{two_icon} | دو",
+                callback_data="userbot:settings:buy_renew:server_columns:set:2",
+            ),
+            InlineKeyboardButton(
+                f"{three_icon} | سه",
+                callback_data="userbot:settings:buy_renew:server_columns:set:3",
+            ),
+        ],
+        [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:buy_renew")],
+    ]
+
+
 def _tx_plan_categories_mode_rows(s: dict[str, Any]) -> list[list[InlineKeyboardButton]]:
     enabled = bool(s.get("plan_categories_enabled", True))
     simple_icon = "✅" if not enabled else "❌"
@@ -2268,12 +2311,7 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
         return
 
     if section == "buy_renew":
-        policy = str(s.get("renew_policy") or "advanced")
-        policy_title = {
-            "advanced": "پیشرفته",
-            "default": "پیشفرض",
-            "fair": "منصفانه",
-        }.get(policy, "پیشرفته")
+        s = business.userbot_settings_admin(actor)
         rows = [
             [InlineKeyboardButton(
                 f"امکان خرید اشتراک | {_bool_icon(s.get('enable_buy'))}",
@@ -2323,8 +2361,7 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
         ]
         await _edit_or_send(
             update,
-            "🛒 تنظیمات خرید و تمدید\n"
-            f"⚙️ سیاست تمدید فعلی: {policy_title}",
+            "🛒تنظیمات خرید و تمدید",
             InlineKeyboardMarkup(rows),
         )
         return
@@ -2384,11 +2421,11 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
                 ),
             ],
             [InlineKeyboardButton(
-                f"حداکثر زمان مجاز برای تمدید📊 | {int(s.get('renew_max_days') or 3)} روز",
+                "حداکثر زمان مجاز برای تمدید📊",
                 callback_data="userbot:settings:buy_renew:renew_limit:days",
             )],
             [InlineKeyboardButton(
-                f"حداکثر حجم باقی‌مانده📆 | {int(s.get('renew_max_remaining_gb') or 3)} GB",
+                "حداکثر مصرف مجاز برای تمدید📆",
                 callback_data="userbot:settings:buy_renew:renew_limit:usage",
             )],
             [InlineKeyboardButton(
@@ -2403,7 +2440,7 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
             f"📦 حالت حجم در تمدید: {volume_text}\n"
             f"⏳ حالت زمان در تمدید: {time_text}\n"
             f"📊 مقدار فعلی زمان: {int(s.get('renew_max_days') or 3)} روز\n"
-            f"📆 مقدار فعلی حجم: {int(s.get('renew_max_remaining_gb') or 3)} گیگابایت",
+            f"📆 مقدار فعلی مصرف: {int(s.get('renew_max_remaining_gb') or 3)} گیگابایت",
             InlineKeyboardMarkup(rows),
         )
         return
@@ -3657,14 +3694,14 @@ async def handle_callback(
             current = int(settings.get(key) or 3)
             prompt = (
                 f"📊 مقدار فعلی: {current} روز\n"
-                "حداکثر چند روز مانده به پایان اشتراک، تمدید مجاز باشد؟"
+                "📝 تعیین کنید حداکثر چند روز مانده به پایان اشتراک، تمدید مجاز باشد:"
             )
         elif field == "usage":
             key = "renew_max_remaining_gb"
             current = int(settings.get(key) or 3)
             prompt = (
                 f"📆 مقدار فعلی: {current} گیگابایت\n"
-                "حداکثر چند گیگابایتِ باقی‌مانده، تمدید مجاز باشد؟"
+                "📝 تعیین کنید حداکثر چند گیگابایتِ باقی‌مانده، تمدید مجاز باشد:"
             )
         else:
             raise ValueError("invalid renewal limit")
@@ -3688,8 +3725,8 @@ async def handle_callback(
                 "key": "renew_unlimited_volume_from_gb",
             }
             await query.message.reply_text(
-                "♾ حداقل حجم پلن برای نمایش «نامحدود» را به گیگابایت ارسال کنید.\n"
-                f"مقدار فعلی: {int(settings.get('renew_unlimited_volume_from_gb') or 1000)}",
+                f"📝 مقدار فعلی: {int(settings.get('renew_unlimited_volume_from_gb') or 1000)} گیگابایت\n"
+                "♾ لطفاً حداقل مقدار (گیگابایت) برای نمایش حجم نامحدود را مشخص کنید:",
                 reply_markup=userbot_cancel_keyboard(),
             )
             return True
@@ -3706,8 +3743,8 @@ async def handle_callback(
                 "key": "renew_unlimited_time_from_days",
             }
             await query.message.reply_text(
-                "♾ حداقل مدت برای نمایش «نامحدود» را به روز ارسال کنید.\n"
-                f"مقدار فعلی: {int(settings.get('renew_unlimited_time_from_days') or 365)}",
+                f"📝 مقدار فعلی: {int(settings.get('renew_unlimited_time_from_days') or 365)} روز\n"
+                "♾ لطفاً حداقل مقدار (روز) برای نمایش زمان نامحدود را مشخص کنید:",
                 reply_markup=userbot_cancel_keyboard(),
             )
             return True
@@ -3716,38 +3753,44 @@ async def handle_callback(
 
     if data == "userbot:settings:buy_renew:plan_columns:menu":
         s = business.userbot_settings_admin(actor)
-        rows = [
-            [InlineKeyboardButton(
-                f"{'✅ ' if int(s.get('plan_columns') or 1) == value else ''}{value} ستون",
-                callback_data=f"userbot:settings:buy_renew:plan_columns:{value}",
-            )]
-            for value in (1, 2, 3)
-        ]
-        rows.append([InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:buy_renew")])
-        await _edit_or_send(update, "📋 تعداد ستون‌های نمایش پلن‌ها", InlineKeyboardMarkup(rows))
+        await _edit_or_send(
+            update,
+            "🛒تنظیمات خرید و تمدید",
+            InlineKeyboardMarkup(_buy_plan_columns_rows(s)),
+        )
         return True
     if data.startswith("userbot:settings:buy_renew:plan_columns:"):
         value = int(data.rsplit(":", 1)[1])
-        business.set_userbot_setting_admin(actor, key="plan_columns", value=value)
-        await _settings_section(update, business, actor, "buy_renew")
+        business.set_userbot_setting_admin(
+            actor, key="plan_columns", value=value if value in {1, 2} else 1
+        )
+        s = business.userbot_settings_admin(actor)
+        await _edit_or_send(
+            update,
+            "🛒تنظیمات خرید و تمدید",
+            InlineKeyboardMarkup(_buy_plan_columns_rows(s)),
+        )
         return True
 
     if data == "userbot:settings:buy_renew:server_columns:menu":
         s = business.userbot_settings_admin(actor)
-        rows = [
-            [InlineKeyboardButton(
-                f"{'✅ ' if int(s.get('server_columns') or 1) == value else ''}{value} ستون",
-                callback_data=f"userbot:settings:buy_renew:server_columns:{value}",
-            )]
-            for value in (1, 2, 3)
-        ]
-        rows.append([InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:buy_renew")])
-        await _edit_or_send(update, "🛰 تعداد ستون‌های نمایش سرورها", InlineKeyboardMarkup(rows))
+        await _edit_or_send(
+            update,
+            "🛒تنظیمات خرید و تمدید",
+            InlineKeyboardMarkup(_buy_server_columns_rows(s)),
+        )
         return True
     if data.startswith("userbot:settings:buy_renew:server_columns:"):
         value = int(data.rsplit(":", 1)[1])
-        business.set_userbot_setting_admin(actor, key="server_columns", value=value)
-        await _settings_section(update, business, actor, "buy_renew")
+        business.set_userbot_setting_admin(
+            actor, key="server_columns", value=value if value in {1, 2, 3} else 1
+        )
+        s = business.userbot_settings_admin(actor)
+        await _edit_or_send(
+            update,
+            "🛒تنظیمات خرید و تمدید",
+            InlineKeyboardMarkup(_buy_server_columns_rows(s)),
+        )
         return True
 
     if data == "userbot:settings:tx_plans:categories":
@@ -5228,14 +5271,32 @@ async def handle_text(
             return True
         if kind=="renew_setting_int":
             key=str(flow["key"])
+            try:
+                value=int(text.replace(",",""))
+                if value<=0:
+                    raise ValueError("renew setting")
+            except (TypeError,ValueError):
+                await update.effective_message.reply_text(
+                    "❌ لطفاً عدد صحیح بزرگ‌تر از صفر وارد کنید.",
+                    reply_markup=userbot_cancel_keyboard(),
+                )
+                return True
             business.set_userbot_setting_admin(
                 actor,
                 key=key,
-                value=int(text),
+                value=value,
             )
             context.user_data.pop(FLOW_KEY,None)
+            if key=="renew_max_days":
+                confirm=f"✅ حداکثر زمان مجاز برای تمدید روی {value} روز تنظیم شد."
+            elif key=="renew_unlimited_volume_from_gb":
+                confirm=f"✅ آستانه نمایش حجم نامحدود روی {value} گیگابایت تنظیم شد."
+            elif key=="renew_unlimited_time_from_days":
+                confirm=f"✅ آستانه نمایش زمان نامحدود روی {value} روز تنظیم شد."
+            else:
+                confirm=f"✅ حداکثر مصرف مجاز برای تمدید روی {value} گیگابایت تنظیم شد."
             await update.effective_message.reply_text(
-                "✅ تنظیم تمدید ذخیره شد.",
+                confirm,
                 reply_markup=admin_main_keyboard(),
             )
             section=(

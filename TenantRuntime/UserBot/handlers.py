@@ -3592,15 +3592,26 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
             from TenantRuntime.UserBot import dynamic_plans
             rows.extend(dynamic_plans.rows(business, server_id=server_id))
-            if not rows:
-                rows = [[InlineKeyboardButton("پلنی موجود نیست", callback_data="noop")]]
-            rows.append([
+            back_row = [[
                 _button(
                     "🔙 بازگشت به لوکیشن‌ها",
                     callback_data="shop:buy",
                     settings=settings,
                 )
-            ])
+            ]]
+            if not rows:
+                # SellBot parity for an empty fixed catalog.
+                if bool(settings.get("plan_categories_enabled", True)) and not categories:
+                    empty_text = "❌ دسته‌بندی برای این سرور یافت نشد."
+                else:
+                    empty_text = "❌ پلن ثابت برای این سرور یافت نشد."
+                await _edit_md(
+                    update.callback_query,
+                    empty_text,
+                    reply_markup=InlineKeyboardMarkup(back_row),
+                )
+                return
+            rows.extend(back_row)
             await _edit_md(
                 update.callback_query,
                 str(settings.get("plans_list_text") or "").strip()

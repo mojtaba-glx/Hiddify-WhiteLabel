@@ -3947,6 +3947,67 @@ class TenantBusinessService:
             for row in self.conn.execute(query, tuple(args)).fetchall()
         ]
 
+    def seed_sample_plans(
+        self, actor_id: int, *, server_id: int
+    ) -> dict[str, Any]:
+        """Create SellBot-style sample fixed plans (idempotent).
+
+        Mirrors Hiddify-SellBot's add_sample_plans.py: categories
+        «یک ماهه»/«سه ماهه» plus three fixed plans scoped to the server.
+        Does nothing when the server already has fixed plans.
+        """
+        self._admin(actor_id)
+        sid = int(server_id)
+        self.server(sid)
+        existing = [
+            p
+            for p in self.list_plans(public=False, server_id=sid)
+            if not str(p.get("name") or "").startswith("__WHITELABEL_")
+        ]
+        if existing:
+            return {"created_categories": 0, "created_plans": 0, "plans": []}
+        wanted = (("یک ماهه", 1), ("سه ماهه", 2))
+        cat_ids: dict[str, int] = {}
+        created_categories = 0
+        for title, priority in wanted:
+            row = self.conn.execute(
+                "SELECT id FROM tenant_plan_categories WHERE tenant_id=? AND title=?",
+                (self.tenant_id, title),
+            ).fetchone()
+            if row is not None:
+                cat_ids[title] = int(row["id"])
+                continue
+            created = self.add_plan_category_admin(
+                actor_id, title=title, priority=priority
+            )
+            cat_ids[title] = int(created["id"])
+            created_categories += 1
+        specs = (
+            ("30 گیگ / 30 روز", 30, 30, 150_000, cat_ids["یک ماهه"]),
+            ("60 گیگ / 30 روز", 60, 30, 230_000, cat_ids["یک ماهه"]),
+            ("150 گیگ / 90 روز", 150, 90, 450_000, cat_ids["سه ماهه"]),
+        )
+        created = []
+        for name, traffic_gb, duration_days, price, category_id in specs:
+            created.append(
+                self.add_plan(
+                    actor_id,
+                    name=name,
+                    traffic_gb=traffic_gb,
+                    duration_days=duration_days,
+                    price=price,
+                    currency="IRR",
+                    category_id=category_id,
+                    priority=0,
+                    server_id=sid,
+                )
+            )
+        return {
+            "created_categories": created_categories,
+            "created_plans": len(created),
+            "plans": created,
+        }
+
     @staticmethod
     def _payment_method_view(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         return payment_method_view(dict(row))
