@@ -173,6 +173,17 @@ async def _render_builder(
     await query.answer()
     from TenantRuntime.UserBot.handlers import _edit_subscription
 
+    # SellBot mixed screen header (Markdown); the plain builder header stays
+    # for pure-dynamic mode.
+    if sales["mode"] == "mixed" and not subid:
+        await _edit_subscription(
+            query,
+            "🛒 **خرید اشتراک**\n\n"
+            "🎛 **بسته دلخواه خود را بسازید یا از پلن‌های آماده استفاده کنید:**",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
+        return
     await _edit_subscription(
         query,
         "📦بسته مورد نیاز خود را جهت خرید تنظیم کنید",

@@ -181,7 +181,9 @@ def test_mixed_location_opens_builder_with_ready_plans_row(
 
     asyncio.run(run())
     text, kwargs = message.sent[-1]
-    assert text == "📦بسته مورد نیاز خود را جهت خرید تنظیم کنید"
+    # SellBot mixed header, not the plain dynamic builder header.
+    assert text.startswith("🛒 **خرید اشتراک**")
+    assert "بسته دلخواه خود را بسازید یا از پلن‌های آماده استفاده کنید" in text
     rows = kwargs["reply_markup"].inline_keyboard
     labels = [[button.text for button in row] for row in rows]
     callbacks = [[button.callback_data for button in row] for row in rows]
