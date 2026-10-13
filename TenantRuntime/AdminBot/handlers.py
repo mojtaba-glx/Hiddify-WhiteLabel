@@ -38,7 +38,7 @@ from Gateway.catalog import RuntimeBotSpec
 from Shared.redaction import redact_text
 from Shared.timeutils import parse_utc, utcnow
 from TenantRuntime.business import TenantBusinessError
-from TenantRuntime.server_admin import ServerAdminService, user_status
+from TenantRuntime.server_admin import ServerAdminService, user_status, provider_kind
 from TenantRuntime.backup import (
     TenantBackupError,
     claim_auto_backup_slot,
@@ -436,7 +436,7 @@ async def _panel_search_detail_view(
     usage = int(row.get("usage_bytes") or 0) / (1024 ** 3)
     limit_bytes = int(row.get("traffic_bytes") or 0)
     limit = limit_bytes / (1024 ** 3) if limit_bytes else 0
-    status = user_status(row)
+    status = user_status(row, provider=provider_kind(server))
     status_text = {
         "active": "🟢وضعیت حساب: فعال",
         "disabled": "⚫وضعیت حساب: غیرفعال",

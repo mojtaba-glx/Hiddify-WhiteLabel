@@ -699,7 +699,8 @@ def test_purchase_plan_sorting_honors_priority_then_selected_mode() -> None:
         plans,
         {
             "plan_sort_by_priority": True,
-            "plan_sort_mode": "price_asc",
+            "plan_sort_mode": "price",
+            "plan_sort_desc": False,
         },
     )
     assert [item["id"] for item in ordered] == [3, 2, 1]
@@ -708,10 +709,36 @@ def test_purchase_plan_sorting_honors_priority_then_selected_mode() -> None:
         plans,
         {
             "plan_sort_by_priority": False,
-            "plan_sort_mode": "price_desc",
+            "plan_sort_mode": "price",
+            "plan_sort_desc": True,
         },
     )
     assert [item["id"] for item in ordered] == [2, 3, 1]
+
+    # SellBot parity: decorated price strings sort numerically, gb maps to
+    # traffic_gb and descending mirrors like the reference implementation.
+    decorated = [
+        {"id": 1, "priority": 0, "price": "70,000 تومان", "traffic_gb": 10, "duration_days": 30},
+        {"id": 2, "priority": 0, "price": 200000, "traffic_gb": 30, "duration_days": 30},
+    ]
+    ordered = user_handlers._sorted_purchase_plans(
+        decorated,
+        {
+            "plan_sort_by_priority": False,
+            "plan_sort_mode": "price",
+            "plan_sort_desc": False,
+        },
+    )
+    assert [item["id"] for item in ordered] == [1, 2]
+    ordered = user_handlers._sorted_purchase_plans(
+        decorated,
+        {
+            "plan_sort_by_priority": False,
+            "plan_sort_mode": "gb",
+            "plan_sort_desc": False,
+        },
+    )
+    assert [item["id"] for item in ordered] == [1, 2]
 
 
 def test_purchase_navigation_is_plan_then_server_then_order() -> None:

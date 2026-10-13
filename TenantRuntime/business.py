@@ -187,10 +187,12 @@ USERBOT_SETTING_DEFAULTS: dict[str, Any] = {
     "button_theme": "smart",
     "colored_buttons": True,
 
-    # Plan/server list layout and catalog.
+    # Plan/server list layout and catalog (SellBot tx_plans parity).
     "plan_categories_enabled": True,
     "plan_sort_by_priority": True,
-    "plan_sort_mode": "id",
+    "plan_sort_mode": "price",
+    "plan_sort_desc": False,
+    "min_transaction_toman": 10000,
     "plan_columns": 1,
     "server_columns": 1,
 
@@ -7145,10 +7147,11 @@ class TenantBusinessService:
 
         # Local import avoids a module-level circular dependency:
         # server_admin imports TenantBusinessError from this module.
-        from TenantRuntime.server_admin import user_status
+        from TenantRuntime.server_admin import provider_kind, user_status
 
         rows = self.conn.execute(
-            "SELECT u.*, srv.label AS server_label "
+            "SELECT u.*, srv.label AS server_label, "
+            "srv.provider_kind AS server_provider_kind, srv.panel_kind AS server_panel_kind "
             "FROM tenant_panel_users u "
             "JOIN tenant_servers srv ON srv.id=u.server_id AND srv.tenant_id=u.tenant_id "
             "WHERE u.tenant_id=? AND u.state!='deleted' "
@@ -7206,7 +7209,13 @@ class TenantBusinessService:
                     service_code = value.strip()
                     break
             item["service_code"] = service_code
-            item["status"] = user_status(item)
+            item["status"] = user_status(
+                item,
+                provider=provider_kind({
+                    "provider_kind": item.get("server_provider_kind"),
+                    "panel_kind": item.get("server_panel_kind"),
+                }),
+            )
 
             if normalized_status and item["status"] != normalized_status:
                 continue
@@ -8125,6 +8134,27 @@ class TenantBusinessService:
             result["purchase_event_channel_id"] = str(
                 result.get("event_channel_id") or ""
             ).strip()
+
+        # SellBot tx_plans parity: legacy WhiteLabel sort taxonomy
+        # (id|price_asc|price_desc|traffic_asc|traffic_desc) maps onto the
+        # SellBot model (mode price|gb|days + plan_sort_desc flag).
+        if "plan_sort_mode" in stored_keys:
+            legacy = str(result.get("plan_sort_mode") or "").strip().lower()
+            mapping = {
+                "id": ("price", False),
+                "price_asc": ("price", False),
+                "price_desc": ("price", True),
+                "traffic_asc": ("gb", False),
+                "traffic_desc": ("gb", True),
+            }
+            if legacy in mapping:
+                mode, desc = mapping[legacy]
+                result["plan_sort_mode"] = mode
+                if "plan_sort_desc" not in stored_keys:
+                    result["plan_sort_desc"] = desc
+        if result.get("plan_sort_mode") not in ("price", "gb", "days"):
+            result["plan_sort_mode"] = "price"
+        result["plan_sort_desc"] = bool(result.get("plan_sort_desc", False))
         return result
 
     def userbot_settings_admin(self, actor_id: int) -> dict[str, Any]:
@@ -8187,7 +8217,7 @@ class TenantBusinessService:
             ):
                 raise ValueError("invalid button theme")
             if name == "plan_sort_mode" and clean not in (
-                "id", "price_asc", "price_desc", "traffic_asc", "traffic_desc"
+                "price", "gb", "days"
             ):
                 raise ValueError("invalid plan sort mode")
             if name == "renew_policy" and clean not in (

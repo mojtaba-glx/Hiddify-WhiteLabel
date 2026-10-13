@@ -2,12 +2,14 @@
 
 import asyncio
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from Shared.timeutils import iso_utc, utcnow
 from TenantRuntime.AdminBot import server_actions
+from TenantRuntime.server_admin import user_status
 from Tests.test_server_management_complete import setup, ui, click, Query
 
 
@@ -164,7 +166,7 @@ def test_frozen_count_is_unique_and_names_keep_both_status_markers(
         (True, 1, -300, None, "offline"),
         (True, 1, 0, False, "offline"),
         (True, 1, 3600, True, "online"),
-        (False, 1, 0, True, "disabled"),
+        (False, 1, 0, True, "expired"),
         (True, 10, 0, True, "expired"),
     ],
 )
@@ -199,3 +201,105 @@ def test_expired_time_and_invalid_last_seen_are_not_online():
     assert server_actions.list_user_status(row, now=now) == "offline"
     row.update(expires_at=iso_utc(now - timedelta(seconds=1)), last_online=iso_utc(now))
     assert server_actions.list_user_status(row, now=now) == "expired"
+
+
+def test_panel_disabled_hiddify_reads_expired_but_xnet_stays_disabled():
+    """SellBot parity: panel-disabled Hiddify users count as expired."""
+    row = dict(
+        state="active",
+        active=False,
+        usage_bytes=1,
+        traffic_bytes=10,
+        expires_at=iso_utc(utcnow() + timedelta(days=10)),
+        extra_json="{}",
+    )
+    assert user_status(row) == "expired"
+    assert user_status(row, provider="hiddify") == "expired"
+    assert user_status(row, provider="xui") == "expired"
+    assert user_status(row, provider="xnet") == "disabled"
+    assert (
+        server_actions.list_user_status(row, now=utcnow(), provider="xnet")
+        == "disabled"
+    )
+    assert (
+        server_actions.list_user_status(row, now=utcnow(), provider="hiddify")
+        == "expired"
+    )
+
+
+def test_tehran_wall_clock_last_online_counts_online_with_fresh_text():
+    """Hiddify reports last_online in Tehran wall clock without an offset.
+
+    It must normalize to UTC at the adapter boundary so the online window
+    matches and the relative line does not render hours off.
+    """
+    from TenantRuntime.hiddify import _panel_wall_to_utc_iso
+
+    tehran_now = datetime.now(ZoneInfo("Asia/Tehran")).replace(tzinfo=None)
+    wall = (tehran_now - timedelta(seconds=30)).strftime("%Y-%m-%d %H:%M:%S")
+    normalized = _panel_wall_to_utc_iso(wall)
+    assert normalized is not None and normalized.endswith("Z")
+
+    now = utcnow()
+    row = dict(
+        state="active",
+        active=True,
+        usage_bytes=1,
+        traffic_bytes=10,
+        expires_at=iso_utc(now + timedelta(days=10)),
+        last_online=normalized,
+        last_synced_at=iso_utc(now),
+        extra_json="{}",
+    )
+    assert server_actions.list_user_status(row, now=now) == "online"
+    line = server_actions._relative_last_online(normalized)
+    assert "ساعت پیش" not in line and "روز پیش" not in line
+
+
+def test_panel_sentinel_and_garbage_last_online_normalize_to_none():
+    """Never-connected sentinels (0001-01-01) must not crash the refresh."""
+    from TenantRuntime.hiddify import _panel_wall_to_utc_iso
+
+    assert _panel_wall_to_utc_iso("0001-01-01 00:00:00") is None
+    assert _panel_wall_to_utc_iso("") is None
+    assert _panel_wall_to_utc_iso(None) is None
+    assert _panel_wall_to_utc_iso("not-a-date") is None
+    # Aware values pass through as UTC unchanged.
+    assert _panel_wall_to_utc_iso("2026-10-13T05:00:00Z") == "2026-10-13T05:00:00Z"
+
+
+def test_failed_edit_falls_back_to_fresh_message_instead_of_silent_death():
+    """A tap must always produce something visible (SellBot parity)."""
+    from telegram.error import BadRequest
+
+    sent: list[tuple] = []
+
+    class DeadMessage:
+        async def reply_text(self, text, reply_markup=None, **kwargs):
+            sent.append((text, reply_markup, kwargs))
+
+    class FailingQuery:
+        message = DeadMessage()
+
+        def __init__(self, error):
+            self._error = error
+
+        async def edit_message_text(self, *args, **kwargs):
+            raise self._error
+
+    async def run():
+        query = FailingQuery(BadRequest("message to edit not found"))
+        await server_actions.edit(query, "hello", [], html=False)
+        assert len(sent) == 1 and sent[0][0] == "hello"
+
+        sent.clear()
+        query = FailingQuery(BadRequest("Message is not modified"))
+        await server_actions.edit(query, "hello", [], html=False)
+        assert sent == []
+
+        sent.clear()
+        query = FailingQuery(RuntimeError("transient network failure"))
+        await server_actions.edit(query, "hello", [], html=False)
+        assert len(sent) == 1 and sent[0][0] == "hello"
+
+    asyncio.run(run())

@@ -13,14 +13,16 @@ from io import BytesIO
 import qrcode
 from telegram import InlineKeyboardMarkup
 from telegram.error import BadRequest
+from Shared.redaction import get_logger, safe_format_exception
 from TenantRuntime.button_styles import inline_button as Button
-from TenantRuntime.server_admin import ServerAdminService, user_status, DEFAULT_SALES
+from TenantRuntime.server_admin import ServerAdminService, user_status, provider_kind, DEFAULT_SALES
 from TenantRuntime.business import TenantBusinessError
 from TenantRuntime.panels import PanelError
 from TenantRuntime.smart_subscription import decode_subscription_lines
 from Shared.timeutils import iso_utc, utcnow, format_tehran, parse_utc
 
 FLOW = "server_admin_flow"
+logger = get_logger(__name__)
 STATUS_LABELS = {
     "active": "🟢 فعال",
     "disabled": "⚫ غیرفعال",
@@ -556,7 +558,7 @@ def _user_detail_text(service, actor: int, sid: int, uid: int, row: dict) -> str
         if labels
         else f"⬖ سرور: {escape(str(service.b.server(sid).get('label') or 'نامشخص'))}"
     )
-    status = user_status(row)
+    status = user_status(row, provider=provider_kind(service.b.server(int(sid))))
     return "\n".join(
         [
             header,
@@ -642,6 +644,22 @@ def _creation_summary(flow: dict) -> str:
     )
 
 
+async def _send_fresh(query, text, rows, *, html=False):
+    """Fallback when the original message cannot be edited (deleted/expired).
+
+    Without this, a tap dies silently and the button looks broken.
+    """
+    message = getattr(query, "message", None)
+    if message is None:
+        raise TenantBusinessError("original message is unavailable")
+    await message.reply_text(
+        text,
+        reply_markup=markup(rows),
+        parse_mode="HTML" if html else None,
+        disable_web_page_preview=True,
+    )
+
+
 async def edit(query, text, rows, *, html=False):
     try:
         await query.edit_message_text(
@@ -651,8 +669,20 @@ async def edit(query, text, rows, *, html=False):
             disable_web_page_preview=True,
         )
     except BadRequest as exc:
-        if "message is not modified" not in str(exc).lower():
-            raise
+        if "message is not modified" in str(exc).lower():
+            return
+        logger.warning(
+            "Server action edit failed, sending fresh message: %s",
+            safe_format_exception(exc),
+        )
+        await _send_fresh(query, text, rows, html=html)
+    except Exception as exc:
+        # Transient Telegram/network failures must not silently kill the tap.
+        logger.warning(
+            "Server action edit failed, sending fresh message: %s",
+            safe_format_exception(exc),
+        )
+        await _send_fresh(query, text, rows, html=html)
 
 
 async def paged_edit(query, context, sid, text, rows, *, html=False, page=0, key=None):
@@ -690,9 +720,9 @@ async def prompt(update, context, flow, text):
     await update.effective_message.reply_text(text, reply_markup=cancel_keyboard())
 
 
-def list_user_status(row, *, now):
+def list_user_status(row, *, now, provider=None):
     """Presentation status only; never change account or quota enforcement."""
-    state = user_status(row)
+    state = user_status(row, provider=provider)
     if state == "expired":
         return "expired"
     if state != "active":
@@ -737,7 +767,8 @@ async def send_list(query, service, actor, sid, *, page=0, status="all"):
     )
     frozen_ids = {r["user_id"] for r in service.frozen(actor, sid)}
     now = utcnow()
-    states = {r["id"]: list_user_status(r, now=now) for r in items}
+    kind = provider_kind(service.b.server(int(sid)))
+    states = {r["id"]: list_user_status(r, now=now, provider=kind) for r in items}
     counts = {
         state: sum(value == state for value in states.values())
         for state in ("online", "offline", "disabled", "expired")

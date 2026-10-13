@@ -453,7 +453,9 @@ async def _show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def _show_backup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     actor = int(_actor_id(update) or 0)
     settings = _portal(context).get_platform_settings(actor)
-    text, keyboard = backup_settings_view(settings)
+    text, keyboard = backup_settings_view(
+        settings, has_passphrase=bool(_backup_passphrase())
+    )
     await _render(update, text, keyboard)
 
 
@@ -564,6 +566,12 @@ async def _verify_restored_backup(
             back_keyboard("menu:backup"),
         )
         return
+    await _render_backup_summary(update, path, manifest)
+
+
+async def _render_backup_summary(
+    update: Update, path: Path, manifest: dict[str, Any]
+) -> None:
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     await _render(
         update,
@@ -575,6 +583,27 @@ async def _verify_restored_backup(
         "⚠️ بازیابی از تلگرام انجام نمی‌شود؛ حتماً از ترمینال و با سرویس‌های متوقف اجرا کنید.",
         back_keyboard("menu:backup"),
     )
+
+
+async def _try_stored_passphrase_verify(update: Update, path: Path) -> bool:
+    """Verify an uploaded backup with the stored passphrase, if any."""
+    from Ops.backup import BackupError, _decrypt_archive
+
+    stored = _backup_passphrase()
+    if len(stored.encode("utf-8")) < 12:
+        return False
+    try:
+        content = _decrypt_archive(path, stored)
+        manifest = json.loads(content["manifest.json"].decode("utf-8"))
+    except BackupError:
+        return False
+    except Exception as exc:
+        logger.warning("MasterBot stored-passphrase verify failed: %s", safe_format_exception(exc))
+        return False
+    finally:
+        stored = ""
+    await _render_backup_summary(update, path, manifest)
+    return True
 
 
 async def handle_backup_document(
@@ -625,6 +654,9 @@ async def handle_backup_document(
         )
         return
     context.user_data["flow"] = {"kind": "backup_restore_passphrase", "backup_file": str(target)}
+    if await _try_stored_passphrase_verify(update, target):
+        context.user_data.pop("flow", None)
+        return
     await message.reply_text(
         f"📥 فایل `{safe_name}` دریافت شد.\n\n"
         "🔐 حالا رمز همان بکاپ را بفرستید؛ پیام بلافاصله حذف می‌شود.",
@@ -1427,6 +1459,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             await _show_backup(update, context)
             return
+        if data.startswith("backup:interval:"):
+            try:
+                hours = int(data.rsplit(":", 1)[1])
+                _portal(context).set_backup_interval(actor, hours)
+            except (ValueError, TypeError):
+                pass
+            await _show_backup(update, context)
+            return
         if data == "backup:now":
             passphrase = _backup_passphrase()
             if passphrase:
@@ -1446,8 +1486,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await _render(
                 update,
                 "📥 فایل بکاپ (`.wlbak`) را همین‌جا ارسال کنید.\n\n"
-                "بعد از آپلود، رمز بکاپ پرسیده می‌شود و فایل فقط بررسی و گزارش می‌شود.\n"
+                "اگر رمز بکاپ را قبلاً با دکمه «🔐 تنظیم رمز بکاپ» ذخیره کرده باشید،\n"
+                "فایل خودکار بررسی می‌شود؛ وگرنه بعد از آپلود رمز پرسیده می‌شود.\n"
                 "بازیابی نهایی باید از ترمینال و با سرویس‌های متوقف انجام شود.",
+                back_keyboard("menu:backup"),
+            )
+            return
+        if data == "backup:passphrase":
+            context.user_data["flow"] = {"kind": "backup_set_passphrase"}
+            await _render(
+                update,
+                "🔐 رمز جدید بکاپ را بفرستید (حداقل ۱۲ کاراکتر).\n"
+                "پیام شما بلافاصله حذف می‌شود و رمز فقط در فایل امن سرور ذخیره می‌شود.\n"
+                "از این به بعد بکاپ فوری و بازیابی با همین رمز کار می‌کنند.",
                 back_keyboard("menu:backup"),
             )
             return
@@ -1863,6 +1914,49 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await _verify_restored_backup(update, passphrase, backup_file)
             finally:
                 passphrase = ""
+            return
+        if kind == "backup_set_passphrase":
+            passphrase = text
+            text = ""
+            try:
+                await update.effective_message.delete()
+            except Exception as exc:
+                logger.warning(
+                    "Could not delete the submitted backup passphrase: %s",
+                    safe_format_exception(exc),
+                )
+            if len(passphrase.encode("utf-8")) < 12:
+                await _render(
+                    update,
+                    "❌ رمز بکاپ باید حداقل ۱۲ کاراکتر باشد. دوباره بفرستید.",
+                    back_keyboard("menu:backup"),
+                )
+                passphrase = ""
+                return
+            context.user_data.pop("flow", None)
+            try:
+                _portal(context).set_backup_passphrase(
+                    actor, passphrase, env_path=str(_master_env_file())
+                )
+            except (ValueError, OSError) as exc:
+                logger.warning(
+                    "MasterBot backup passphrase save failed: %s",
+                    safe_format_exception(exc),
+                )
+                await _render(
+                    update,
+                    "❌ ذخیره رمز ناموفق بود. دوباره تلاش کنید.",
+                    back_keyboard("menu:backup"),
+                )
+                return
+            finally:
+                passphrase = ""
+            if update.effective_chat is not None:
+                await update.effective_chat.send_message(
+                    "✅ رمز بکاپ ذخیره شد.\n"
+                    "از این به بعد بکاپ فوری و بازیابی با همین رمز کار می‌کنند."
+                )
+            await _show_backup(update, context)
             return
         if kind in ("license_new_tenant", "license_new_plan"):
             await update.effective_message.reply_text(

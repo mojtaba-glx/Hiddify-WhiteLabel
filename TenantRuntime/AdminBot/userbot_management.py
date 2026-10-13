@@ -256,6 +256,60 @@ def _bool_icon(value: Any) -> str:
     return "✅" if bool(value) else "❌"
 
 
+def _tx_plan_categories_mode_rows(s: dict[str, Any]) -> list[list[InlineKeyboardButton]]:
+    enabled = bool(s.get("plan_categories_enabled", True))
+    simple_icon = "✅" if not enabled else "❌"
+    categorized_icon = "✅" if enabled else "❌"
+    return [
+        [
+            InlineKeyboardButton(
+                f"{simple_icon} | ساده",
+                callback_data="userbot:settings:tx_plans:plan_categories_mode:set:simple",
+            ),
+            InlineKeyboardButton(
+                f"{categorized_icon} | دسته‌بندی",
+                callback_data="userbot:settings:tx_plans:plan_categories_mode:set:categorized",
+            ),
+        ],
+        [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:tx_plans")],
+    ]
+
+
+def _tx_plan_sort_mode_rows(s: dict[str, Any]) -> list[list[InlineKeyboardButton]]:
+    mode = str(s.get("plan_sort_mode") or "price").strip().lower()
+    desc = bool(s.get("plan_sort_desc", False))
+    price_icon = "✅" if mode == "price" else "❌"
+    gb_icon = "✅" if mode == "gb" else "❌"
+    days_icon = "✅" if mode == "days" else "❌"
+    asc_icon = "✅" if not desc else "❌"
+    desc_icon = "✅" if desc else "❌"
+    return [
+        [InlineKeyboardButton(
+            f"{price_icon} | مرتب سازی بر اساس قیمت",
+            callback_data="userbot:settings:tx_plans:plan_sort_mode:set:price",
+        )],
+        [InlineKeyboardButton(
+            f"{gb_icon} | مرتب سازی بر اساس حجم",
+            callback_data="userbot:settings:tx_plans:plan_sort_mode:set:gb",
+        )],
+        [InlineKeyboardButton(
+            f"{days_icon} | مرتب سازی بر اساس زمان",
+            callback_data="userbot:settings:tx_plans:plan_sort_mode:set:days",
+        )],
+        [
+            InlineKeyboardButton(
+                f"{desc_icon} | نزولی",
+                callback_data="userbot:settings:tx_plans:plan_sort_dir:set:desc",
+            ),
+            InlineKeyboardButton(
+                f"{asc_icon} | صعودی",
+                callback_data="userbot:settings:tx_plans:plan_sort_dir:set:asc",
+            ),
+        ],
+        [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:tx_plans")],
+    ]
+
+
 def _card_methods(business: Any, actor: int) -> list[dict[str, Any]]:
     """Active-family card methods (card_manual provider)."""
     return [
@@ -2405,38 +2459,29 @@ async def _settings_section(update: Update, business: Any, actor: int, section: 
         return
 
     if section == "tx_plans":
-        categories = business.list_plan_categories(public=False)
+        random_icon = "✅" if s.get("random_tx_spec", False) else "❌"
         rows = [
             [InlineKeyboardButton(
-                f"📂 دسته‌بندی پلن‌ها | {_bool_icon(s.get('plan_categories_enabled'))}",
-                callback_data="userbot:settings:tx_plans:plan_categories_enabled",
+                f"🔢مشخصه تصادفی تراکنش | {random_icon}",
+                callback_data="userbot:settings:tx_plans:random_tx_spec",
             )],
             [InlineKeyboardButton(
-                f"🗂 مدیریت دسته‌ها | {len(categories)}",
-                callback_data="userbot:settings:tx_plans:categories",
+                "🧲محدودیت حداقل تراکنش",
+                callback_data="userbot:settings:tx_plans:min_tx",
             )],
             [InlineKeyboardButton(
-                f"🔢 اولویت دستی پلن‌ها | {_bool_icon(s.get('plan_sort_by_priority'))}",
-                callback_data="userbot:settings:tx_plans:plan_sort_by_priority",
+                "🗂دسته بندی پلن‌ها",
+                callback_data="userbot:settings:tx_plans:plan_categories_mode:menu",
             )],
             [InlineKeyboardButton(
-                f"↕️ ترتیب پلن‌ها | {s.get('plan_sort_mode')}",
+                "🔢ترتیب پلن‌ها",
                 callback_data="userbot:settings:tx_plans:plan_sort_mode:menu",
-            )],
-            [InlineKeyboardButton(
-                f"📋 ستون‌های پلن‌ها | {s.get('plan_columns')}",
-                callback_data="userbot:settings:buy_renew:plan_columns:menu",
-            )],
-            [InlineKeyboardButton(
-                f"🛰 ستون‌های سرورها | {s.get('server_columns')}",
-                callback_data="userbot:settings:buy_renew:server_columns:menu",
             )],
             [InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings_menu")],
         ]
         await _edit_or_send(
             update,
-            "🧮 تنظیمات تراکنشات و پلن ها\n\n"
-            "دسته‌بندی، ترتیب و ستون‌های این بخش مستقیماً روی مسیر خرید UserBot اعمال می‌شوند.",
+            "🧮تنظیمات تراکنشات و پلن ها",
             InlineKeyboardMarkup(rows),
         )
         return
@@ -3893,27 +3938,87 @@ async def handle_callback(
         )
         return True
 
+    if data == "userbot:settings:tx_plans:random_tx_spec":
+        business.toggle_userbot_setting_admin(actor, key="random_tx_spec")
+        await _settings_section(update, business, actor, "tx_plans")
+        return True
+
+    if data == "userbot:settings:tx_plans:min_tx":
+        current = business.userbot_settings_admin(actor).get("min_transaction_toman") or 10000
+        try:
+            current = int(current)
+        except (TypeError, ValueError):
+            current = 10000
+        context.user_data[FLOW_KEY] = {"kind": "tx_min_transaction"}
+        await query.message.reply_text(
+            f"📝 مقدار فعلی: {current:,} تومان\n"
+            "💳 لطفاً حداقل مبلغ مجاز تراکنش را وارد کنید:",
+            reply_markup=userbot_cancel_keyboard(),
+        )
+        return True
+
+    if data == "userbot:settings:tx_plans:plan_categories_mode:menu":
+        s = business.userbot_settings_admin(actor)
+        await _edit_or_send(
+            update,
+            "🧮تنظیمات تراکنشات و پلن ها",
+            InlineKeyboardMarkup(_tx_plan_categories_mode_rows(s)),
+        )
+        return True
+    if data.startswith("userbot:settings:tx_plans:plan_categories_mode:set:"):
+        mode = data.rsplit(":", 1)[1].strip().lower()
+        if mode == "simple":
+            business.set_userbot_setting_admin(
+                actor, key="plan_categories_enabled", value=False
+            )
+        elif mode == "categorized":
+            business.set_userbot_setting_admin(
+                actor, key="plan_categories_enabled", value=True
+            )
+        else:
+            await query.answer("گزینه نامعتبر است.", show_alert=True)
+            return True
+        s = business.userbot_settings_admin(actor)
+        await _edit_or_send(
+            update,
+            "🧮تنظیمات تراکنشات و پلن ها",
+            InlineKeyboardMarkup(_tx_plan_categories_mode_rows(s)),
+        )
+        return True
+
     if data == "userbot:settings:tx_plans:plan_sort_mode:menu":
         s = business.userbot_settings_admin(actor)
-        current = str(s.get("plan_sort_mode") or "id")
-        choices = [
-            ("id", "پیش‌فرض"),
-            ("price_asc", "قیمت کم به زیاد"),
-            ("price_desc", "قیمت زیاد به کم"),
-            ("traffic_asc", "حجم کم به زیاد"),
-            ("traffic_desc", "حجم زیاد به کم"),
-        ]
-        rows = [[InlineKeyboardButton(
-            f"{'✅ ' if current == value else ''}{title}",
-            callback_data=f"userbot:settings:tx_plans:plan_sort_mode:{value}",
-        )] for value, title in choices]
-        rows.append([InlineKeyboardButton("🔙بازگشت", callback_data="userbot:settings:tx_plans")])
-        await _edit_or_send(update, "🔢 ترتیب نمایش پلن‌ها", InlineKeyboardMarkup(rows))
+        await _edit_or_send(
+            update,
+            "🧮تنظیمات تراکنشات و پلن ها",
+            InlineKeyboardMarkup(_tx_plan_sort_mode_rows(s)),
+        )
         return True
-    if data.startswith("userbot:settings:tx_plans:plan_sort_mode:"):
-        value = data.rsplit(":", 1)[1]
-        business.set_userbot_setting_admin(actor, key="plan_sort_mode", value=value)
-        await _settings_section(update, business, actor, "tx_plans")
+    if data.startswith("userbot:settings:tx_plans:plan_sort_mode:set:"):
+        mode = data.rsplit(":", 1)[1].strip().lower()
+        business.set_userbot_setting_admin(
+            actor,
+            key="plan_sort_mode",
+            value=mode if mode in {"price", "gb", "days"} else "price",
+        )
+        s = business.userbot_settings_admin(actor)
+        await _edit_or_send(
+            update,
+            "🧮تنظیمات تراکنشات و پلن ها",
+            InlineKeyboardMarkup(_tx_plan_sort_mode_rows(s)),
+        )
+        return True
+    if data.startswith("userbot:settings:tx_plans:plan_sort_dir:set:"):
+        direction = data.rsplit(":", 1)[1].strip().lower()
+        business.set_userbot_setting_admin(
+            actor, key="plan_sort_desc", value=True if direction == "desc" else False
+        )
+        s = business.userbot_settings_admin(actor)
+        await _edit_or_send(
+            update,
+            "🧮تنظیمات تراکنشات و پلن ها",
+            InlineKeyboardMarkup(_tx_plan_sort_mode_rows(s)),
+        )
         return True
 
     if data == "userbot:settings:subscription:trial_spec":
@@ -4580,13 +4685,13 @@ async def handle_callback(
         s = business.userbot_settings_admin(actor)
         value = (int(s.get("plan_columns") or 1) % 3) + 1
         business.set_userbot_setting_admin(actor, key="plan_columns", value=value)
-        await _settings_section(update, business, actor, "tx_plans")
+        await _settings_section(update, business, actor, "buy_renew")
         return True
     if data == "userbot:settings:servercol":
         s = business.userbot_settings_admin(actor)
         value = (int(s.get("server_columns") or 1) % 3) + 1
         business.set_userbot_setting_admin(actor, key="server_columns", value=value)
-        await _settings_section(update, business, actor, "tx_plans")
+        await _settings_section(update, business, actor, "buy_renew")
         return True
     if data in {"userbot:settings:trial", "userbot:settings:reminders"}:
         target = (
@@ -5097,6 +5202,29 @@ async def handle_text(
                 "✅ اولویت دسته ذخیره شد.",
                 reply_markup=admin_main_keyboard(),
             )
+            return True
+        if kind=="tx_min_transaction":
+            try:
+                value = int(text.replace(",", ""))
+                if value <= 0:
+                    raise ValueError("min transaction")
+            except (TypeError, ValueError):
+                await update.effective_message.reply_text(
+                    "❌ لطفاً عدد صحیح بزرگ‌تر از صفر وارد کنید (تومان).",
+                    reply_markup=userbot_cancel_keyboard(),
+                )
+                return True
+            business.set_userbot_setting_admin(
+                actor,
+                key="min_transaction_toman",
+                value=value,
+            )
+            context.user_data.pop(FLOW_KEY,None)
+            await update.effective_message.reply_text(
+                f"✅ حداقل تراکنش روی {value:,} تومان تنظیم شد.",
+                reply_markup=admin_main_keyboard(),
+            )
+            await _settings_section(update,business,actor,"tx_plans")
             return True
         if kind=="renew_setting_int":
             key=str(flow["key"])

@@ -81,8 +81,8 @@ def build_application(
     )
     application.job_queue.run_repeating(
         run_backup_job,
-        interval=24 * 60 * 60,
-        first=24 * 60 * 60,
+        interval=60 * 60,
+        first=60 * 60,
         name="master-auto-backup",
     )
     return application, connection
@@ -103,11 +103,11 @@ async def run_license_job(context) -> None:
         logger.error("License job cycle failed: %s", safe_format_exception(exc))
 
 
-AUTO_BACKUP_RETENTION = 7
+AUTO_BACKUP_RETENTION = 14
 
 
 async def run_backup_job(context) -> None:
-    """Daily encrypted full backup when the owner enabled auto-send."""
+    """Hourly check; sends an encrypted full backup when the cadence is due."""
     from Ops.backup import BackupError, create_backup
 
     portal = context.application.bot_data.get("customer_portal_service")
@@ -121,6 +121,23 @@ async def run_backup_job(context) -> None:
         return
     if not bool(status.get("auto_backup_enabled")):
         return
+    try:
+        interval_hours = int(status.get("auto_backup_interval_hours") or 12)
+    except (TypeError, ValueError):
+        interval_hours = 12
+    if interval_hours not in (6, 12, 24):
+        interval_hours = 12
+    last_at = str(status.get("backup_last_at") or "")
+    if last_at:
+        try:
+            from Shared.timeutils import parse_utc, utcnow
+
+            age_hours = (utcnow() - parse_utc(last_at)).total_seconds() / 3600
+            if age_hours < interval_hours:
+                return
+        except Exception as exc:
+            logger.warning("Auto-backup schedule check failed: %s", safe_format_exception(exc))
+            return
     passphrase = str(os.environ.get("BACKUP_PASSPHRASE", "") or "")
     if len(passphrase.encode("utf-8")) < 12:
         logger.warning("Auto-backup skipped: BACKUP_PASSPHRASE is not configured")

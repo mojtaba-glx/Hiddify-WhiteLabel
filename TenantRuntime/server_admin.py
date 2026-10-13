@@ -52,7 +52,15 @@ DEFAULT_SALES = dict(
 )
 
 
-def user_status(row):
+def provider_kind(server) -> str:
+    """Effective provider for status parity (X-NET keeps its own states)."""
+    data = server or {}
+    return str(
+        data.get("provider_kind") or data.get("panel_kind") or "hiddify"
+    ).lower()
+
+
+def user_status(row, *, provider=None):
     if row.get("state") == "pending":
         return "pending"
     if row.get("state") == "deleted":
@@ -66,7 +74,16 @@ def user_status(row):
             due = due or parse_utc(row["expires_at"]) <= utcnow()
         except (ValueError, TypeError):
             pass
-    return "expired" if due else "active" if row.get("active") else "disabled"
+    if due:
+        return "expired"
+    if row.get("active"):
+        return "active"
+    # SellBot parity: a panel-disabled Hiddify/X-UI user reads as expired
+    # (it cannot connect regardless of dates/quota).  X-NET keeps an
+    # explicit inactive ("disabled") state like SellBot's xnet branch.
+    if str(provider or "hiddify").lower() == "xnet":
+        return "disabled"
+    return "expired"
 
 
 class ServerAdminService:
@@ -168,6 +185,7 @@ class ServerAdminService:
 
     def users(self, actor, sid, *, query="", status="all"):
         self.authorize(actor, sid)
+        kind = provider_kind(self.b.server(int(sid)))
         rows = [
             dict(x)
             for x in self.conn.execute(
@@ -185,7 +203,7 @@ class ServerAdminService:
                     for k in ("name", "external_ref", "comment", "id")
                 )
             ]
-        return [r for r in rows if status == "all" or user_status(r) == status]
+        return [r for r in rows if status == "all" or user_status(r, provider=kind) == status]
 
     def user(self, actor, sid, uid):
         self.authorize(actor, sid)
@@ -709,7 +727,8 @@ class ServerAdminService:
     async def toggle_user(self, actor, sid, uid):
         row, targets = self.related_targets(actor, sid, uid)
         enabled = not bool(row["active"])
-        if enabled and user_status(row) == "expired":
+        kind = provider_kind(self.b.server(int(sid)))
+        if enabled and user_status(row, provider=kind) == "expired":
             raise TenantBusinessError("expired user must be renewed first")
         if row["subscription_id"]:
             self.b.set_subscription_enabled(

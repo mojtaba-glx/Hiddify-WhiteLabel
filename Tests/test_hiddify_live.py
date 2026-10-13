@@ -286,7 +286,8 @@ def test_usage_refreshes_official_counter_and_preserves_last_online() -> None:
     usage = adapter.usage(target=_target(), secret="api-key", external_ref="u-2")
     assert usage.usage_bytes == int(1.5 * 1024**3)
     assert usage.active is True
-    assert usage.last_online == "2026-09-29 00:15:00"
+    # Panel wall clock (Asia/Tehran) normalizes to UTC at the adapter boundary.
+    assert usage.last_online == "2026-09-28T20:45:00Z"
     assert any(path.endswith("/api/v2/admin/update_user_usage/") for path in calls)
 
 

@@ -1668,9 +1668,13 @@ def _button(
 def _column_rows(
     buttons: list[TelegramInlineKeyboardButton],
     columns: int,
+    *,
+    rtl: bool = False,
 ) -> list[list[TelegramInlineKeyboardButton]]:
     cols = max(1, min(int(columns or 1), 3))
-    return [buttons[i:i + cols] for i in range(0, len(buttons), cols)]
+    rows = [buttons[i:i + cols] for i in range(0, len(buttons), cols)]
+    # SellBot parity: descending order mirrors multi-column rows (RTL).
+    return [list(reversed(chunk)) if rtl else chunk for chunk in rows]
 
 
 def _ordered_indexed(
@@ -2095,6 +2099,7 @@ def _renew_plan_buttons(
     return _column_rows(
         buttons,
         int(settings.get("plan_columns") or 1),
+        rtl=bool(settings.get("plan_sort_desc", False)),
     )
 
 
@@ -2286,18 +2291,35 @@ def _sorted_purchase_plans(
     plans: list[dict[str, Any]],
     settings: dict[str, Any],
 ) -> list[dict[str, Any]]:
+    """SellBot _sort_plans parity: mode price|gb|days + direction flag.
+
+    Values tolerate decorated strings (e.g. "70,000 تومان").  The tenant
+    priority column stays as a stable secondary key like before.
+    """
     items = list(plans)
-    sort_mode = str(settings.get("plan_sort_mode") or "id")
-    if sort_mode == "price_asc":
-        items.sort(key=lambda p: (int(p.get("price") or 0), int(p["id"])))
-    elif sort_mode == "price_desc":
-        items.sort(key=lambda p: (-int(p.get("price") or 0), int(p["id"])))
-    elif sort_mode == "traffic_asc":
-        items.sort(key=lambda p: (int(p.get("traffic_gb") or 0), int(p["id"])))
-    elif sort_mode == "traffic_desc":
-        items.sort(key=lambda p: (-int(p.get("traffic_gb") or 0), int(p["id"])))
-    else:
-        items.sort(key=lambda p: int(p["id"]))
+    mode = str(settings.get("plan_sort_mode") or "price").strip().lower()
+    desc = bool(settings.get("plan_sort_desc", False))
+    key_name = (
+        "price"
+        if mode == "price"
+        else ("traffic_gb" if mode == "gb" else "duration_days")
+    )
+
+    def _sort_number(value: Any) -> float:
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value or "").strip().replace(",", "").replace("،", "")
+        if not text:
+            return 0.0
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        if not match:
+            return 0.0
+        try:
+            return float(match.group(0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    items.sort(key=lambda p: _sort_number(p.get(key_name)), reverse=desc)
     if bool(settings.get("plan_sort_by_priority", True)):
         items.sort(key=lambda p: int(p.get("priority") or 0))
     return items
@@ -2344,6 +2366,7 @@ def _plan_buttons(
     return _column_rows(
         buttons,
         int(settings.get("plan_columns") or 1),
+        rtl=bool(settings.get("plan_sort_desc", False)),
     )
 
 
@@ -4993,6 +5016,19 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 amount = int(text.replace(",", "").replace("٬", "").strip())
                 if amount <= 0:
                     raise ValueError("invalid wallet topup")
+                settings = business.runtime_userbot_settings()
+                try:
+                    min_tx = int(settings.get("min_transaction_toman") or 1)
+                except (TypeError, ValueError):
+                    min_tx = 1
+                if amount < min_tx:
+                    await update.effective_message.reply_text(
+                        f"❌ حداقل مبلغ مجاز تراکنش {min_tx:,} تومان است.",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("↩️ کیف پول", callback_data="shop:wallet")
+                        ]]),
+                    )
+                    return
                 method_id = int(flow["method_id"])
                 currency = str(flow["currency"])
                 topup = business.create_wallet_topup(

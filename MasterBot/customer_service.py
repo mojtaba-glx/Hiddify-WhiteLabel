@@ -7,10 +7,14 @@ only.  Multi-step balance/payment transitions use one IMMEDIATE transaction.
 
 from __future__ import annotations
 
+import os
 import secrets
 import sqlite3
+import stat
+import tempfile
 from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from Database.connection import transaction
@@ -995,6 +999,7 @@ class CustomerPortalService:
         return {
             "auto_backup_enabled": bool(settings.get("auto_backup_enabled")),
             "backup_last_at": str(settings.get("backup_last_at") or ""),
+            "auto_backup_interval_hours": int(settings.get("auto_backup_interval_hours") or 12),
         }
 
     def set_backup_auto(self, actor_id: int, enabled: bool) -> dict[str, Any]:
@@ -1005,6 +1010,76 @@ class CustomerPortalService:
                 actor_id=int(actor_id), tenant_id=None,
                 action="platform_backup.auto_toggle", entity_type="platform_setting",
                 entity_id="auto_backup_enabled", metadata={"enabled": bool(enabled)},
+            )
+        return self.get_backup_status(actor_id)
+
+    def set_backup_interval(self, actor_id: int, hours: int) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        from MasterBot.platform_settings import BACKUP_INTERVAL_PRESETS
+
+        try:
+            value = int(hours)
+        except (TypeError, ValueError):
+            raise ValueError("invalid backup interval") from None
+        if value not in BACKUP_INTERVAL_PRESETS:
+            raise ValueError("invalid backup interval")
+        with transaction(self.conn):
+            self.settings.set_text("auto_backup_interval_hours", str(value), maximum=10)
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id), tenant_id=None,
+                action="platform_backup.interval", entity_type="platform_setting",
+                entity_id="auto_backup_interval_hours", metadata={"hours": value},
+            )
+        return self.get_backup_status(actor_id)
+
+    def set_backup_passphrase(
+        self, actor_id: int, passphrase: str, *, env_path: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Store the full-backup passphrase in the server .env file.
+
+        The secret itself is never written to the database, audit log or
+        Telegram chat; only the fact that it changed is audited.
+        """
+        require_master_admin(actor_id, self.master_admin_id)
+        clean = str(passphrase or "").strip()
+        if len(clean.encode("utf-8")) < 12:
+            raise ValueError("backup passphrase must contain at least 12 bytes")
+        if len(clean) > 200 or any(ch in clean for ch in "\r\n\x00"):
+            raise ValueError("backup passphrase is invalid")
+        target = Path(env_path) if env_path else Path(__file__).resolve().parents[1] / ".env"
+        if not target.is_file():
+            raise ValueError("environment file is missing")
+        original = target.read_text(encoding="utf-8").splitlines()
+        rendered: list[str] = []
+        replaced = False
+        for line in original:
+            if line.startswith("BACKUP_PASSPHRASE="):
+                if not replaced:
+                    rendered.append("BACKUP_PASSPHRASE=" + clean)
+                    replaced = True
+                continue
+            rendered.append(line)
+        if not replaced:
+            rendered.append("BACKUP_PASSPHRASE=" + clean)
+        mode = stat.S_IMODE(target.stat().st_mode) or 0o600
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=target.parent, delete=False
+        ) as handle:
+            temp = Path(handle.name)
+            handle.write("\n".join(rendered).rstrip("\n") + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(temp, mode)
+            os.replace(temp, target)
+        finally:
+            temp.unlink(missing_ok=True)
+        os.environ["BACKUP_PASSPHRASE"] = clean
+        with transaction(self.conn):
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id), tenant_id=None,
+                action="platform_backup.passphrase_set", entity_type="platform_setting",
+                entity_id="BACKUP_PASSPHRASE", metadata={"configured": True},
             )
         return self.get_backup_status(actor_id)
 

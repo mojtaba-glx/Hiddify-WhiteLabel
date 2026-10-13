@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -178,6 +179,34 @@ def _parse_utcish_datetime(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _panel_wall_to_utc_iso(value: Any) -> str | None:
+    """Normalize a Hiddify wall-clock timestamp to UTC ISO-8601.
+
+    Hiddify Manager reports ``last_online`` in the panel host's local wall
+    clock (Asia/Tehran for Iranian panels) without an offset.  Storing it
+    verbatim makes every UTC comparison shift by the local offset: the
+    online window never matches and relative last-seen times render hours
+    off.  Offset-aware values are passed through as UTC unchanged.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        text = raw[:-1] + "+00:00" if raw[-1:] in ("Z", "z") else raw
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        if parsed.year < 1971:
+            # Never-connected sentinels (e.g. 0001-01-01) carry no instant.
+            return None
+        parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Tehran"))
+    try:
+        return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    except (OverflowError, ValueError):
+        return None
 
 
 def _parse_major(version: Any) -> int:
@@ -434,11 +463,7 @@ class HiddifyPanelAdapter:
             days = int(data.get("package_days") or 0)
             if start is not None and days > 0:
                 expires = (start + timedelta(days=days)).isoformat().replace("+00:00", "Z")
-        last_online = (
-            str(data.get("last_online")).strip()
-            if data.get("last_online") not in (None, "")
-            else None
-        )
+        last_online = _panel_wall_to_utc_iso(data.get("last_online"))
         return PanelUserResult(
             external_ref=ref,
             usage_bytes=_gb_to_bytes(data.get("current_usage_GB")),

@@ -18,9 +18,13 @@ DEFAULTS: dict[str, str] = {
     "maintenance_message": "فروش موقتاً غیرفعال است. لطفاً کمی بعد دوباره تلاش کنید.",
     "auto_backup_enabled": "0",
     "backup_last_at": "",
+    "auto_backup_interval_hours": "12",
 }
 
 EDITABLE_KEYS = frozenset(DEFAULTS)
+
+#: Allowed auto-backup cadences (hours) offered in the MasterBot UI.
+BACKUP_INTERVAL_PRESETS = (6, 12, 24)
 
 
 class PlatformSettingsService:
@@ -53,7 +57,18 @@ class PlatformSettingsService:
             "maintenance_message": self.get("maintenance_message"),
             "auto_backup_enabled": self.get_bool("auto_backup_enabled"),
             "backup_last_at": self.get("backup_last_at"),
+            "auto_backup_interval_hours": self._get_interval_hours(),
         }
+
+    def _get_interval_hours(self) -> int:
+        raw = self.get("auto_backup_interval_hours")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = 12
+        if value not in BACKUP_INTERVAL_PRESETS:
+            value = 12
+        return value
 
     def set_text(self, key: str, value: str, *, maximum: int) -> str:
         name = str(key or "").strip()

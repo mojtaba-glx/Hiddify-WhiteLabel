@@ -83,6 +83,8 @@ AUDIT_ACTION_FA = {
     "platform_setting.trial_plan": "تغییر پلن تست",
     "platform_backup.create": "ساخت بکاپ کامل",
     "platform_backup.auto_toggle": "تغییر ارسال خودکار بکاپ",
+    "platform_backup.passphrase_set": "تنظیم رمز بکاپ",
+    "platform_backup.interval": "تغییر دوره ارسال بکاپ",
 }
 
 ENTITY_TYPE_FA = {
@@ -636,23 +638,53 @@ def platform_settings_view(settings: dict[str, Any]) -> tuple[str, InlineKeyboar
     return text, InlineKeyboardMarkup(rows)
 
 
-def backup_settings_view(settings: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+def backup_settings_view(
+    settings: dict[str, Any], *, has_passphrase: bool = False
+) -> tuple[str, InlineKeyboardMarkup]:
+    from MasterBot.platform_settings import BACKUP_INTERVAL_PRESETS
+
     auto = bool(settings.get("auto_backup_enabled"))
     auto_label = "📤 ارسال خودکار: 🟢 فعال" if auto else "📤 ارسال خودکار: 🔴 غیرفعال"
     last = str(settings.get("backup_last_at") or "هنوز بکاپی ثبت نشده")
+    try:
+        interval = int(settings.get("auto_backup_interval_hours") or 12)
+    except (TypeError, ValueError):
+        interval = 12
+    if interval not in BACKUP_INTERVAL_PRESETS:
+        interval = 12
+    passphrase_line = (
+        "🔐 رمز بکاپ سرور: ✅ تنظیم شده"
+        if has_passphrase
+        else "🔐 رمز بکاپ سرور: ❌ تنظیم نشده"
+    )
     text = (
         "🗄 بکاپ کامل مستر\n\n"
-        "این بکاپ شامل دیتابیس کامل (لایسنس‌ها، مشتری‌ها، سفارش‌ها، اشتراک‌ها)\n"
-        "و فایل تنظیمات محیطی (.env) است و رمزنگاری‌شده ارسال می‌شود.\n\n"
+        "بکاپ فوری همین‌جا فایل رمزنگاری‌شده را برایت می‌فرستد.\n"
+        "ارسال خودکار یعنی سر هر دوره خودش بکاپ می‌سازد و همین‌جا می‌فرستد.\n"
+        "رمز را با دکمه «🔐 تنظیم رمز بکاپ» همین‌جا تعیین می‌کنی؛\n"
+        "بکاپ فوری و بازیابی با همان رمز کار می‌کنند و هر وقت خواستی عوضش کن.\n\n"
         f"📤 ارسال خودکار: {'🟢 فعال' if auto else '🔴 غیرفعال'}\n"
+        f"⏱ دوره ارسال: هر {interval} ساعت\n"
+        f"{passphrase_line}\n"
         f"🕒 آخرین بکاپ: {last}"
     )
+    if auto and not has_passphrase:
+        text += "\n\n⚠️ رمز بکاپ تنظیم نشده؛ ارسال خودکار فعلاً کار نمی‌کند."
+    interval_row = [
+        InlineKeyboardButton(
+            f"{'✅ ' if interval == preset else ''}هر {preset} ساعت",
+            callback_data=f"backup:interval:{preset}",
+        )
+        for preset in BACKUP_INTERVAL_PRESETS
+    ]
     rows = [
         [InlineKeyboardButton(auto_label, callback_data="backup:auto:toggle")],
+        interval_row,
         [
             InlineKeyboardButton("📦 بکاپ فوری", callback_data="backup:now"),
             InlineKeyboardButton("📥 بازیابی بکاپ", callback_data="backup:restore"),
         ],
+        [InlineKeyboardButton("🔐 تنظیم رمز بکاپ", callback_data="backup:passphrase")],
         [InlineKeyboardButton("↩️ بازگشت", callback_data="menu:settings")],
     ]
     return text, InlineKeyboardMarkup(rows)
