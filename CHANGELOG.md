@@ -4,6 +4,21 @@ All notable changes to Hiddify-WhiteLabel are documented here.
 
 ---
 
+## [v1.3.7] – 2026-10-14
+
+### Fixed (TenantRuntime admin user list: 0-day expiry stays active, SellBot parity)
+
+**Files:** `TenantRuntime/server_admin.py`, `TenantRuntime/AdminBot/server_actions.py`, `Tests/test_admin_user_expiry_sellbot_parity.py`
+
+| # | مشکل | قبل | جدید (مثل SellBot) |
+|---|---|---|---|
+| 1 | کاربر با `📆انقضا: 0 روز دیگر` در ربات `🔴 منقضی` ولی در پنل/SellBot `🟢 فعال` | `user_status` با `parse_utc(expires_at) <= utcnow()`؛ تاریخ‌خالی امروز ساعت ۰۰:۰۰ از هر ساعت بعد بزرگ‌تر بود | هلپر `_panel_expiry_passed` مثل `Shared/sub_aggregator._panel_user_exactly_expired`: تاریخ‌خالی تا آخر همان روز تقویمی فعال (`date < today` فقط فردا منقضی)؛ تایم‌استمپ/epoch دقیق در لحظه منقضی |
+| 2 | خط سرویس در جزئیات | `◇ سرویس لوکیشن: ...` با جداکننده `، ` و تک‌فاصله | `⬖ سرور:  ...` با جداکننده ` + ` مثل SellBot (تک و چندسروره یک خط) |
+| 3 | فرمت مصرف | `13.9` (تک‌رقم) | `13.92` (دو رقم تریم‌شده current + تک‌رقم limit) مثل `AdminBot/servers.py` |
+| 4 | هدر کاربر | تک‌فاصله بعد `:` | دوفاصله `👤 کاربر:  ...` مثل SellBot |
+
+---
+
 ## [v1.3.6] – 2026-10-14
 
 ### Fixed (TenantRuntime wallet purchase: exact SellBot parity — QR, texts, admin report)

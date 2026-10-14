@@ -414,6 +414,27 @@ def _format_gb(value):
     return f"{number:.2f}".rstrip("0").rstrip(".")
 
 
+def _format_usage_current(value) -> str:
+    """SellBot parity (AdminBot/servers.py): 2 decimals trimmed (13.92)."""
+    try:
+        text = f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return "نامشخص"
+    if text.endswith("00"):
+        return f"{float(value):.1f}"
+    if text.endswith("0"):
+        return text[:-1]
+    return text
+
+
+def _format_usage_limit(value) -> str:
+    """SellBot parity: 1 decimal (20.0)."""
+    try:
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return "نامشخص"
+
+
 def _qr_image(data: str) -> BytesIO:
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M)
     qr.add_data(str(data))
@@ -553,15 +574,16 @@ def _user_detail_text(service, actor: int, sid: int, uid: int, row: dict) -> str
     name = escape(str(row.get("name") or row.get("external_ref") or "کاربر"))
     user_page = _panel_user_page_link(service.b, sid, str(row.get("external_ref") or ""))
     header = (
-        f'👤 کاربر: <a href="{escape(user_page, quote=True)}">{name}</a>'
+        f'👤 کاربر:  <a href="{escape(user_page, quote=True)}">{name}</a>'
         if user_page
-        else f"👤 کاربر: {name}"
+        else f"👤 کاربر:  {name}"
     )
-    location_line = (
-        "◇ سرویس لوکیشن: " + "، ".join(escape(x) for x in labels)
-        if labels
-        else f"⬖ سرور: {escape(str(service.b.server(sid).get('label') or 'نامشخص'))}"
-    )
+    if labels:
+        # SellBot parity (AdminBot/userbot.py aggregated view):
+        # single or multi server always under one "⬖ سرور:" line.
+        location_line = f"⬖ سرور:  {' + '.join(escape(x) for x in labels)}"
+    else:
+        location_line = f"⬖ سرور:  {escape(str(service.b.server(sid).get('label') or 'نامشخص'))}"
     status = user_status(row, provider=provider_kind(service.b.server(int(sid))))
     return "\n".join(
         [
@@ -569,9 +591,10 @@ def _user_detail_text(service, actor: int, sid: int, uid: int, row: dict) -> str
             "❖⬩╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍⬩❖",
             location_line,
             (
-                f"📊مصرف: {usage:.1f} از {limit:.1f} گیگابایت"
+                f"📊مصرف: {_format_usage_current(usage)} از "
+                f"{_format_usage_limit(limit)} گیگابایت"
                 if limit
-                else f"📊مصرف: {usage:.1f} گیگابایت (نامحدود)"
+                else f"📊مصرف: {_format_usage_current(usage)} گیگابایت (نامحدود)"
             ),
             f"📆انقضا: {escape(_expiry_text(row.get('expires_at')))}",
             escape(_account_status_line(status)),
@@ -827,13 +850,14 @@ def user_text(row, server):
     status = user_status(row)
     return "\n".join(
         [
-            f"👤 کاربر: {escape(row['name'])}",
+            f"👤 کاربر:  {escape(row['name'])}",
             "❖⬩╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍⬩❖",
-            f"⬖ سرور: {escape(server['label'])}",
+            f"⬖ سرور:  {escape(server['label'])}",
             (
-                f"📊مصرف: {usage:.1f} از {limit:.1f} گیگابایت"
+                f"📊مصرف: {_format_usage_current(usage)} از "
+                f"{_format_usage_limit(limit)} گیگابایت"
                 if limit
-                else f"📊مصرف: {usage:.1f} گیگابایت (نامحدود)"
+                else f"📊مصرف: {_format_usage_current(usage)} گیگابایت (نامحدود)"
             ),
             f"📆انقضا: {escape(_expiry_text(row.get('expires_at')))}",
             escape(_account_status_line(status)),

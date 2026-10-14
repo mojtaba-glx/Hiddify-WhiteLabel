@@ -60,6 +60,36 @@ def provider_kind(server) -> str:
     ).lower()
 
 
+def _panel_expiry_passed(raw) -> bool:
+    """SellBot parity (Shared/sub_aggregator._panel_user_exactly_expired).
+
+    Date-only values stay valid through that calendar day; exact timestamps
+    / epoch values (notably X-UI expiryTime) expire at the UTC instant.
+    """
+    text = str(raw or "").strip()
+    if not text or text in {"0", "0.0"}:
+        return False
+    try:
+        parsed = parse_utc(text)
+    except (ValueError, TypeError):
+        return False
+    try:
+        is_epoch = float(text) > 0
+    except (TypeError, ValueError):
+        is_epoch = False
+    has_clock = is_epoch or any(ch in text for ch in ("T", ":", "Z", "z", "+"))
+    now = utcnow()
+    if has_clock:
+        try:
+            return parsed <= now
+        except TypeError:
+            return False
+    try:
+        return parsed.date() < now.date()
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
 def user_status(row, *, provider=None):
     if row.get("state") == "pending":
         return "pending"
@@ -70,10 +100,7 @@ def user_status(row, *, provider=None):
         and int(row.get("usage_bytes") or 0) >= int(row["traffic_bytes"])
     )
     if row.get("expires_at"):
-        try:
-            due = due or parse_utc(row["expires_at"]) <= utcnow()
-        except (ValueError, TypeError):
-            pass
+        due = due or _panel_expiry_passed(row["expires_at"])
     if due:
         return "expired"
     if row.get("active"):
