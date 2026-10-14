@@ -1107,16 +1107,20 @@ def _wallet_primary(summary: dict) -> tuple[int, str]:
     return 0, str(summary.get("primary_currency") or "IRR")
 
 
-def _wallet_text(summary: dict) -> str:
-    """SellBot-compatible wallet summary: one balance + account status."""
+def _wallet_text(summary: dict, settings: dict | None = None) -> str:
+    """SellBot-compatible wallet summary: one balance + account status.
+
+    The status line follows the marketing ``show_user_status`` switch like
+    SellBot (UserBot/main.py wallet branch).
+    """
     balance, currency = _wallet_primary(summary)
     money = f"{balance:,} {_wallet_currency_title(currency)}"
-    status = str(summary.get("customer_status") or "active").lower()
-    status_title = "🔴 مسدود" if status == "blocked" else "🟢 فعال"
-    return (
-        f"🔻 موجودی کیف پول شما {money} میباشد\n"
-        f"👤 وضعیت کاربر: {status_title}"
-    )
+    text = f"🔻 موجودی کیف پول شما {money} میباشد"
+    if settings is None or bool(settings.get("show_user_status", True)):
+        status = str(summary.get("customer_status") or "active").lower()
+        status_title = "🔴 مسدود" if status == "blocked" else "🟢 فعال"
+        text += f"\n👤 وضعیت کاربر: {status_title}"
+    return text
 
 
 def _wallet_method_rows(
@@ -1124,8 +1128,11 @@ def _wallet_method_rows(
     settings: dict,
     *,
     include_back: bool = True,
-    include_history: bool = False,
 ):
+    """SellBot wallet_inline_keyboard parity: methods + gift coupon + back.
+
+    SellBot has no payment-history button in the wallet menu.
+    """
     rows = []
     for method in business.list_methods(currency=None):
         title = str(method.get("title") or method.get("provider_title") or "روش پرداخت")
@@ -1140,42 +1147,11 @@ def _wallet_method_rows(
         rows.append([
             InlineKeyboardButton("🎁 اعمال کد هدیه", callback_data="shop:gift")
         ])
-    if include_history:
-        rows.append([
-            InlineKeyboardButton("🧾 وضعیت پرداخت‌ها", callback_data="shop:payments")
-        ])
     if include_back:
         rows.append([
             InlineKeyboardButton("بازگشت", callback_data="runtime:home")
         ])
     return rows
-
-
-def _payment_status_label(value: object) -> str:
-    return {
-        "pending": "⏳ در انتظار بررسی",
-        "approved": "✅ تأیید شده",
-        "rejected": "❌ رد شده",
-    }.get(str(value or ""), str(value or "-"))
-
-
-def _payment_history_text(items: list[dict[str, Any]]) -> str:
-    lines = ["🧾 وضعیت پرداخت‌ها", ""]
-    if not items:
-        return "\n".join(lines + ["هنوز پرداختی ثبت نشده است."])
-    for item in items[:20]:
-        source = str(item.get("source") or "")
-        source_title = {
-            "order": "سفارش",
-            "wallet_topup": "شارژ کیف پول",
-            "wallet_order": "پرداخت کیف پول",
-        }.get(source, source)
-        lines.extend([
-            f"• {item.get('provider_icon') or '💳'} {source_title} #{int(item.get('subject_id') or item.get('id') or 0)}",
-            f"  {int(item.get('amount') or 0):,} {item.get('currency') or ''} · {_payment_status_label(item.get('status'))}",
-            f"  روش: {item.get('provider_title') or item.get('payment_title') or '-'}",
-        ])
-    return "\n".join(lines)
 
 
 def _order_price_display(order: dict) -> tuple[int, str]:
@@ -2852,11 +2828,10 @@ async def _handle_main_reply_action(
     if text == BTN_WALLET:
         summary = business.wallet_summary(actor)
         await update.effective_message.reply_text(
-            _wallet_text(summary),
+            _wallet_text(summary, settings),
             reply_markup=InlineKeyboardMarkup(
                 _wallet_method_rows(
                     business, settings, include_back=True,
-                    include_history=True,
                 )
             ),
         )
@@ -3556,24 +3531,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data == "shop:wallet":
             summary = business.wallet_summary(actor)
             await update.callback_query.edit_message_text(
-                _wallet_text(summary),
+                _wallet_text(summary, settings),
                 reply_markup=InlineKeyboardMarkup(
                     _wallet_method_rows(
                         business, settings, include_back=True,
-                        include_history=True,
                     )
                 ),
             ); return
-        if data == "shop:payments":
-            history = business.customer_payment_history(actor)
-            await update.callback_query.edit_message_text(
-                _payment_history_text(history),
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💰 کیف پول", callback_data="shop:wallet")],
-                    [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
-                ]),
-            )
-            return
         if data == "shop:wallettopup":
             # Backward-compatible callback from older messages: show the real
             # enabled payment methods instead of asking users to type a currency.

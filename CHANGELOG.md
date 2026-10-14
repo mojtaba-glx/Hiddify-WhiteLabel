@@ -4,6 +4,19 @@ All notable changes to Hiddify-WhiteLabel are documented here.
 
 ---
 
+## [v1.3.10] – 2026-10-14
+
+### Fixed (TenantRuntime UserBot wallet menu: SellBot parity)
+
+**Files:** `TenantRuntime/UserBot/handlers.py`, `Tests/test_userbot_management_parity.py`
+
+| # | مشکل | قبل | جدید (مثل SellBot) |
+|---|---|---|---|
+| 1 | دکمه `🧾 وضعیت پرداخت‌ها` در منوی کیف پول (در SellBot نیست) | `_wallet_method_rows` با `include_history` + ویو `shop:payments` | حذف دکمه و ویو؛ منو فقط روش‌ها + `🎁 اعمال کد هدیه` + `بازگشت` مثل `wallet_inline_keyboard` در SellBot |
+| 2 | خط `👤 وضعیت کاربر` همیشه نمایش داده می‌شد | `_wallet_text` بدون گیت | گیت روی `show_user_status` مثل شاخه کیف پول در SellBot |
+
+---
+
 ## [v1.3.9] – 2026-10-14
 
 ### Fixed (TenantRuntime wallet QR buttons, admin service-code, services list: SellBot parity)

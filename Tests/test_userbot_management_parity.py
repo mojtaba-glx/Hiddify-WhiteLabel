@@ -942,6 +942,55 @@ def test_wallet_menu_matches_sellbot_payment_method_shape() -> None:
     assert callbacks[0] == ["shop:wallettopupstart:9"]
 
 
+def test_wallet_menu_has_no_payment_history_button_like_sellbot() -> None:
+    """SellBot wallet_inline_keyboard has no payment-status button."""
+    import pathlib
+
+    class StubBusiness:
+        def list_methods(self, *, currency=None):
+            return [
+                {"id": 9, "title": "کارت به کارت", "provider_icon": "💳"},
+                {"id": 10, "title": "درگاه", "provider_icon": "🌐"},
+            ]
+
+    rows = user_handlers._wallet_method_rows(
+        StubBusiness(), {"show_gift_button": True}, include_back=True
+    )
+    labels = [[button.text for button in row] for row in rows]
+    callbacks = [
+        button.callback_data for row in rows for button in row
+    ]
+    assert labels == [
+        ["💳 کارت به کارت"],
+        ["🌐 درگاه"],
+        ["🎁 اعمال کد هدیه"],
+        ["بازگشت"],
+    ]
+    assert "shop:payments" not in callbacks
+    assert not any("وضعیت پرداخت" in text for row in labels for text in row)
+    source = pathlib.Path(
+        "TenantRuntime/UserBot/handlers.py"
+    ).read_text(encoding="utf-8")
+    assert "shop:payments" not in source
+
+
+def test_wallet_text_hides_status_when_show_user_status_off() -> None:
+    summary = {
+        "primary_account": {"balance": 100000, "currency": "IRR"},
+        "primary_currency": "IRR",
+        "customer_status": "active",
+    }
+    assert user_handlers._wallet_text(
+        summary, {"show_user_status": False}
+    ) == "🔻 موجودی کیف پول شما 100,000 تومان میباشد"
+    assert user_handlers._wallet_text(
+        summary, {"show_user_status": True}
+    ) == (
+        "🔻 موجودی کیف پول شما 100,000 تومان میباشد\n"
+        "👤 وضعیت کاربر: 🟢 فعال"
+    )
+
+
 def test_admin_profile_matches_sellbot_wallet_and_full_stats() -> None:
     class StubBusiness:
         def customer_profile_admin(self, actor, *, customer_id):
