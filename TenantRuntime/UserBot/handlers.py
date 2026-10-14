@@ -2206,6 +2206,46 @@ def _trial_delivery_text(
     return access
 
 
+def _delivery_link_candidates(
+    business: Any,
+    actor: int,
+    result: dict[str, Any],
+    settings: dict[str, Any],
+) -> list[tuple[str, str]]:
+    """Admin-enabled subscription links in SellBot order (label, link)."""
+    try:
+        subscription_id = int(
+            result.get("id") or result.get("subscription_id") or 0
+        )
+    except (TypeError, ValueError):
+        subscription_id = 0
+    if subscription_id <= 0:
+        return []
+    candidates: list[tuple[str, str, Any]] = [
+        ("🔗 لینک اشتراک:", bool(settings.get("show_sub_link", True)), lambda: business.subscription_link(
+            actor, subscription_id=subscription_id)),
+        ("🤖 لینک اشتراک خودکار:", bool(settings.get("show_auto_sub_link", False)), lambda: business.automatic_subscription_link(
+            actor, subscription_id=subscription_id)),
+        ("🔐 لینک اشتراک b64:", bool(settings.get("show_sub_link_b64", False)), lambda: business.subscription_link_b64(
+            actor, subscription_id=subscription_id)),
+        ("🌐 لینک اشتراک هوشمند:", bool(settings.get("show_multi_server", False)), lambda: business.smart_subscription_link(
+            actor, subscription_id=subscription_id, base64_output=False)),
+        ("🌐 لینک اشتراک هوشمند b64:", bool(settings.get("show_multi_server_b64", False)), lambda: business.smart_subscription_link(
+            actor, subscription_id=subscription_id, base64_output=True)),
+    ]
+    links: list[tuple[str, str]] = []
+    for label, enabled, fetch in candidates:
+        if not enabled:
+            continue
+        try:
+            value = str(fetch() or "").strip()
+        except TenantBusinessError:
+            value = ""
+        if value:
+            links.append((label, value))
+    return links
+
+
 def _delivery_access_text(
     business: Any,
     actor: int,
@@ -2233,59 +2273,8 @@ def _delivery_access_text(
         if value:
             lines.extend(["🌐 صفحه یوزر هیدیفای:", value])
 
-    if bool(settings.get("show_sub_link", True)):
-        try:
-            value = business.subscription_link(
-                actor, subscription_id=subscription_id
-            )
-        except TenantBusinessError:
-            value = ""
-        if value:
-            lines.extend(["🔗 لینک اشتراک:", value])
-
-    if bool(settings.get("show_auto_sub_link", False)):
-        try:
-            value = business.automatic_subscription_link(
-                actor, subscription_id=subscription_id
-            )
-        except TenantBusinessError:
-            value = ""
-        if value:
-            lines.extend(["🤖 لینک اشتراک خودکار:", value])
-
-    if bool(settings.get("show_sub_link_b64", False)):
-        try:
-            value = business.subscription_link_b64(
-                actor, subscription_id=subscription_id
-            )
-        except TenantBusinessError:
-            value = ""
-        if value:
-            lines.extend(["🔐 لینک اشتراک b64:", value])
-
-    if bool(settings.get("show_multi_server", False)):
-        try:
-            value = business.smart_subscription_link(
-                actor,
-                subscription_id=subscription_id,
-                base64_output=False,
-            )
-        except TenantBusinessError:
-            value = ""
-        if value:
-            lines.extend(["🌐 لینک اشتراک هوشمند:", value])
-
-    if bool(settings.get("show_multi_server_b64", False)):
-        try:
-            value = business.smart_subscription_link(
-                actor,
-                subscription_id=subscription_id,
-                base64_output=True,
-            )
-        except TenantBusinessError:
-            value = ""
-        if value:
-            lines.extend(["🌐 لینک اشتراک هوشمند b64:", value])
+    for label, link in _delivery_link_candidates(business, actor, result, settings):
+        lines.extend([label, link])
 
     if bool(settings.get("show_direct_config", True)):
         lines.append("📄 کانفیگ مستقیم: از «📦 اشتراک‌های من» قابل دریافت است.")
@@ -2293,6 +2282,244 @@ def _delivery_access_text(
     return "\n".join(lines) or (
         "🔒 نمایش لینک و کانفیگ این اشتراک توسط ادمین غیرفعال است."
     )
+
+
+def _wallet_confirm_text(order_id: int) -> str:
+    """SellBot-exact wallet confirmation (no raw links; delivery follows)."""
+    return (
+        "🎉 تراکنش شما تایید شد\n"
+        "از طریق دکمه [📊وضعیت اشتراک📊] میتوانید به اطلاعات اشتراک خود دسترسی داشته باشید.\n\n"
+        f"🎁 شناسه تراکنش:{int(order_id)}"
+    )
+
+
+def _wallet_qr_caption(label: str, link: str) -> str:
+    """SellBot-exact single-link QR caption."""
+    return (
+        "🎉 اشتراک شما آماده‌ی استفاده است ✅\n\n"
+        f"{label}\n"
+        f"<code>{escape(link)}</code>\n\n"
+        "📄 جهت کپی شدن لینک کافیست یک‌بار روی لینک بالا لمس کنید."
+    )
+
+
+def _wallet_qr_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
+    """SellBot subscription_links_keyboard parity (guide + back)."""
+    return InlineKeyboardMarkup([
+        [TelegramInlineKeyboardButton(
+            "📚 راهنمای اتصال", callback_data="shop:guide",
+        )],
+        [TelegramInlineKeyboardButton(
+            "🔙بازگشت",
+            callback_data=f"shop:subrefresh:{int(subscription_id)}",
+        )],
+    ])
+
+
+def _build_wallet_admin_caption(
+    *,
+    order: dict[str, Any],
+    result: dict[str, Any],
+    service_name: str = "",
+    wallet_balance_after: int | None = None,
+) -> str:
+    """SellBot _build_subscription_created_caption parity for wallet orders."""
+    is_renew = str(
+        result.get("operation") or order.get("operation") or ""
+    ).strip().lower() == "renewal"
+    title = "📄 گزارش تمدید اشتراک" if is_renew else "📄 گزارش ایجاد اشتراک"
+    name = str(service_name or "").strip() or str(order.get("plan_name") or "-")
+    server_title = str(order.get("selected_server_label") or "-")
+    try:
+        gb = float(order.get("traffic_gb") or 0)
+    except (TypeError, ValueError):
+        gb = 0.0
+    try:
+        days = int(order.get("duration_days") or 0)
+    except (TypeError, ValueError):
+        days = 0
+    amount = order.get("amount")
+    currency = str(order.get("currency") or "")
+    toman, unit = _receipt_toman(amount, currency)
+    service_code = str(
+        result.get("smart_code")
+        or result.get("id")
+        or order.get("id")
+        or "-"
+    )
+    lines = [
+        title,
+        "",
+        f"👤اشتراک: {name}",
+        f"🛰سرور: {server_title}",
+        f"📊حجم: {gb:.1f} گیگابایت",
+        f"⏳زمان: {int(days)} روز",
+        f"💰مبلغ پرداختی: {toman:,} {unit}",
+        "💳پرداخت از کیف پول کاربر — مبلغ کسر شد",
+    ]
+    if wallet_balance_after is not None:
+        try:
+            balance_val = int(wallet_balance_after)
+        except (TypeError, ValueError):
+            balance_val = 0
+        balance_toman, balance_unit = _receipt_toman(balance_val, currency)
+        lines.append(f"💼مانده کیف پول کاربر: {balance_toman:,} {balance_unit}")
+    lines.append(f"🔑شناسه اشتراک:{service_code}")
+    return "\n".join(lines)
+
+
+async def _notify_admin_wallet_purchase(
+    business: Any,
+    *,
+    actor: int = 0,
+    order: dict[str, Any],
+    result: dict[str, Any],
+    display_name: str = "",
+    customer_id: int = 0,
+    wallet_balance_after: int | None = None,
+) -> None:
+    """Best-effort SellBot-style admin report for wallet purchases."""
+    token = ""
+    try:
+        token = _sibling_admin_bot_token(business)
+        subscription_id = int(
+            result.get("subscription_id") or result.get("id") or 0
+        )
+        service_name = str(order.get("plan_name") or "").strip()
+        lookup_actor = int(actor or 0)
+        if not lookup_actor:
+            try:
+                lookup_actor = int(order.get("customer_telegram_id") or 0)
+            except (TypeError, ValueError):
+                lookup_actor = 0
+        if subscription_id > 0 and lookup_actor > 0:
+            try:
+                item = business.customer_subscription_status(
+                    lookup_actor,
+                    subscription_id=subscription_id,
+                    refresh=False,
+                )
+                # customer_subscription_status is scoped to the customer;
+                # fall back to plan name when the lookup is not permitted.
+                if isinstance(item, dict):
+                    service_name = str(
+                        item.get("service_name") or service_name
+                    ).strip() or service_name
+            except Exception:
+                pass
+        caption = _build_wallet_admin_caption(
+            order=order,
+            result=result,
+            service_name=service_name,
+            wallet_balance_after=wallet_balance_after,
+        )
+        rows: list[list[TelegramInlineKeyboardButton]] = []
+        user_title = str(display_name or "").strip() or str(customer_id or "-")
+        if int(customer_id or 0) > 0:
+            rows.append([TelegramInlineKeyboardButton(
+                f"👤 {user_title}",
+                callback_data=f"userbot:user:{int(customer_id)}",
+            )])
+        async with Bot(token=token) as bot:
+            await bot.send_message(
+                chat_id=int(business.owner_telegram_id),
+                text=caption,
+                reply_markup=InlineKeyboardMarkup(rows) if rows else None,
+            )
+    except Exception:
+        return
+    finally:
+        token = ""
+
+
+async def _deliver_wallet_purchase(
+    context: Any,
+    business: Any,
+    actor: int,
+    settings: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    """SellBot-parity follow-up delivery after wallet confirmation.
+
+    Single enabled link -> QR photo with SellBot caption + guide/back buttons.
+    Multiple/zero links -> subscription status detail with action buttons.
+    Never raises; checkout must not break on delivery errors.
+    """
+    try:
+        subscription_id = int(
+            result.get("subscription_id") or result.get("id") or 0
+        )
+    except (TypeError, ValueError):
+        subscription_id = 0
+    if subscription_id <= 0:
+        return
+    try:
+        chat_id = int(actor)
+    except (TypeError, ValueError):
+        return
+    try:
+        candidates = _delivery_link_candidates(business, actor, result, settings)
+    except Exception:
+        candidates = []
+    if len(candidates) == 1:
+        label, link = candidates[0]
+        caption = _wallet_qr_caption(label, link)
+        markup = _wallet_qr_keyboard(subscription_id)
+        try:
+            import qrcode
+
+            image = BytesIO()
+            qrcode.make(link).save(image, format="PNG")
+            image.seek(0)
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=image,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+            return
+        except Exception:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=caption,
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                pass
+            return
+    # Zero or multiple links: SellBot shows the subscription status screen.
+    try:
+        item = business.customer_subscription_status(
+            actor, subscription_id=subscription_id, refresh=False
+        )
+    except Exception:
+        item = None
+    if isinstance(item, dict) and item:
+        try:
+            text = _subscription_detail_text(item, settings)
+            markup = InlineKeyboardMarkup(
+                _subscription_status_rows(business, actor, item, settings)
+            )
+            await context.bot.send_message(
+                chat_id=chat_id, text=text, parse_mode="Markdown",
+                reply_markup=markup,
+            )
+            return
+        except Exception:
+            pass
+    try:
+        fallback = _delivery_access_text(business, actor, result, settings)
+        await context.bot.send_message(
+            chat_id=chat_id, text=fallback,
+            reply_markup=_home_inline_markup(settings),
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        pass
 
 
 def _sorted_purchase_plans(
@@ -3214,12 +3441,30 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data.startswith("shop:retryorder:"):
             order_id = int(data.rsplit(":", 1)[1])
             result = business.retry_own_paid_order(actor, order_id=order_id)
+            try:
+                retry_order = business.order(actor, order_id)
+            except Exception:
+                retry_order = {}
+            try:
+                wallet_paid = int(retry_order.get("wallet_amount") or 0) > 0
+            except (TypeError, ValueError):
+                wallet_paid = False
+            if wallet_paid:
+                confirm = _wallet_confirm_text(order_id)
+            else:
+                confirm = f"✅ سفارش #{order_id} انجام شد."
             await update.callback_query.edit_message_text(
-                f"✅ سفارش #{order_id} انجام شد.\n\n"
-                + _delivery_access_text(business, actor, result, settings),
+                confirm,
                 reply_markup=_home_inline_markup(settings),
                 disable_web_page_preview=True,
-            ); return
+            )
+            try:
+                await _deliver_wallet_purchase(
+                    context, business, actor, settings, result
+                )
+            except Exception:
+                pass
+            return
         if data.startswith("shop:cancelorder:"):
             order_id = int(data.rsplit(":", 1)[1])
             business.cancel_order(actor, order_id=order_id)
@@ -3855,20 +4100,62 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data.startswith("shop:walletpay:"):
             order_id = int(data.rsplit(":", 1)[1])
             result = business.pay_order_with_wallet(actor, order_id=order_id)
+            try:
+                full_order = business.order(actor, order_id)
+            except Exception:
+                full_order = {}
+            tg_user = update.effective_user
+            display_name = str(
+                getattr(tg_user, "full_name", None)
+                or getattr(tg_user, "username", None)
+                or actor
+            ).strip()
+            try:
+                customer_id = int(full_order.get("customer_id") or 0)
+            except (TypeError, ValueError):
+                customer_id = 0
+            wallet_after: int | None = None
+            try:
+                summary = business.wallet_summary(actor)
+                primary = dict(summary.get("primary_account") or {})
+                wallet_after = int(primary.get("balance") or 0)
+            except Exception:
+                wallet_after = None
             if not result.get("fulfillment_pending"):
                 try:
-                    event_order = business.order(actor, order_id)
-                    tg_user = update.effective_user
                     await _send_purchase_event_report(
                         business,
                         telegram_id=actor,
-                        display_name=str(
-                            getattr(tg_user, "full_name", None)
-                            or getattr(tg_user, "username", None)
-                            or actor
-                        ).strip(),
-                        order=event_order,
+                        display_name=display_name,
+                        order=full_order or business.order(actor, order_id),
                         result=result,
+                    )
+                except Exception:
+                    pass
+                try:
+                    await _notify_admin_wallet_purchase(
+                        business,
+                        actor=actor,
+                        order=full_order or {},
+                        result=result,
+                        display_name=display_name,
+                        customer_id=customer_id,
+                        wallet_balance_after=wallet_after,
+                    )
+                except Exception:
+                    pass
+            else:
+                # Even when panel fulfillment pends, the wallet charge + paid
+                # state must still reach the admin for reconciliation.
+                try:
+                    await _notify_admin_wallet_purchase(
+                        business,
+                        actor=actor,
+                        order=full_order or {},
+                        result=result,
+                        display_name=display_name,
+                        customer_id=customer_id,
+                        wallet_balance_after=wallet_after,
                     )
                 except Exception:
                     pass
@@ -3877,14 +4164,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     f"✅ مبلغ سفارش #{order_id} از کیف پول پرداخت شد.\n"
                     "⚠️ فعال‌سازی پنل فعلاً انجام نشد؛ پرداخت محفوظ است و می‌توانید از «سفارش‌های من» دوباره تلاش کنید."
                 )
-            else:
-                text = (
-                    f"✅ سفارش #{order_id} با کیف پول پرداخت و فعال شد.\n\n"
-                    + _delivery_access_text(business, actor, result, settings)
+                await update.callback_query.edit_message_text(
+                    text, reply_markup=_home_inline_markup(settings)
                 )
+                return
             await update.callback_query.edit_message_text(
-                text, reply_markup=_home_inline_markup(settings)
-            ); return
+                _wallet_confirm_text(order_id),
+                reply_markup=_home_inline_markup(settings),
+            )
+            try:
+                await _deliver_wallet_purchase(
+                    context, business, actor, settings, result
+                )
+            except Exception:
+                pass
+            return
         if data.startswith("shop:paymethods:"):
             order_id = int(data.rsplit(":", 1)[1])
             order = business.order(actor, order_id)
