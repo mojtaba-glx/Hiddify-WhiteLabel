@@ -50,13 +50,14 @@ def test_wallet_qr_keyboard_has_guide_and_back() -> None:
         for row in markup.inline_keyboard
         for button in row
     ]
-    assert "shop:guide" in callbacks
+    # Subscription-aware guide (SellBot guide:back:s{id} parity).
+    assert "shop:guidesub:77" in callbacks
     assert "shop:subrefresh:77" in callbacks
     assert any("راهنمای اتصال" in t for t in texts)
     assert any("بازگشت" in t for t in texts)
 
 
-def test_wallet_admin_caption_purchase_matches_sellbot() -> None:
+def test_wallet_admin_caption_prefers_7digit_service_code() -> None:
     order = {
         "id": 26,
         "plan_name": "Pro",
@@ -66,10 +67,11 @@ def test_wallet_admin_caption_purchase_matches_sellbot() -> None:
         "amount": 130000,
         "currency": "IRR",
     }
-    result = {"operation": "purchase", "smart_code": "4829135"}
+    long_token = "5ZorKZRu1BMOx_StFPeK55MOYZbla7hf"
+    result = {"operation": "purchase", "smart_code": long_token, "id": 55}
     caption = user_handlers._build_wallet_admin_caption(
         order=order, result=result, service_name="vpn-123456",
-        wallet_balance_after=50000,
+        service_code="4829135", wallet_balance_after=50000,
     )
     assert "📄 گزارش ایجاد اشتراک" in caption
     assert "👤اشتراک: vpn-123456" in caption
@@ -80,7 +82,9 @@ def test_wallet_admin_caption_purchase_matches_sellbot() -> None:
     assert "💰مبلغ پرداختی: 13,000 تومان" in caption
     assert "💳پرداخت از کیف پول کاربر — مبلغ کسر شد" in caption
     assert "💼مانده کیف پول کاربر: 5,000 تومان" in caption
+    # 7-digit service code wins; the smart-link token must never leak here.
     assert "🔑شناسه اشتراک:4829135" in caption
+    assert long_token not in caption
 
 
 def test_wallet_admin_caption_renew_matches_sellbot() -> None:
@@ -170,7 +174,8 @@ def test_deliver_wallet_single_link_sends_qr_photo() -> None:
             for row in sent["markup"].inline_keyboard
             for button in row
         ]
-        assert "shop:guide" in callbacks
+        assert "shop:guidesub:55" in callbacks
+        assert "shop:subrefresh:55" in callbacks
 
     asyncio.run(run())
 
@@ -279,14 +284,116 @@ def test_notify_admin_wallet_purchase_sends_sellbot_caption() -> None:
                     display_name="Buyer", customer_id=44,
                     wallet_balance_after=50000,
                 )
+        class FakeBusiness:
+            owner_telegram_id = 9001
+            secret_cipher = object()
+
+            def customer_subscription_status(
+                self, actor, subscription_id=0, refresh=False
+            ):
+                return {"service_name": "vpn-123456", "service_code": "7654321"}
+
+        order = {
+            "id": 26, "customer_id": 44, "plan_name": "Pro",
+            "selected_server_label": "آلمان", "traffic_gb": 10,
+            "duration_days": 30, "amount": 130000, "currency": "IRR",
+        }
+        long_token = "5ZorKZRu1BMOx_StFPeK55MOYZbla7hf"
+        result = {
+            "operation": "purchase", "subscription_id": 55,
+            "smart_code": long_token,
+        }
+        with patch.object(
+            user_handlers, "_sibling_admin_bot_token", return_value="tok"
+        ):
+            with patch.object(user_handlers, "Bot", FakeBot):
+                await user_handlers._notify_admin_wallet_purchase(
+                    FakeBusiness(), actor=12345, order=order, result=result,
+                    display_name="Buyer", customer_id=44,
+                    wallet_balance_after=50000,
+                )
         assert sent["chat_id"] == 9001
         assert "📄 گزارش ایجاد اشتراک" in sent["text"]
         assert "💳پرداخت از کیف پول کاربر" in sent["text"]
+        # 7-digit service code from the subscription, never the smart token.
+        assert "🔑شناسه اشتراک:7654321" in sent["text"]
+        assert long_token not in sent["text"]
         callbacks = [
             button.callback_data
             for row in sent["markup"].inline_keyboard
             for button in row
         ]
         assert "userbot:user:44" in callbacks
+
+    asyncio.run(run())
+
+
+def test_wallet_confirm_carries_no_inline_menu() -> None:
+    # SellBot parity: the confirmation message has no inline buttons;
+    # the QR photo below it owns guide/back.
+    source = pathlib.Path(
+        "TenantRuntime/UserBot/handlers.py"
+    ).read_text(encoding="utf-8")
+    wallet_section = source[source.index('if data.startswith("shop:walletpay:"):'):]
+    wallet_section = wallet_section[: wallet_section.index('if data.startswith("shop:paymethods:"):')]
+    success_edit = wallet_section[wallet_section.index("_wallet_confirm_text(order_id),"):]
+    success_edit = success_edit[: success_edit.index("return")]
+    assert "reply_markup" not in success_edit
+
+
+def test_guidesub_handlers_are_wired() -> None:
+    source = pathlib.Path(
+        "TenantRuntime/UserBot/handlers.py"
+    ).read_text(encoding="utf-8")
+    assert 'if data.startswith("shop:guidesub:"):' in source
+    assert "shop:subrefresh:{subscription_id}" in source
+    # Photo-safe editing (SellBot _safe_edit_message_text parity).
+    assert "async def _safe_edit_text(" in source
+    assert "_is_photo_edit_error(" in source
+
+
+def test_safe_edit_text_replaces_photo_with_new_message() -> None:
+    from telegram.error import BadRequest
+
+    async def run():
+        calls: dict = {}
+
+        class FakeMessage:
+            async def delete(self):
+                calls["deleted"] = True
+
+            async def reply_text(self, text, **kwargs):
+                calls["text"] = text
+                calls["markup"] = kwargs.get("reply_markup")
+
+        class FakeQuery:
+            message = FakeMessage()
+
+            async def edit_message_text(self, *args, **kwargs):
+                raise BadRequest("There is no text in the message to edit")
+
+        markup = object()
+        await user_handlers._safe_edit_text(
+            FakeQuery(), "hello", reply_markup=markup
+        )
+        assert calls.get("deleted") is True
+        assert calls.get("text") == "hello"
+        assert calls.get("markup") is markup
+
+    asyncio.run(run())
+
+
+def test_safe_edit_text_ignores_not_modified() -> None:
+    from telegram.error import BadRequest
+
+    async def run():
+        class FakeQuery:
+            message = SimpleNamespace(delete=None)
+
+            async def edit_message_text(self, *args, **kwargs):
+                raise BadRequest("Message is not modified")
+
+        # Must not raise.
+        await user_handlers._safe_edit_text(FakeQuery(), "same")
 
     asyncio.run(run())

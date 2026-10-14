@@ -199,7 +199,15 @@ def test_expired_time_and_invalid_last_seen_are_not_online():
         extra_json="{}",
     )
     assert server_actions.list_user_status(row, now=now) == "offline"
+    # SellBot parity (AdminBot/servers.classify_user_status): admin display
+    # compares calendar days, so an expiry 1 second ago today is still
+    # active (online when last_online is fresh), not expired.
     row.update(expires_at=iso_utc(now - timedelta(seconds=1)), last_online=iso_utc(now))
+    assert server_actions.list_user_status(row, now=now) == "online"
+    # Yesterday at any hour is past.
+    row.update(
+        expires_at=iso_utc(now - timedelta(days=1)), last_online=iso_utc(now)
+    )
     assert server_actions.list_user_status(row, now=now) == "expired"
 
 

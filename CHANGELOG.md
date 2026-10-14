@@ -4,6 +4,35 @@ All notable changes to Hiddify-WhiteLabel are documented here.
 
 ---
 
+## [v1.3.9] – 2026-10-14
+
+### Fixed (TenantRuntime wallet QR buttons, admin service-code, services list: SellBot parity)
+
+**Files:** `TenantRuntime/UserBot/handlers.py`, `TenantRuntime/AdminBot/userbot_management.py`, `Tests/test_wallet_purchase_sellbot_parity.py`, `Tests/test_admin_services_list_sellbot_parity.py`
+
+| # | مشکل | قبل | جدید (مثل SellBot) |
+|---|---|---|---|
+| 1 | دکمه‌های زیر QR (`📚 راهنمای اتصال` / `🔙بازگشت`) از روی عکس کار نمی‌کردند | `edit_message_text` روی پیام عکس با `BadRequest` می‌مرد (مرگ خاموش) | هلپر `_safe_edit_text` مثل `_safe_edit_message_text` در SellBot: روی عکس پیام حذف و متن جدید ارسال می‌شود؛ در `shop:guide`ها و مسیر `subrefresh` سیم‌کشی شد |
+| 2 | دکمه راهنما کانتکست اشتراک را گم می‌کرد | `shop:guide` بدون شناسه → بازگشت به منو | `shop:guidesub:{id}` (+ `:platform`) مثل `guide:back:s{id}` در SellBot: انتخاب سیستم‌عامل با بازگشت به همان اشتراک؛ متن پلتفرم با پیام جدید ارسال می‌شود |
+| 3 | پیام تأیید کیف پول دکمه `🏠 منو` داشت | `edit` با `_home_inline_markup` بالای QR | بدون دکمه اینلاین (در SellBot تأیید فقط با کیبورد ریپلای می‌آید؛ QR پایینش دکمه‌های خودش را دارد) |
+| 4 | `🔑شناسه اشتراک:5ZorKZ...` (توکن لینک هوشمند) | `smart_code` اول انتخاب می‌شد | کد ۷رقمی `service_code` اشتراک (مثل `_generate_service_code` در SellBot)؛ فالبک `id` اشتراک |
+| 5 | دکمه `👤 کاربر` زیر گزارش ادمین بی‌رنگ | `TelegramInlineKeyboardButton` خام | `_button` با تم smart (رنگی) مثل گزارش‌های رسید |
+| 6 | `📋 لیست سرویس‌ها\nتعداد: 2` | هدر/دکمه تک‌ستونه با وضعیت خام | هدر `#️⃣ لیست سرویس‌ها` + `📦 تعداد کل` + `🟢 فعال` + `🔴 منقضی`؛ دکمه `{emoji} \|{name}` سه‌ستونه معکوس؛ `بازگشت🔙`؛ حالت خالی با `❌ سرویسی...` مثل `send_user_services_list` در SellBot |
+
+---
+
+## [v1.3.8] – 2026-10-14
+
+### Fixed (TenantRuntime admin user list: midnight timestamps stay active, SellBot parity)
+
+**Files:** `TenantRuntime/server_admin.py`, `Tests/test_admin_user_expiry_sellbot_parity.py`, `Tests/test_server_user_list_grid.py`
+
+| # | مشکل | قبل | جدید (مثل SellBot) |
+|---|---|---|---|
+| 1 | `حسابدار گردو` با `expires_at=2026-10-14T00:00:00Z` هنوز `🔴 منقضی` (دیتابیس زنده چک شد: `active=1`، سهمیه آزاد، `0 روز دیگر`) | `_panel_expiry_passed` مقادیر ساعت‌دار (`T/:Z`) را لحظه‌ای (`<= now`) منقضی می‌کرد؛ نیمه‌شب امروز از هر ساعت بعد گذشته بود | نمایش ادمین تقویمی شد مثل `AdminBot/servers.classify_user_status` (`end_dt.date() < today`): هر انقضای امروز — تاریخ‌خالی یا `T00:00:00Z` — تا نیمه‌شب `🟢 فعال`؛ فقط تاریخ گذشته منقضی (قفل لحظه‌ای دقیق در مسیر تحویل می‌ماند، نه نمایش ادمین) |
+
+---
+
 ## [v1.3.7] – 2026-10-14
 
 ### Fixed (TenantRuntime admin user list: 0-day expiry stays active, SellBot parity)
@@ -12,7 +41,7 @@ All notable changes to Hiddify-WhiteLabel are documented here.
 
 | # | مشکل | قبل | جدید (مثل SellBot) |
 |---|---|---|---|
-| 1 | کاربر با `📆انقضا: 0 روز دیگر` در ربات `🔴 منقضی` ولی در پنل/SellBot `🟢 فعال` | `user_status` با `parse_utc(expires_at) <= utcnow()`؛ تاریخ‌خالی امروز ساعت ۰۰:۰۰ از هر ساعت بعد بزرگ‌تر بود | هلپر `_panel_expiry_passed` مثل `Shared/sub_aggregator._panel_user_exactly_expired`: تاریخ‌خالی تا آخر همان روز تقویمی فعال (`date < today` فقط فردا منقضی)؛ تایم‌استمپ/epoch دقیق در لحظه منقضی |
+| 1 | کاربر با `📆انقضا: 0 روز دیگر` در ربات `🔴 منقضی` ولی در پنل/SellBot `🟢 فعال` | `user_status` با `parse_utc(expires_at) <= utcnow()`؛ تاریخ‌خالی امروز ساعت ۰۰:۰۰ از هر ساعت بعد بزرگ‌تر بود | هلپر `_panel_expiry_passed` تاریخ‌خالی را تا آخر همان روز تقویمی فعال نگه داشت (`date < today` فقط فردا منقضی)؛ (در v1.3.8 برای `T00:00:00Z` هم تقویمی شد) |
 | 2 | خط سرویس در جزئیات | `◇ سرویس لوکیشن: ...` با جداکننده `، ` و تک‌فاصله | `⬖ سرور:  ...` با جداکننده ` + ` مثل SellBot (تک و چندسروره یک خط) |
 | 3 | فرمت مصرف | `13.9` (تک‌رقم) | `13.92` (دو رقم تریم‌شده current + تک‌رقم limit) مثل `AdminBot/servers.py` |
 | 4 | هدر کاربر | تک‌فاصله بعد `:` | دوفاصله `👤 کاربر:  ...` مثل SellBot |

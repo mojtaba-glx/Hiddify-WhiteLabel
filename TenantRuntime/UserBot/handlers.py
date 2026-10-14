@@ -949,17 +949,73 @@ async def _edit_md(query, text: str, reply_markup=None, **kwargs):
             text, reply_markup=reply_markup, parse_mode="Markdown", **kwargs
         )
     except BadRequest as exc:
-        if "message is not modified" in str(exc).lower():
+        err = str(exc).lower()
+        if "message is not modified" in err:
+            return
+        if _is_photo_edit_error(err):
+            await _replace_photo_with_text(query, text, reply_markup=reply_markup, **kwargs)
             return
         await query.edit_message_text(text, reply_markup=reply_markup, **kwargs)
+
+
+def _is_photo_edit_error(err: str) -> bool:
+    """True when edit_message_text fails because the message is a photo/QR."""
+    return any(
+        needle in err
+        for needle in (
+            "there is no text in the message to edit",
+            "message is not a text message",
+            "message can't be edited",
+            "message to edit not found",
+        )
+    )
+
+
+async def _replace_photo_with_text(query, text: str, reply_markup=None, **kwargs):
+    """SellBot _safe_edit_message_text parity: delete the photo, send text."""
+    kwargs.pop("parse_mode", None)
+    try:
+        await query.message.delete()
+    except Exception:
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    await query.message.reply_text(
+        text, reply_markup=reply_markup, disable_web_page_preview=True, **kwargs
+    )
+
+
+async def _safe_edit_text(query, text: str, reply_markup=None, **kwargs):
+    """Edit text when possible; photo/QR messages fall back to a new message."""
+    try:
+        await query.edit_message_text(
+            text, reply_markup=reply_markup, disable_web_page_preview=True, **kwargs
+        )
+    except BadRequest as exc:
+        err = str(exc).lower()
+        if "message is not modified" in err:
+            return
+        if _is_photo_edit_error(err):
+            await _replace_photo_with_text(query, text, reply_markup=reply_markup, **kwargs)
+            return
+        raise
 
 
 async def _edit_subscription(query, text, **kwargs):
     try:
         await query.edit_message_text(text, **kwargs)
     except BadRequest as exc:
-        if "message is not modified" not in str(exc).lower():
-            raise
+        err = str(exc).lower()
+        if "message is not modified" in err:
+            return
+        if _is_photo_edit_error(err):
+            await _replace_photo_with_text(
+                query, text,
+                reply_markup=kwargs.get("reply_markup"),
+            )
+            return
+        raise
 
 
 def _user_account_text(
@@ -2304,10 +2360,15 @@ def _wallet_qr_caption(label: str, link: str) -> str:
 
 
 def _wallet_qr_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
-    """SellBot subscription_links_keyboard parity (guide + back)."""
+    """SellBot subscription_links_keyboard parity (guide + back).
+
+    The guide button carries the subscription id so the OS chooser can
+    return to the same subscription (SellBot guide:back:s{id} parity).
+    """
     return InlineKeyboardMarkup([
         [TelegramInlineKeyboardButton(
-            "📚 راهنمای اتصال", callback_data="shop:guide",
+            "📚 راهنمای اتصال",
+            callback_data=f"shop:guidesub:{int(subscription_id)}",
         )],
         [TelegramInlineKeyboardButton(
             "🔙بازگشت",
@@ -2321,6 +2382,7 @@ def _build_wallet_admin_caption(
     order: dict[str, Any],
     result: dict[str, Any],
     service_name: str = "",
+    service_code: str = "",
     wallet_balance_after: int | None = None,
 ) -> str:
     """SellBot _build_subscription_created_caption parity for wallet orders."""
@@ -2341,9 +2403,10 @@ def _build_wallet_admin_caption(
     amount = order.get("amount")
     currency = str(order.get("currency") or "")
     toman, unit = _receipt_toman(amount, currency)
-    service_code = str(
-        result.get("smart_code")
-        or result.get("id")
+    # SellBot shows the 7-digit service code, never the smart-link token.
+    code = str(service_code or "").strip() or str(
+        result.get("id")
+        or result.get("subscription_id")
         or order.get("id")
         or "-"
     )
@@ -2364,7 +2427,7 @@ def _build_wallet_admin_caption(
             balance_val = 0
         balance_toman, balance_unit = _receipt_toman(balance_val, currency)
         lines.append(f"💼مانده کیف پول کاربر: {balance_toman:,} {balance_unit}")
-    lines.append(f"🔑شناسه اشتراک:{service_code}")
+    lines.append(f"🔑شناسه اشتراک:{code}")
     return "\n".join(lines)
 
 
@@ -2386,6 +2449,7 @@ async def _notify_admin_wallet_purchase(
             result.get("subscription_id") or result.get("id") or 0
         )
         service_name = str(order.get("plan_name") or "").strip()
+        subscription_code = ""
         lookup_actor = int(actor or 0)
         if not lookup_actor:
             try:
@@ -2405,20 +2469,26 @@ async def _notify_admin_wallet_purchase(
                     service_name = str(
                         item.get("service_name") or service_name
                     ).strip() or service_name
+                    # 7-digit service code (SellBot parity, never smart token).
+                    subscription_code = str(
+                        item.get("service_code") or ""
+                    ).strip()
             except Exception:
                 pass
         caption = _build_wallet_admin_caption(
             order=order,
             result=result,
             service_name=service_name,
+            service_code=subscription_code,
             wallet_balance_after=wallet_balance_after,
         )
         rows: list[list[TelegramInlineKeyboardButton]] = []
         user_title = str(display_name or "").strip() or str(customer_id or "-")
         if int(customer_id or 0) > 0:
-            rows.append([TelegramInlineKeyboardButton(
+            rows.append([_button(
                 f"👤 {user_title}",
                 callback_data=f"userbot:user:{int(customer_id)}",
+                settings={"colored_buttons": True, "button_theme": "smart"},
             )])
         async with Bot(token=token) as bot:
             await bot.send_message(
@@ -3453,11 +3523,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 confirm = _wallet_confirm_text(order_id)
             else:
                 confirm = f"✅ سفارش #{order_id} انجام شد."
-            await update.callback_query.edit_message_text(
-                confirm,
-                reply_markup=_home_inline_markup(settings),
-                disable_web_page_preview=True,
-            )
+            if wallet_paid:
+                # SellBot parity: confirmation carries no inline buttons;
+                # QR/status delivery with its own keyboard follows.
+                await update.callback_query.edit_message_text(
+                    confirm,
+                    disable_web_page_preview=True,
+                )
+            else:
+                await update.callback_query.edit_message_text(
+                    confirm,
+                    reply_markup=_home_inline_markup(settings),
+                    disable_web_page_preview=True,
+                )
             try:
                 await _deliver_wallet_purchase(
                     context, business, actor, settings, result
@@ -4170,7 +4248,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 return
             await update.callback_query.edit_message_text(
                 _wallet_confirm_text(order_id),
-                reply_markup=_home_inline_markup(settings),
+                disable_web_page_preview=True,
             )
             try:
                 await _deliver_wallet_purchase(
@@ -5089,6 +5167,58 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 reply_markup=_ticket_detail_markup(ticket, messages),
             )
             return
+        if data.startswith("shop:guidesub:"):
+            # Subscription-aware guide (SellBot guide:back:s{id} parity):
+            # opened from the delivery QR, returns to the same subscription.
+            parts = data.split(":")
+            try:
+                subscription_id = int(parts[2])
+            except (TypeError, ValueError, IndexError):
+                raise TenantBusinessError("invalid guide request")
+            platform = parts[3] if len(parts) > 3 else ""
+            if not platform:
+                guide = str(settings.get("guide_text") or "").strip()
+                rows = [
+                    [
+                        InlineKeyboardButton("📱 اندروید", callback_data=f"shop:guidesub:{subscription_id}:android"),
+                        InlineKeyboardButton("📱 iOS", callback_data=f"shop:guidesub:{subscription_id}:ios"),
+                    ],
+                    [
+                        InlineKeyboardButton("🖥️ ویندوز", callback_data=f"shop:guidesub:{subscription_id}:windows"),
+                        InlineKeyboardButton("💻 macOS", callback_data=f"shop:guidesub:{subscription_id}:mac"),
+                    ],
+                    [InlineKeyboardButton("🖥️ لینوکس", callback_data=f"shop:guidesub:{subscription_id}:linux")],
+                    [InlineKeyboardButton("🔙بازگشت", callback_data=f"shop:subrefresh:{subscription_id}")],
+                ]
+                await update.callback_query.answer()
+                await _safe_edit_text(
+                    update.callback_query,
+                    guide or "انتخاب سیستم عامل ⬇️",
+                    reply_markup=InlineKeyboardMarkup(rows),
+                )
+                return
+            guide_specs = {
+                "android": ("📱 راهنمای اندروید", "guide_android_text"),
+                "ios": ("📱 راهنمای iOS", "guide_ios_text"),
+                "windows": ("🖥️ راهنمای ویندوز", "guide_windows_text"),
+                "mac": ("💻 راهنمای macOS", "guide_mac_text"),
+                "linux": ("🖥️ راهنمای Linux", "guide_linux_text"),
+            }
+            if platform not in guide_specs:
+                raise TenantBusinessError("invalid guide platform")
+            label, setting_key = guide_specs[platform]
+            body = str(settings.get(setting_key) or "").strip()
+            await update.callback_query.answer()
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=body or label,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙بازگشت", callback_data=f"shop:guidesub:{subscription_id}")],
+                    [InlineKeyboardButton("🏠 منو", callback_data="runtime:home")],
+                ]),
+                disable_web_page_preview=True,
+            )
+            return
         if data == "shop:guide":
             guide = str(settings.get("guide_text") or "").strip()
             rows = [
@@ -5103,10 +5233,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 [InlineKeyboardButton("🖥️ لینوکس", callback_data="shop:guide:linux")],
                 [InlineKeyboardButton("↩️ منو", callback_data="runtime:home")],
             ]
-            await update.callback_query.edit_message_text(
+            await _safe_edit_text(
+                update.callback_query,
                 guide or "انتخاب سیستم عامل ⬇️",
                 reply_markup=InlineKeyboardMarkup(rows),
-                disable_web_page_preview=True,
             )
             return
         if data.startswith("shop:guide:"):
@@ -5122,13 +5252,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 raise TenantBusinessError("invalid guide platform")
             label, setting_key = guide_specs[platform]
             body = str(settings.get(setting_key) or "").strip()
-            await update.callback_query.edit_message_text(
+            await _safe_edit_text(
+                update.callback_query,
                 body or label,
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔙بازگشت", callback_data="shop:guide")],
                     [InlineKeyboardButton("🏠 منو", callback_data="runtime:home")],
                 ]),
-                disable_web_page_preview=True,
             )
             return
         if data == "shop:faq":

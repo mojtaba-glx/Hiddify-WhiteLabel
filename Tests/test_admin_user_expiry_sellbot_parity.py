@@ -1,15 +1,14 @@
 """SellBot parity for admin panel-user expiry (0-day stays active).
 
-Repro: a Hiddify user whose panel expiry is today (date-only, "0 روز دیگر")
-was shown as 🔴 منقضی in WhiteLabel while SellBot and the panel itself
-show 🟢 فعال until midnight.
+Repro: a Hiddify user whose panel expiry is today (date-only or an exact
+midnight "2026-10-14T00:00:00Z", "0 روز دیگر") was shown as 🔴 منقضی in
+WhiteLabel while SellBot and the panel itself show 🟢 فعال until midnight.
 
 Root: TenantRuntime/server_admin.user_status compared the exact instant
-(parse_utc(expires_at) <= utcnow()), so a date-only "today 00:00" was
-already past at any later hour. SellBot (AdminBot/servers.classify_user_status
-+ Shared/sub_aggregator._panel_user_exactly_expired) treats date-only values
-as valid through that calendar day and expires only when the date is past
-(days_left < 0). Exact timestamps / epoch values still expire at the instant.
+(parse_utc(expires_at) <= utcnow()), so midnight was already past at any
+later hour. SellBot (AdminBot/servers.classify_user_status) compares
+calendar days (end_dt.date() < today) for admin display. Exact-instant
+locking lives only in the delivery path (Shared/sub_aggregator parity).
 """
 
 from __future__ import annotations
@@ -34,7 +33,10 @@ def _row(**overrides):
 def test_date_only_today_is_not_expired() -> None:
     today = utcnow().date().isoformat()
     assert _panel_expiry_passed(today) is False
-    assert _panel_expiry_passed(today + "T00:00:00") is True  # exact midnight passed
+    # SellBot admin display is calendar-day based: even an exact midnight
+    # "todayT00:00:00" stays active through the day (live repro 2026-10-14).
+    assert _panel_expiry_passed(today + "T00:00:00") is False
+    assert _panel_expiry_passed(today + "T00:00:00Z") is False
     row = _row(expires_at=today)
     assert user_status(row) == "active"
 
@@ -46,13 +48,19 @@ def test_date_only_yesterday_is_expired() -> None:
     assert user_status(row) == "expired"
 
 
-def test_exact_timestamp_expires_at_instant() -> None:
-    past = iso_utc(utcnow() - timedelta(hours=1))
-    future = iso_utc(utcnow() + timedelta(hours=1))
-    assert _panel_expiry_passed(past) is True
-    assert _panel_expiry_passed(future) is False
-    assert user_status(_row(expires_at=past)) == "expired"
-    assert user_status(_row(expires_at=future)) == "active"
+def test_exact_timestamp_same_day_is_still_active_like_sellbot() -> None:
+    # SellBot admin display (AdminBot/servers.classify_user_status) compares
+    # calendar days: a live row "2026-10-14T00:00:00Z" stays active all day.
+    past_hour = iso_utc(utcnow() - timedelta(hours=1))
+    future_hour = iso_utc(utcnow() + timedelta(hours=1))
+    assert _panel_expiry_passed(past_hour) is False
+    assert _panel_expiry_passed(future_hour) is False
+    assert user_status(_row(expires_at=past_hour)) == "active"
+    assert user_status(_row(expires_at=future_hour)) == "active"
+    # Yesterday at any hour is past.
+    yesterday_noon = (utcnow() - timedelta(days=1)).date().isoformat() + "T12:00:00Z"
+    assert _panel_expiry_passed(yesterday_noon) is True
+    assert user_status(_row(expires_at=yesterday_noon)) == "expired"
 
 
 def test_empty_and_zero_expiry_never_expires() -> None:

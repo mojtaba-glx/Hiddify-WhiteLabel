@@ -61,10 +61,14 @@ def provider_kind(server) -> str:
 
 
 def _panel_expiry_passed(raw) -> bool:
-    """SellBot parity (Shared/sub_aggregator._panel_user_exactly_expired).
+    """SellBot parity (AdminBot/servers.classify_user_status).
 
-    Date-only values stay valid through that calendar day; exact timestamps
-    / epoch values (notably X-UI expiryTime) expire at the UTC instant.
+    Admin display compares calendar days, not the exact instant:
+    ``end_dt.date() < today``. A Hiddify ``2026-10-14T00:00:00Z`` therefore
+    stays 🟢 فعال through the whole day ("0 روز دیگر") and flips to
+    🔴 منقضی only when the date is past — exactly like SellBot and the
+    panel itself. Strict instant locking lives in the delivery path
+    (Shared/sub_aggregator parity), not in admin display.
     """
     text = str(raw or "").strip()
     if not text or text in {"0", "0.0"}:
@@ -74,18 +78,7 @@ def _panel_expiry_passed(raw) -> bool:
     except (ValueError, TypeError):
         return False
     try:
-        is_epoch = float(text) > 0
-    except (TypeError, ValueError):
-        is_epoch = False
-    has_clock = is_epoch or any(ch in text for ch in ("T", ":", "Z", "z", "+"))
-    now = utcnow()
-    if has_clock:
-        try:
-            return parsed <= now
-        except TypeError:
-            return False
-    try:
-        return parsed.date() < now.date()
+        return parsed.date() < utcnow().date()
     except (ValueError, TypeError, AttributeError):
         return False
 

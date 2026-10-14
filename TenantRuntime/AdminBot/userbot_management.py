@@ -2785,6 +2785,67 @@ async def _restore_backup(business: Any, data: bytes):
     )
 
 
+def _services_list_content(
+    items: list[dict[str, Any]], customer_id: int
+) -> tuple[str, InlineKeyboardMarkup]:
+    """SellBot send_user_services_list parity (header, buttons, back, empty).
+
+    The active bucket counts every non-expired stored status; only
+    ``expired`` counts as expired. Button emoji mirrors SellBot
+    (🔵 active / 🔴 expired).
+    """
+    total = len(items)
+    expired_count = sum(
+        1 for x in items if str(x.get("status") or "") == "expired"
+    )
+    active_count = total - expired_count
+    if not items:
+        text = (
+            "#️⃣ لیست سرویس‌ها\n"
+            "شما می‌توانید لیست سرویس‌ها و اطلاعات آن‌ها را اینجا مشاهده کنید\n"
+            f"📦 تعداد کل سرویس‌ها: {total}\n"
+            "🟢 سرویس‌های فعال: 0\n"
+            "🔴 سرویس‌های منقضی: 0\n\n"
+            "❌ سرویسی برای نمایش این کاربر یافت نشد."
+        )
+        return text, InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "🔙بازگشت", callback_data=f"userbot:user:{int(customer_id)}"
+            )
+        ]])
+    buttons = []
+    for x in items:
+        try:
+            sid = int(x.get("id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if sid <= 0:
+            continue
+        name = str(
+            x.get("service_name") or x.get("plan_name") or f"Service #{sid}"
+        )
+        emoji = "🔴" if str(x.get("status") or "") == "expired" else "🔵"
+        buttons.append(InlineKeyboardButton(
+            f"{emoji} |{name}",
+            callback_data=f"userbot:svc:{sid}",
+        ))
+    rows = [
+        list(reversed(buttons[i:i + 3]))
+        for i in range(0, len(buttons), 3)
+    ]
+    rows.append([InlineKeyboardButton(
+        "بازگشت🔙", callback_data=f"userbot:user:{int(customer_id)}"
+    )])
+    text = (
+        "#️⃣ لیست سرویس‌ها\n"
+        "شما می‌توانید لیست سرویس‌ها و اطلاعات آن‌ها را اینجا مشاهده کنید\n"
+        f"📦 تعداد کل سرویس‌ها: {total}\n"
+        f"🟢 سرویس‌های فعال: {active_count}\n"
+        f"🔴 سرویس‌های منقضی: {expired_count}"
+    )
+    return text, InlineKeyboardMarkup(rows)
+
+
 async def handle_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -2890,19 +2951,8 @@ async def handle_callback(
             items = business.subscriptions_for_customer_admin(
                 actor, customer_id=customer_id
             )
-            rows = [[InlineKeyboardButton(
-                f"📦 #{x['id']} · {x['plan_name']} · {x['status']}",
-                callback_data=f"userbot:svc:{int(x['id'])}",
-            )] for x in items]
-            rows.append([InlineKeyboardButton(
-                "👤بازگشت به پروفایل",
-                callback_data=f"userbot:user:{customer_id}",
-            )])
-            await _edit_or_send(
-                update,
-                f"📋 لیست سرویس‌ها\nتعداد: {len(items)}",
-                InlineKeyboardMarkup(rows),
-            )
+            text, markup = _services_list_content(items, customer_id)
+            await _edit_or_send(update, text, markup)
             return True
         if action == "orders":
             items = business.customer_orders_admin(actor, customer_id=customer_id)
