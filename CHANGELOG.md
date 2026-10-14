@@ -4,6 +4,20 @@ All notable changes to Hiddify-WhiteLabel are documented here.
 
 ---
 
+## [v1.3.11] – 2026-10-14
+
+### Fixed (TenantRuntime UserBot wallet top-up amount: SellBot parity)
+
+**Files:** `TenantRuntime/UserBot/handlers.py`, `Tests/test_wallet_topup_amount_sellbot_parity.py`
+
+| # | مشکل | قبل | جدید (مثل SellBot) |
+|---|---|---|---|
+| 1 | زیر متن `🔻 لطفا مبلغی که قصد شارژ...` دکمه اینلاین `↩️ کیف پول` بود | `edit_message_text` با `InlineKeyboardButton("↩️ کیف پول", shop:wallet)` | حذف پیام اینلاین و ارسال پیام جدید با کیبورد ریپلای `بازگشت` (`_cancel_keyboard` مثل `cancel_keyboard` در SellBot) |
+| 2 | `بازگشت/لغو` در مرحله مبلغ هندل نمی‌شد (خطای generیک) | بدون چک لغو؛ `int(...)` مستقیم → `❌ قالب یا وضعیت معتبر نیست` | `_is_cancel_text` مثل `_is_back_or_cancel_text` در SellBot → `عملیات لغو شد.` + منوی اصلی |
+| 3 | ورودی نامعتبر/کمتر از حداقل با دکمه اینلاین کیف پول برمی‌گشت | `InlineKeyboardButton("↩️ کیف پول")` برای `min_tx`؛ بدون re-prompt | ورودی غیرعددی/≤۰ همان متن مبلغ + کیبورد `بازگشت`؛ خطای حداقل با همان کیبورد مثل `WAIT_WALLET_TOPUP_AMOUNT` در SellBot |
+
+---
+
 ## [v1.3.10] – 2026-10-14
 
 ### Fixed (TenantRuntime UserBot wallet menu: SellBot parity)

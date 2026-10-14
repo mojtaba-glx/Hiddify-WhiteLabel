@@ -1348,6 +1348,27 @@ def _receipt_cancel_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def _cancel_keyboard() -> ReplyKeyboardMarkup:
+    """SellBot ``cancel_keyboard`` parity: single plain بازگشت reply button."""
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(BTN_RECEIPT_BACK)]],
+        resize_keyboard=True,
+    )
+
+
+def _is_cancel_text(text: object) -> bool:
+    """SellBot ``_is_back_or_cancel_text`` parity for wallet amount step."""
+    return str(text or "").strip() in {
+        "بازگشت",
+        "🔙بازگشت",
+        "🔙 بازگشت",
+        "لغو",
+        "❌لغو",
+        "❌ لغو",
+        "/cancel",
+    }
+
+
 def _split_card_destination(
     destination: object, network: object = ""
 ) -> tuple[str, str, str]:
@@ -3556,13 +3577,24 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "method_id": method_id,
                 "currency": currency,
             }
-            await update.callback_query.edit_message_text(
+            # SellBot parity (UserBot/main.py wallet:card): delete the inline
+            # menu and ask the amount with a ReplyKeyboard back button —
+            # not an inline wallet button.
+            prompt = (
                 "🔻 لطفا مبلغی که قصد شارژ حساب خود دارید را "
-                f"به {_wallet_currency_title(currency)} وارد کنید:",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("↩️ کیف پول", callback_data="shop:wallet")]
-                ]),
-            ); return
+                f"به {_wallet_currency_title(currency)} وارد کنید:"
+            )
+            try:
+                await update.callback_query.message.delete()
+            except Exception:
+                pass
+            await update.callback_query.answer()
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=prompt,
+                reply_markup=_cancel_keyboard(),
+            )
+            return
         if data.startswith("shop:wallettopupmethod:"):
             _, _, topup_id, method_id = data.split(":", 3)
             session = business.begin_wallet_topup_payment(
@@ -5441,9 +5473,37 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 )
                 return
             if kind == "wallet_topup_amount":
-                amount = int(text.replace(",", "").replace("٬", "").strip())
+                # SellBot parity (WAIT_WALLET_TOPUP_AMOUNT): بازگشت cancels
+                # with the main menu; invalid input re-prompts the same
+                # amount text with the بازگشت reply keyboard.
+                if _is_cancel_text(text):
+                    context.user_data.pop("biz_flow", None)
+                    await update.effective_message.reply_text(
+                        "عملیات لغو شد.",
+                        reply_markup=_main_keyboard(spec, business),
+                    )
+                    return
+                from TenantRuntime.UserBot.sellbot_utils import _to_en_digits
+
+                flow_currency = str(flow.get("currency") or "IRR")
+                amount_prompt = (
+                    "🔻 لطفا مبلغی که قصد شارژ حساب خود دارید را "
+                    f"به {_wallet_currency_title(flow_currency)} وارد کنید:"
+                )
+                raw = _to_en_digits(str(text or "")).replace(",", "").replace("٬", "").strip()
+                if not raw.isdigit():
+                    await update.effective_message.reply_text(
+                        amount_prompt,
+                        reply_markup=_cancel_keyboard(),
+                    )
+                    return
+                amount = int(raw)
                 if amount <= 0:
-                    raise ValueError("invalid wallet topup")
+                    await update.effective_message.reply_text(
+                        amount_prompt,
+                        reply_markup=_cancel_keyboard(),
+                    )
+                    return
                 settings = business.runtime_userbot_settings()
                 try:
                     min_tx = int(settings.get("min_transaction_toman") or 1)
@@ -5452,9 +5512,7 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 if amount < min_tx:
                     await update.effective_message.reply_text(
                         f"❌ حداقل مبلغ مجاز تراکنش {min_tx:,} تومان است.",
-                        reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton("↩️ کیف پول", callback_data="shop:wallet")
-                        ]]),
+                        reply_markup=_cancel_keyboard(),
                     )
                     return
                 method_id = int(flow["method_id"])
