@@ -1360,9 +1360,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     )
                 else:
                     notification = f"✅ پرداخت سفارش {reviewed['public_id']} تأیید شد."
+                setup_markup = None
+                if approved and reviewed.get("order_status") == "paid" and reviewed.get("order_kind") == "purchase":
+                    setup_markup = InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "🔑 راه‌اندازی ربات",
+                            callback_data=f"customer:setup:{int(reviewed['order_id'])}",
+                        )
+                    ]])
                 try:
                     await context.bot.send_message(
-                        chat_id=int(reviewed["telegram_user_id"]), text=notification
+                        chat_id=int(reviewed["telegram_user_id"]),
+                        text=notification,
+                        reply_markup=setup_markup,
                     )
                 except Exception as exc:
                     logger.warning(

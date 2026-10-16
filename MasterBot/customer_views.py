@@ -79,10 +79,15 @@ def plan_text(plan: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def plan_keyboard(plan_id: int) -> InlineKeyboardMarkup:
+def plan_keyboard(plan_id: int, *, has_multiple_plans: bool = True) -> InlineKeyboardMarkup:
+    back_button = (
+        InlineKeyboardButton("↩️ پلن‌ها", callback_data="customer:plans")
+        if has_multiple_plans
+        else InlineKeyboardButton("🏠 منوی مشتری", callback_data="customer:home")
+    )
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ ثبت سفارش", callback_data=f"customer:order:{int(plan_id)}")],
-        [InlineKeyboardButton("↩️ پلن‌ها", callback_data="customer:plans")],
+        [back_button],
     ])
 
 
@@ -101,6 +106,10 @@ def payment_keyboard(
             f"👛 پرداخت از کیف پول ({wallet_balance:,})",
             callback_data=f"customer:walletpay:{int(order['id'])}",
         )])
+    rows.append([
+        InlineKeyboardButton("↩️ پلن‌ها", callback_data="customer:plans"),
+        InlineKeyboardButton("❌ لغو سفارش", callback_data=f"customer:cancelorder:{int(order['id'])}"),
+    ])
     rows.append([InlineKeyboardButton("📋 سفارش‌های من", callback_data="customer:orders")])
     return InlineKeyboardMarkup(rows)
 
@@ -212,10 +221,23 @@ def orders_keyboard(orders: Iterable[dict[str, Any]]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for item in orders:
         if item["status"] == "pending_payment":
-            rows.append([InlineKeyboardButton(
-                f"❌ لغو {item['public_id']}",
-                callback_data=f"customer:cancelorder:{int(item['id'])}",
-            )])
+            rows.append([
+                InlineKeyboardButton(
+                    f"💳 پرداخت {item['public_id']}",
+                    callback_data=f"customer:payorder:{int(item['id'])}",
+                ),
+                InlineKeyboardButton(
+                    f"❌ لغو",
+                    callback_data=f"customer:cancelorder:{int(item['id'])}",
+                ),
+            ])
+        elif item["status"] == "paid" and item.get("kind") in ("purchase", "trial"):
+            rows.append([
+                InlineKeyboardButton(
+                    f"🔑 راه‌اندازی {item['public_id']}",
+                    callback_data=f"customer:setup:{int(item['id'])}",
+                ),
+            ])
     rows.append([InlineKeyboardButton("🏠 منوی مشتری", callback_data="customer:home")])
     return InlineKeyboardMarkup(rows)
 

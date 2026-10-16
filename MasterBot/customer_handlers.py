@@ -52,12 +52,18 @@ def actor_id(update: Update) -> int:
     return int(update.effective_user.id)
 
 
+def _to_en_digits(text: str) -> str:
+    return text.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+
+
 async def render(update: Update, text: str, keyboard: Any) -> None:
     if update.callback_query:
         try:
             await update.callback_query.edit_message_text(text=text, reply_markup=keyboard)
             return
-        except Exception:
+        except Exception as exc:
+            if "not modified" in str(exc).lower():
+                return
             # Reply keyboards cannot replace an inline message. Send a fresh
             # message for home and keep all other edit failures observable.
             if keyboard.__class__.__name__ != "ReplyKeyboardMarkup":
@@ -207,7 +213,7 @@ async def _show_plans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await render(
             update,
             plan_text(plan),
-            plan_keyboard(int(plan["id"])),
+            plan_keyboard(int(plan["id"]), has_multiple_plans=False),
         )
         return
     await render(
@@ -262,15 +268,40 @@ async def handle_customer_callback(
             return True
         if data.startswith("customer:plan:"):
             plan = service.get_public_plan(int(data.rsplit(":", 1)[1]))
-            await render(update, plan_text(plan), plan_keyboard(int(plan["id"])))
+            plans = service.list_public_plans()
+            await render(
+                update,
+                plan_text(plan),
+                plan_keyboard(int(plan["id"]), has_multiple_plans=(len(plans) > 1)),
+            )
             return True
         if data.startswith("customer:order:"):
             order = service.create_purchase_order(actor, int(data.rsplit(":", 1)[1]))
             methods = service.list_payment_methods(str(order["currency"]))
             balance = service.wallet_balance(actor, str(order["currency"]))
+            title = order.get("plan_name") or "خرید ربات"
             text = (
                 f"✅ سفارش {order['public_id']} ثبت شد.\n\n"
-                f"مبلغ: {int(order['amount']):,} {order['currency']}\n"
+                f"📦 پلن: {title}\n"
+                f"💰 مبلغ: {int(order['amount']):,} {order['currency']}\n\n"
+                "روش پرداخت را انتخاب کنید:"
+            )
+            if not methods and balance < int(order["amount"]):
+                text += "\n\nفعلاً روش پرداخت فعالی برای این ارز تنظیم نشده است."
+            await render(update, text, payment_keyboard(order, methods, wallet_balance=balance))
+            return True
+        if data.startswith("customer:payorder:"):
+            order_id = int(data.rsplit(":", 1)[1])
+            order = service.get_order(actor, order_id)
+            if order["status"] != "pending_payment":
+                raise CustomerPortalError("این سفارش در انتظار پرداخت نیست.")
+            methods = service.list_payment_methods(str(order["currency"]))
+            balance = service.wallet_balance(actor, str(order["currency"]))
+            context.user_data.pop("customer_flow", None)
+            title = order.get("plan_name") or ("خرید ربات" if order.get("kind") == "purchase" else "سفارش")
+            text = (
+                f"💳 سفارش {order['public_id']} · {title}\n\n"
+                f"💰 مبلغ: {int(order['amount']):,} {order['currency']}\n\n"
                 "روش پرداخت را انتخاب کنید:"
             )
             if not methods and balance < int(order["amount"]):
@@ -290,9 +321,10 @@ async def handle_customer_callback(
             await render(
                 update,
                 payment_instructions(method, order),
-                InlineKeyboardMarkup([[InlineKeyboardButton(
-                    "❌ لغو", callback_data="customer:orders"
-                )]]),
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ تغییر روش پرداخت", callback_data=f"customer:payorder:{int(order['id'])}")],
+                    [InlineKeyboardButton("❌ لغو", callback_data="customer:orders")],
+                ]),
             )
             return True
         if data.startswith("customer:walletpay:"):
@@ -392,6 +424,7 @@ async def handle_customer_callback(
             )
             return True
         if data == "customer:setup":
+            context.user_data.pop("customer_flow", None)
             orders = service.setup_candidates(actor)
             text = "🔑 راه‌اندازی ربات\n\nسفارش آماده را انتخاب کنید:"
             if not orders:
@@ -448,6 +481,16 @@ async def handle_customer_text(update: Update, context: ContextTypes.DEFAULT_TYP
     service = portal(context)
     actor = actor_id(update)
     try:
+        if text in {"لغو", "/cancel", "بازگشت", "❌ لغو", "🔙 بازگشت"}:
+            if context.user_data.get("customer_flow"):
+                context.user_data.pop("customer_flow", None)
+                await update.effective_message.reply_text(
+                    "عملیات لغو شد.", reply_markup=customer_main_keyboard()
+                )
+                return True
+        if text in {BUY, SERVICES, SETUP, WALLET, GUIDE, FEATURES, TRIAL}:
+            context.user_data.pop("customer_flow", None)
+
         if text == BUY:
             await _show_plans(update, context)
             return True
@@ -484,7 +527,13 @@ async def handle_customer_text(update: Update, context: ContextTypes.DEFAULT_TYP
             return False
         kind = str(flow.get("kind") or "")
         if kind == "wallet_topup_amount":
-            amount = int(text.replace(",", "").strip())
+            clean_digits = _to_en_digits(text).replace(",", "").strip()
+            if not clean_digits.isdigit() or int(clean_digits) <= 0:
+                await update.effective_message.reply_text(
+                    "❌ لطفاً مبلغ شارژ را به‌صورت یک عدد معتبر بزرگتر از صفر وارد کنید.\nبرای لغو، «لغو» را بفرستید."
+                )
+                return True
+            amount = int(clean_digits)
             order = service.create_wallet_topup(actor, currency=str(flow["currency"]), amount=amount)
             context.user_data.pop("customer_flow", None)
             methods = service.list_payment_methods(str(order["currency"]))
@@ -596,7 +645,18 @@ async def handle_customer_text(update: Update, context: ContextTypes.DEFAULT_TYP
             reply_markup=customer_main_keyboard(),
         )
         return True
-    except (ValueError, sqlite3.IntegrityError, MasterServiceError, ProvisioningError) as exc:
+    except ProvisioningError as exc:
+        logger.warning("Customer provisioning rejected: %s", safe_format_exception(exc))
+        msg = str(exc)
+        if "must be different" in msg:
+            error_msg = "❌ توکن ربات مدیریت و ربات کاربران باید دو ربات متفاوت باشند."
+        elif "verification failed" in msg or "verifier" in msg:
+            error_msg = "❌ توکن ارسالی نامعتبر است یا ارتباط با تلگرام برقرار نشد. لطفاً توکن صحیح را ارسال کنید."
+        else:
+            error_msg = f"❌ خطای راه‌اندازی ربات: {msg}"
+        await update.effective_message.reply_text(error_msg, reply_markup=customer_main_keyboard())
+        return True
+    except (ValueError, sqlite3.IntegrityError, MasterServiceError) as exc:
         logger.warning("Customer input rejected: %s", safe_format_exception(exc))
         await update.effective_message.reply_text(
             "❌ اطلاعات یا وضعیت درخواست معتبر نیست. دوباره تلاش کنید.",
