@@ -3295,14 +3295,17 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             direct_items = []
         else:
-            direct_items = [
-                business.customer_subscription_status(
-                    user_id,
-                    subscription_id=int(item["id"]),
-                    refresh=True,
-                )
-                for item in items
-            ]
+            def _fetch_direct_items() -> list[dict[str, Any]]:
+                return [
+                    business.customer_subscription_status(
+                        user_id,
+                        subscription_id=int(item["id"]),
+                        refresh=True,
+                    )
+                    for item in items
+                ]
+
+            direct_items = await asyncio.to_thread(_fetch_direct_items)
             text = ""
             status_markup = None
     except (TenantBusinessError, ValueError, sqlite3.Error):
@@ -3425,7 +3428,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if await dynamic_plans.handle_callback(update,context,business=business,actor=actor,settings=settings):
             return
         if data == "shop:account":
-            summary = business.customer_account_summary(actor, refresh=True)
+            summary = await asyncio.to_thread(
+                business.customer_account_summary, actor, refresh=True
+            )
             await update.callback_query.edit_message_text(
                 _user_account_text(summary, settings),
                 reply_markup=InlineKeyboardMarkup([
@@ -4173,7 +4178,38 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ); return
         if data.startswith("shop:walletpay:"):
             order_id = int(data.rsplit(":", 1)[1])
-            result = business.pay_order_with_wallet(actor, order_id=order_id)
+            try:
+                result = await asyncio.to_thread(
+                    business.pay_order_with_wallet, actor, order_id=order_id
+                )
+            except TenantBusinessError as biz_exc:
+                if "insufficient wallet balance" in str(biz_exc):
+                    order = business.order(actor, order_id)
+                    methods = business.list_methods(currency=str(order["currency"]))
+                    card_method = next(
+                        (
+                            m for m in methods
+                            if str(m.get("kind") or m.get("provider_key") or "") in {"card", "card_manual"}
+                        ),
+                        methods[0] if methods else None,
+                    )
+                    if card_method is not None:
+                        await _start_order_payment(
+                            update,
+                            context,
+                            business=business,
+                            actor=actor,
+                            settings=settings,
+                            order_id=order_id,
+                            method_id=int(card_method["id"]),
+                        )
+                        return
+                    await update.callback_query.answer(
+                        "❌ موجودی کیف پول کافی نیست و روش پرداخت مستقیمی نیز فعال نشده است.",
+                        show_alert=True,
+                    )
+                    return
+                raise
             try:
                 full_order = business.order(actor, order_id)
             except Exception:
@@ -4378,9 +4414,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             action = data.split(":")[1]
             subscription_id = int(data.rsplit(":", 1)[1])
             try:
-                item = business.customer_subscription_status(actor,
+                item = await asyncio.to_thread(
+                    business.customer_subscription_status,
+                    actor,
                     subscription_id=subscription_id,
-                    refresh=action in {"substatus", "subrefresh"})
+                    refresh=action in {"substatus", "subrefresh"},
+                )
             except (TenantBusinessError, ValueError):
                 await update.callback_query.answer()
                 await _edit_subscription(
@@ -4391,7 +4430,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     ]]),
                 )
                 return
-            if _single_subscription_visibility(business, actor, item, settings) != "visible":
+            if (
+                await asyncio.to_thread(
+                    _single_subscription_visibility,
+                    business,
+                    actor,
+                    item,
+                    settings,
+                )
+            ) != "visible":
                 await update.callback_query.answer()
                 await _edit_subscription(
                     update.callback_query,
@@ -4447,10 +4494,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     return
                 await update.callback_query.answer("در حال تغییر لینک…")
                 try:
-                    item = business.rotate_customer_subscription(actor, subscription_id=subscription_id)
+                    item = await asyncio.to_thread(
+                        business.rotate_customer_subscription,
+                        actor,
+                        subscription_id=subscription_id,
+                    )
                     notice = "✅ لینک اشتراک تغییر کرد؛ لینک جدید را از «کانفیگ ها» دریافت کنید.\n\n"
                 except TenantBusinessError:
-                    item = business.customer_subscription_status(actor, subscription_id=subscription_id, refresh=False)
+                    item = await asyncio.to_thread(
+                        business.customer_subscription_status,
+                        actor,
+                        subscription_id=subscription_id,
+                        refresh=False,
+                    )
                     notice = (
                         "⚠️ تغییر لینک کامل نشد. برای ادامه، «ادامه تغییر لینک» را بزنید. در صورت تکرار خطا با پشتیبانی تماس بگیرید.\n\n"
                         if item.get("rotation_pending") else
@@ -4594,8 +4650,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
                 return
             subscription_id = int(data.rsplit(":", 1)[1])
-            configs = business.subscription_configs(
-                actor, subscription_id=subscription_id
+            configs = await asyncio.to_thread(
+                business.subscription_configs,
+                actor,
+                subscription_id=subscription_id,
             )
             ordered_servers = _ordered_indexed(
                 configs,
@@ -4652,8 +4710,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
                 return
             server_index = int(raw_server_index)
-            configs = business.subscription_configs(
-                actor, subscription_id=subscription_id
+            configs = await asyncio.to_thread(
+                business.subscription_configs,
+                actor,
+                subscription_id=subscription_id,
             )
             if server_index < 0 or server_index >= len(configs):
                 raise TenantBusinessError("config server is unavailable")
@@ -4745,8 +4805,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 return
             server_index = int(parts[3])
             config_index = int(parts[4])
-            configs = business.subscription_configs(
-                actor, subscription_id=subscription_id
+            configs = await asyncio.to_thread(
+                business.subscription_configs,
+                actor,
+                subscription_id=subscription_id,
             )
             if server_index < 0 or server_index >= len(configs):
                 raise TenantBusinessError("config server is unavailable")
@@ -5338,7 +5400,8 @@ async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     )
                     return
                 try:
-                    result = business.claim_free_trial(
+                    result = await asyncio.to_thread(
+                        business.claim_free_trial,
                         actor,
                         server_id=int(flow["server_id"]),
                         service_name=service_name,

@@ -113,9 +113,12 @@ async def _process_approved_direct_buy_payments(
         attempts = int(order.get("fulfillment_attempts") or 0)
 
         try:
-            result = business.fulfill_paid_order(
-                business.owner_telegram_id, order_id=order_id
-            )
+            def _fulfill():
+                return business.fulfill_paid_order(
+                    business.owner_telegram_id, order_id=order_id
+                )
+
+            result = await asyncio.to_thread(_fulfill)
             if not result:
                 continue
 

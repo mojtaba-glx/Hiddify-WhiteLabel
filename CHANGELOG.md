@@ -4,6 +4,49 @@ All notable changes to Hiddify-WhiteLabel are documented here.
 
 ---
 
+## [v1.3.14] – 2026-10-16
+
+### Fixed (TenantRuntime UserBot qr_and_configs import & test coverage)
+
+**Files:** `TenantRuntime/UserBot/qr_and_configs.py`, `Tests/test_userbot_qr_and_configs.py`
+
+| # | بخش | مشکل | اصلاح |
+|---|---|---|---|
+| 1 | ایمپورت در `qr_and_configs.py:27` | خطای `ImportError: cannot import name 'Update' from 'telegram.ext'` | اصلاح ایمپورت `Update` از `telegram` و `ContextTypes` از `telegram.ext` |
+| 2 | پوشش آزمون ماژول | ماژول فاقد تست مستقیم بود | افزودن آزمون‌های جامع `Tests/test_userbot_qr_and_configs.py` برای اعتبارسنجی توابع خروجی، تجزیه URI، ارسال لینک و برون‌سپاری با `asyncio.to_thread` |
+
+---
+
+## [v1.3.13] – 2026-10-16
+
+### Performance & Hardening (Offload blocking panel I/O off the UserBot event loop)
+
+**Files:** `TenantRuntime/UserBot/handlers.py`, `TenantRuntime/UserBot/direct_buy_delivery.py`, `TenantRuntime/UserBot/qr_and_configs.py`, `Database/connection.py`, `Tests/test_userbot_panel_offload.py`
+
+| # | بخش | مشکل | اصلاح (Offload با `asyncio.to_thread`) |
+|---|---|---|---|
+| 1 | `show_status` در `UserBot/handlers.py` | فراخوانی همگام `customer_subscription_status(..., refresh=True)` مستقیماً روی حلقه اصلی که در صورت کندی پنل کل ربات را مسدود می‌کرد | انتقال کل حلقه دریافت به تابع پس‌زمینه با `await asyncio.to_thread(_fetch_direct_items)` با حفظ کامل استثناها و فال‌بک |
+| 2 | کلیک روی `shop:account` در `UserBot/handlers.py` | فراخوانی همگام `customer_account_summary(actor, refresh=True)` روی event loop | انتقال به ترد پس‌زمینه با `await asyncio.to_thread(business.customer_account_summary, actor, refresh=True)` |
+| 3 | کلیک‌های `shop:substatus:`, `shop:subrefresh:` و اعتبارسنجی | فراخوانی `customer_subscription_status(refresh=True)` و `_single_subscription_visibility` روی حلقه اصلی | اجرای هر دو در ترد پس‌زمینه با `asyncio.to_thread` بدون تغییر ظاهر و دکمه‌ها |
+| 4 | عملیات پنلی `subrotateconfirm`, `subscription_configs`, `walletpay`, `claim_free_trial` | فراخوانی‌های مستقیم متدهای متصل به پنل و ساخت کانفیگ روی لوپ اصلی | بسته‌بندی با `await asyncio.to_thread(...)` جهت تضمین پایداری و عدم توقف لوپ |
+| 5 | اتصال پایگاه‌داده SQLite | خطای `ProgrammingError` اس‌کیولایت هنگام فراخوانی از تردهای پس‌زمینه worker | فعال‌سازی `check_same_thread=False` در `Database/connection.py` جهت پشتیبانی امن از `asyncio.to_thread` |
+
+---
+
+## [v1.3.12] – 2026-10-16
+
+### Fixed (TenantRuntime UserBot purchase delivery loop & wallet card-to-card fallback: SellBot parity)
+
+**Files:** `TenantRuntime/worker.py`, `TenantRuntime/UserBot/handlers.py`, `TenantRuntime/UserBot/force_join_and_events.py`
+
+| # | مشکل | قبل | جدید (مثل SellBot) |
+|---|---|---|---|
+| 1 | تسک پس‌زمینه `direct_buy_delivery_loop` در استارت ربات‌های تننت اجرا نمی‌شد | `register_background_tasks` تعریف شده بود ولی فراخوانی نمی‌شد؛ فیش‌های تأییدشده خودکار تحویل نمی‌شدند | راه‌اندازی و ثبت چرخه خودکار تحویل اشتراک در `TenantApplicationWorker.start` و خاموش‌سازی در `stop` |
+| 2 | خطای ایمپورت `Update` در `force_join_and_events.py` | `from telegram.ext import Application, ContextTypes, Update` (ایمپورت نادرست `Update` از `telegram.ext`) | اصلاح به `from telegram import Bot, Update` و `from telegram.ext import Application, ContextTypes` |
+| 3 | کلیک روی پرداخت از کیف پول هنگام کمبود موجودی | پرتاب خطای `TenantBusinessError` بدون مدیریت و قفل شدن دکمه کاربر | انتقال خودکار و روان به مرحله پرداخت مستقیم و دستورالعمل کارت‌به‌کارت دقیقاً مشابه خط ۸۲۷۰ در SellBot |
+
+---
+
 ## [v1.3.11] – 2026-10-14
 
 ### Fixed (TenantRuntime UserBot wallet top-up amount: SellBot parity)

@@ -23,8 +23,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from telegram import Bot
-from telegram.ext import Application, ContextTypes, Update
+from telegram import Bot, Update
+from telegram.ext import Application, ContextTypes
 
 from TenantRuntime.business import TenantBusinessError
 

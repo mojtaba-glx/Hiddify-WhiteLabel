@@ -92,6 +92,19 @@ class TenantApplicationWorker:
             )
             await self.application.start()
             self.started = True
+            if self.spec.role == "user":
+                bot_data = getattr(self.application, "bot_data", None)
+                if isinstance(bot_data, dict):
+                    business = bot_data.get("tenant_business")
+                    if business is not None and hasattr(self.application, "create_task"):
+                        try:
+                            from TenantRuntime.UserBot.force_join_and_events import (
+                                register_background_tasks,
+                            )
+
+                            register_background_tasks(self.application, business)
+                        except Exception:
+                            pass
         except Exception:
             if updater.running:
                 try:
@@ -112,6 +125,17 @@ class TenantApplicationWorker:
             raise RuntimeWorkerError("tenant bot failed to start") from None
 
     async def stop(self) -> None:
+        if self.spec.role == "user":
+            bot_data = getattr(self.application, "bot_data", None)
+            if isinstance(bot_data, dict):
+                try:
+                    from TenantRuntime.UserBot.force_join_and_events import (
+                        shutdown_background_tasks,
+                    )
+
+                    await shutdown_background_tasks(self.application)
+                except Exception:
+                    pass
         updater = self.application.updater
         try:
             if updater is not None and updater.running:

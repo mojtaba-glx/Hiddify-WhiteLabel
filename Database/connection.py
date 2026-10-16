@@ -113,7 +113,7 @@ def connect(db_path: str) -> sqlite3.Connection:
     """Open an autocommit SQLite connection with FK, WAL, timeout, 0600/0700 modes."""
     path = Path(db_path)
     _secure_parent_dir(path)
-    conn = sqlite3.connect(str(path), isolation_level=None)
+    conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     try:

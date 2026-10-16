@@ -17,13 +17,14 @@ Differences from SellBot:
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import random
 from typing import Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ContextTypes
 
 from TenantRuntime.business import TenantBusinessError
 
@@ -155,8 +156,10 @@ async def send_direct_configs(
         return
 
     try:
-        raw_content = business.subscription_raw_content(
-            actor, subscription_id=subscription_id
+        raw_content = await asyncio.to_thread(
+            business.subscription_raw_content,
+            actor,
+            subscription_id=subscription_id,
         )
     except TenantBusinessError as exc:
         if update.callback_query:
