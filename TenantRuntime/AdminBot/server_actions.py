@@ -126,6 +126,39 @@ def _normalize_digit_text(value):
     return str(value or "").translate(_PERSIAN_DIGITS_TRANS)
 
 
+def _normalize_num_token(raw: str) -> str:
+    token = str(raw or "").strip().translate(_PERSIAN_DIGITS_TRANS)
+    token = token.replace("٬", "").replace("٫", ".").replace(" ", "")
+    if token.count(",") > 0:
+        if "." not in token and token.count(",") == 1 and len(token.split(",")[-1]) <= 2:
+            token = token.replace(",", ".")
+        else:
+            token = token.replace(",", "")
+    return token
+
+
+def _parse_positive_float(raw: str) -> float | None:
+    token = _normalize_num_token(raw)
+    try:
+        value = float(token)
+    except Exception:
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def _parse_positive_int(raw: str) -> int | None:
+    token = _normalize_num_token(raw)
+    try:
+        value = int(token)
+    except Exception:
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
 def _format_discount_tiers(tiers):
     normalized = sorted(
         (
@@ -466,11 +499,19 @@ def _display_safe_note(note) -> str:
     raw = str(note or "").strip()
     if not raw:
         return "—"
+    cleaned = re.sub(
+        r"(?i)(?:\|\s*)?whitelabel\s+tenant=\d+\s+subscription=[-\d]+(?:\s*\|)?",
+        "",
+        raw,
+    ).strip()
+    cleaned = cleaned.strip("|").strip()
+    if not cleaned:
+        return "—"
     fa_digits = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
     return re.sub(
         r"(?i)\b(HiddifyBot:\s*[\u200c\u200d\u200e\u200f]*)([0-9]+)\b",
         lambda m: f"{m.group(1)}{m.group(2).translate(fa_digits)}",
-        raw,
+        cleaned,
     )
 
 
@@ -662,12 +703,18 @@ def _creation_summary(flow: dict) -> str:
             f"📊 مصرف: {_format_gb(flow['gb'])} گیگابایت\n"
             f"📅 مدت: {int(flow['days'])} روز"
         )
+    base_name = str(flow.get("name") or "").strip()
+    usage = float(flow.get("gb") or 0)
+    days = int(flow.get("days") or 0)
+    sample_names = [base_name if i == 0 else f"{base_name}{i}" for i in range(max(0, min(count, 6)))]
+    names_preview = "، ".join(sample_names) if sample_names else "-"
     return (
         "لطفاً اطلاعات را تایید کنید:\n"
-        f"👥 تعداد کاربران: {count}\n"
-        f"👤 پیشوند نام: {flow['name']}\n"
-        f"📊 حجم هر کاربر: {_format_gb(flow['gb'])} گیگابایت\n"
-        f"📅 مدت: {int(flow['days'])} روز"
+        f"👥 تعداد: {count} کاربر\n"
+        f"👤 نام پایه: {base_name}\n"
+        f"📊 حجم هر کاربر: {_format_gb(usage)} گیگابایت\n"
+        f"📅 مدت هر کاربر: {days} روز\n"
+        f"🧾 نمونه نام‌ها: {names_preview}"
     )
 
 
@@ -1059,7 +1106,7 @@ async def handle_callback(update, context, *, business, actor):
                 operation_key=uuid.uuid4().hex,
             ),
             (
-                "➕ افزودن چندین کاربر\n👥 چند کاربر می‌خواهید اضافه کنید؟\nمثال: 5"
+                "➕ افزودن چندین کاربر\n\n👥 چند کاربر می‌خواهید اضافه کنید؟\nمثال: 5"
                 if multi
                 else "لطفاً نام کاربر را وارد کنید:"
             ),
@@ -2124,15 +2171,44 @@ async def handle_text(update, context, *, business, actor):
                 )
             return True
         if kind == "create_count":
-            count = int(text)
-            if not 1 <= count <= 100:
-                raise ValueError("count outside bounds")
-            flow.update(count=count, kind="create_name")
-            next_prompt = "پیشوند نام کاربران را وارد کنید:"
+            count = _parse_positive_int(text)
+            if count is None:
+                await update.effective_message.reply_text(
+                    "❌ لطفاً تعداد معتبر وارد کنید.\nمثال: 5",
+                    reply_markup=cancel_keyboard(),
+                )
+                return True
+            if count > 100:
+                await update.effective_message.reply_text(
+                    "❌ حداکثر 100 کاربر را در هر مرحله می‌توانید اضافه کنید.",
+                    reply_markup=cancel_keyboard(),
+                )
+                return True
+            flow.update(count=int(count), kind="create_name")
+            await update.effective_message.reply_text(
+                "✅ تعداد کاربران ثبت شد.\n"
+                "📝 لطفاً نام پایه را وارد کنید.\n"
+                "مثال: تست",
+                reply_markup=cancel_keyboard(),
+            )
+            return True
         elif kind == "create_name":
-            if not 1 <= len(text) <= 64:
-                raise ValueError("name outside bounds")
-            flow["name"] = text
+            clean_name = str(text or "").strip()
+            if not clean_name:
+                await update.effective_message.reply_text(
+                    "❌ نام پایه نمی‌تواند خالی باشد."
+                    if int(flow.get("count") or 1) > 1
+                    else "❌ نام کاربر نمی‌تواند خالی باشد.",
+                    reply_markup=cancel_keyboard(),
+                )
+                return True
+            if len(clean_name) > 64 or "\n" in clean_name:
+                await update.effective_message.reply_text(
+                    "❌ نام باید حداکثر 64 کاراکتر و در یک خط باشد.",
+                    reply_markup=cancel_keyboard(),
+                )
+                return True
+            flow["name"] = clean_name
             if "gb" in flow and "days" in flow:
                 flow["kind"] = "create_confirm"
                 await update.effective_message.reply_text(
@@ -2141,24 +2217,70 @@ async def handle_text(update, context, *, business, actor):
                 )
                 return True
             flow["kind"] = "create_gb"
-            next_prompt = "حجم اشتراک را به گیگابایت وارد کنید:"
+            is_multi = int(flow.get("count") or 1) > 1
+            prompt_text = (
+                "📊 لطفاً حجم هر کاربر (GB) را وارد کنید:\nمثال: 5 یا 0.5"
+                if is_multi
+                else "📊 لطفاً محدودیت استفاده کاربر(GB) را وارد کنید:\nمثال: 30"
+            )
+            await update.effective_message.reply_text(
+                prompt_text,
+                reply_markup=cancel_keyboard(),
+            )
+            return True
         elif kind == "create_gb":
-            gb = float(text)
-            if not 0 < gb <= 1000000:
-                raise ValueError("quota outside bounds")
-            flow.update(gb=gb, kind="create_days")
-            next_prompt = "مدت اشتراک را به روز وارد کنید:"
+            usage_gb = _parse_positive_float(text)
+            is_multi = int(flow.get("count") or 1) > 1
+            if usage_gb is None or usage_gb > 1000000:
+                err_text = (
+                    "❌ لطفاً یک عدد معتبر بزرگ‌تر از صفر برای حجم وارد کنید.\nمثال: 5 یا 0.5"
+                    if is_multi
+                    else "❌ لطفاً یک عدد معتبر بزرگ‌تر از صفر برای حجم (GB) وارد کنید.\nمثال: 30"
+                )
+                await update.effective_message.reply_text(
+                    err_text,
+                    reply_markup=cancel_keyboard(),
+                )
+                return True
+            flow.update(gb=float(usage_gb), kind="create_days")
+            prompt_text = (
+                "📅 لطفاً مدت هر کاربر (روز) را وارد کنید:\nمثال: 30"
+                if is_multi
+                else "📅 لطفاً مدت اشتراک (به روز) را وارد کنید:\nمثال: 30"
+            )
+            await update.effective_message.reply_text(
+                prompt_text,
+                reply_markup=cancel_keyboard(),
+            )
+            return True
         elif kind == "create_days":
-            days = int(text)
-            if not 1 <= days <= 36500:
-                raise ValueError("days outside bounds")
-            flow.update(days=days, kind="create_confirm")
+            days = _parse_positive_int(text)
+            is_multi = int(flow.get("count") or 1) > 1
+            if days is None or days > 36500:
+                err_text = (
+                    "❌ لطفاً یک عدد صحیح معتبر برای روز وارد کنید.\nمثال: 30"
+                    if is_multi
+                    else "❌ لطفاً یک عدد صحیح بزرگ‌تر از صفر برای روزها وارد کنید.\nمثال: 30"
+                )
+                await update.effective_message.reply_text(
+                    err_text,
+                    reply_markup=cancel_keyboard(),
+                )
+                return True
+            flow.update(days=int(days), kind="create_confirm")
             await update.effective_message.reply_text(
                 _creation_summary(flow),
                 reply_markup=confirm_add_user_keyboard(),
             )
             return True
         elif kind == "create_confirm":
+            if text in {"❌ لغو", "لغو", "/cancel"}:
+                context.user_data.pop(FLOW, None)
+                await update.effective_message.reply_text(
+                    "❌ عملیات افزودن کاربر لغو شد.",
+                    reply_markup=admin_main_keyboard(),
+                )
+                return True
             if text not in {"✅ تایید", "✅تایید", "تایید", "تأیید"}:
                 await update.effective_message.reply_text(
                     "لطفاً با دکمه‌های «✅ تایید» یا «❌ لغو» پاسخ دهید.",
@@ -2233,22 +2355,6 @@ async def handle_text(update, context, *, business, actor):
                     sid,
                     int(user["id"]),
                 )
-                if int(flow.get("count") or 1) > 1:
-                    native = _panel_native_link(
-                        business,
-                        sid,
-                        str(user.get("external_ref") or ""),
-                    )
-                    bot = getattr(context, "bot", None)
-                    if native and bot is not None:
-                        chat_id = getattr(update.effective_chat, "id", None) or actor
-                        await bot.send_photo(
-                            chat_id=chat_id,
-                            photo=_qr_image(native),
-                            caption=(
-                                f"🔗 لینک اشتراک {user.get('name')}:\n{native}"
-                            ),
-                        )
             if len(users) > detail_limit:
                 await update.effective_message.reply_text(
                     f"ℹ️ جزئیات فقط برای {detail_limit} کاربر اول ارسال شد."

@@ -21,6 +21,74 @@ TRIAL = "🎁 لایسنس تست"
 CUSTOMER_BUTTONS = frozenset({BUY, SERVICES, SETUP, WALLET, GUIDE, FEATURES, TRIAL})
 
 
+def currency_label(currency: object) -> str:
+    code = str(currency or "").strip().upper()
+    if code in ("TOMAN", "IRT", "تومان"):
+        return "تومان"
+    if code == "USD":
+        return "USD"
+    if code == "USDT":
+        return "USDT"
+    if code == "EUR":
+        return "EUR"
+    if code == "IRR":
+        return "ریال"
+    return code
+
+
+def wallet_topup_keyboard(currency: str) -> InlineKeyboardMarkup:
+    code = str(currency or "").strip().upper()
+    rows: list[list[InlineKeyboardButton]] = []
+    if code in ("TOMAN", "IRT", "تومان"):
+        presets = [50_000, 100_000, 200_000, 500_000, 1_000_000, 2_000_000]
+        row: list[InlineKeyboardButton] = []
+        for amt in presets:
+            row.append(
+                InlineKeyboardButton(
+                    f"{amt:,} تومان",
+                    callback_data=f"customer:topuppreset:{code}:{amt}",
+                )
+            )
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+    elif code in ("USD", "USDT"):
+        presets = [10, 25, 50, 100]
+        row = []
+        for amt in presets:
+            label = f"${amt}" if code == "USD" else f"{amt} USDT"
+            row.append(
+                InlineKeyboardButton(
+                    label,
+                    callback_data=f"customer:topuppreset:{code}:{amt}",
+                )
+            )
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+    rows.append([
+        InlineKeyboardButton("↩️ کیف پول", callback_data="customer:wallet"),
+        InlineKeyboardButton("🏠 منوی مشتری", callback_data="customer:home"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def wallet_topup_text(currency: str) -> str:
+    code = str(currency or "").strip().upper()
+    label = currency_label(code)
+    example = "100000" if code in ("TOMAN", "IRT", "تومان") else "25"
+    return (
+        f"💳 شارژ کیف پول ({label})\n\n"
+        f"💰 لطفاً یکی از مبالغ آماده زیر را انتخاب کنید یا مبلغ دلخواه خود را به عدد (به {label}) بفرستید.\n\n"
+        f"💡 مثال: {example}\n"
+        "❌ برای انصراف، «لغو» را بفرستید یا از دکمه‌های زیر استفاده کنید."
+    )
+
+
 def customer_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
@@ -106,29 +174,86 @@ def payment_keyboard(
             f"👛 پرداخت از کیف پول ({wallet_balance:,})",
             callback_data=f"customer:walletpay:{int(order['id'])}",
         )])
+    back_button = (
+        InlineKeyboardButton("↩️ کیف پول", callback_data="customer:wallet")
+        if order.get("kind") == "wallet_topup"
+        else (
+            InlineKeyboardButton("↩️ سرویس‌ها", callback_data="customer:services")
+            if order.get("kind") == "renewal"
+            else InlineKeyboardButton("↩️ پلن‌ها", callback_data="customer:plans")
+        )
+    )
     rows.append([
-        InlineKeyboardButton("↩️ پلن‌ها", callback_data="customer:plans"),
+        back_button,
         InlineKeyboardButton("❌ لغو سفارش", callback_data=f"customer:cancelorder:{int(order['id'])}"),
     ])
     rows.append([InlineKeyboardButton("📋 سفارش‌های من", callback_data="customer:orders")])
     return InlineKeyboardMarkup(rows)
 
 
-def payment_instructions(method: dict[str, Any], order: dict[str, Any]) -> str:
+def payment_instructions(
+    method: dict[str, Any],
+    order: dict[str, Any],
+    *,
+    settings: Optional[dict[str, Any]] = None,
+) -> str:
+    currency = str(order.get("currency") or "")
+    curr_title = currency_label(currency)
+    template = str((settings or {}).get("card_to_card_text") or "").strip()
+    if method.get("kind") == "card" and template and template not in {"0", "none", "null"}:
+        dest = str(method.get("destination") or "")
+        card_num = dest.split("|")[0].strip()
+        owner = str(method.get("recipient") or (dest.split("|")[1].strip() if len(dest.split("|")) > 1 else "")).strip()
+        bank = str(method.get("network") or (dest.split("|")[2].strip() if len(dest.split("|")) > 2 else "")).strip()
+        amount_str = f"{int(order['amount']):,} {curr_title}"
+        formatted = (
+            template.replace("{CARD}", card_num)
+            .replace("{OWNER}", owner)
+            .replace("{BANK}", bank)
+            .replace("{AMOUNT}", amount_str)
+            .replace("{ORDER}", str(order.get("public_id") or ""))
+        )
+        parts = [formatted]
+        if method.get("instructions"):
+            parts.extend(["", str(method["instructions"])])
+        if bool((settings or {}).get("require_last4_for_card_receipt")):
+            parts.extend(["", "🔢 لطفاً هنگام ارسال رسید، ۴ رقم آخر شماره کارت خود را نیز ذکر کنید."])
+        parts.extend([
+            "",
+            "📸 پس از پرداخت، شماره پیگیری را بفرستید یا تصویر رسید را ارسال کنید.",
+        ])
+        return "\n".join(parts)
+
     parts = [
         "💳 اطلاعات پرداخت", "",
         f"سفارش: {order['public_id']}",
-        f"مبلغ: {int(order['amount']):,} {order['currency']}",
+        f"مبلغ: {int(order['amount']):,} {curr_title}",
         f"روش: {method['title']}",
-        f"مقصد: {method['destination']}",
     ]
-    if method.get("recipient"):
-        parts.append(f"به نام: {method['recipient']}")
-    if method.get("network"):
-        parts.append(f"شبکه: {method['network']}")
+    if method.get("kind") == "card":
+        dest = str(method.get("destination") or "")
+        card_num = dest.split("|")[0].strip()
+        owner = str(method.get("recipient") or (dest.split("|")[1].strip() if len(dest.split("|")) > 1 else "")).strip()
+        bank = str(method.get("network") or (dest.split("|")[2].strip() if len(dest.split("|")) > 2 else "")).strip()
+        if bank:
+            parts.append(f"بانک: {bank}")
+        parts.append(f"شماره کارت: {card_num}")
+        if owner:
+            parts.append(f"به نام: {owner}")
+    else:
+        parts.append(f"مقصد: {method['destination']}")
+        if method.get("recipient"):
+            parts.append(f"به نام: {method['recipient']}")
+        if method.get("network"):
+            parts.append(f"شبکه: {method['network']}")
     if method.get("instructions"):
         parts.extend(["", str(method["instructions"])])
-    parts.extend(["", "پس از پرداخت، کد پیگیری را بفرستید یا تصویر رسید را ارسال کنید."])
+    if method.get("kind") == "card" and bool((settings or {}).get("require_last4_for_card_receipt")):
+        parts.extend(["", "🔢 لطفاً هنگام ارسال رسید، ۴ رقم آخر شماره کارت خود را نیز ذکر کنید."])
+    parts.extend([
+        "",
+        "📸 پس از پرداخت، شماره پیگیری را بفرستید یا تصویر رسید را ارسال کنید.",
+    ])
     return "\n".join(parts)
 
 

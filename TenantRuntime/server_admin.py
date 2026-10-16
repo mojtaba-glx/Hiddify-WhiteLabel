@@ -406,7 +406,7 @@ class ServerAdminService:
                     f"wl-admin:{self.tenant_id}:{sid}:{operation_key}:{index}",
                 )
             )
-            label = clean if count == 1 else f"{clean}-{index+1}"
+            label = clean if count == 1 else (clean if index == 0 else f"{clean}{index}")
             existing = self.conn.execute(
                 "SELECT * FROM tenant_panel_users "
                 "WHERE tenant_id=? AND server_id=? AND state!='deleted' "
@@ -457,6 +457,7 @@ class ServerAdminService:
                 continue
 
             uid = int(existing["id"])
+            admin_comment = comment or f"HiddifyBot:{actor}"
             request = ProvisionRequest(
                 tenant_id=self.tenant_id,
                 server_id=int(sid),
@@ -468,6 +469,7 @@ class ServerAdminService:
                 idempotency_key=f"admin:{operation_key}:{index}",
                 external_ref=requested_ref,
                 name=label,
+                comment=admin_comment,
             )
 
             panel_ref = requested_ref
@@ -514,9 +516,9 @@ class ServerAdminService:
 
             # The create request already carries the final name/package.  Do
             # not require an extra PATCH just to rewrite the same name.
-            note = str(comment or "").strip()
+            note = str(admin_comment or "").strip()
             remote = None
-            if note:
+            if comment:
                 try:
                     remote = await self.call(
                         sid,

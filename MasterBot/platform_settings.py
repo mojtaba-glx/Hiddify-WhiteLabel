@@ -19,6 +19,9 @@ DEFAULTS: dict[str, str] = {
     "auto_backup_enabled": "0",
     "backup_last_at": "",
     "auto_backup_interval_hours": "12",
+    "require_last4_for_card_receipt": "0",
+    "random_tx_spec": "0",
+    "card_to_card_text": "",
 }
 
 EDITABLE_KEYS = frozenset(DEFAULTS)
@@ -58,6 +61,9 @@ class PlatformSettingsService:
             "auto_backup_enabled": self.get_bool("auto_backup_enabled"),
             "backup_last_at": self.get("backup_last_at"),
             "auto_backup_interval_hours": self._get_interval_hours(),
+            "require_last4_for_card_receipt": self.get_bool("require_last4_for_card_receipt"),
+            "random_tx_spec": self.get_bool("random_tx_spec"),
+            "card_to_card_text": self.get("card_to_card_text"),
         }
 
     def _get_interval_hours(self) -> int:
@@ -75,7 +81,7 @@ class PlatformSettingsService:
         if name not in EDITABLE_KEYS or name.endswith("_enabled"):
             raise ValueError("setting is not a text field")
         clean = str(value or "").strip()
-        if name not in {"support_contact", "trial_plan_id"} and not clean:
+        if name not in {"support_contact", "trial_plan_id", "card_to_card_text"} and not clean:
             raise ValueError("setting value is required")
         if len(clean) > int(maximum):
             raise ValueError("setting value is too long")
@@ -84,7 +90,7 @@ class PlatformSettingsService:
 
     def set_bool(self, key: str, enabled: bool) -> bool:
         name = str(key or "").strip()
-        if name not in {"sales_enabled", "trial_enabled", "auto_backup_enabled"}:
+        if name not in {"sales_enabled", "trial_enabled", "auto_backup_enabled", "require_last4_for_card_receipt", "random_tx_spec"}:
             raise ValueError("setting is not a boolean field")
         self._write(name, "1" if bool(enabled) else "0")
         return bool(enabled)

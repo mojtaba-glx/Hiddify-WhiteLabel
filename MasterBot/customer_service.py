@@ -8,8 +8,11 @@ only.  Multi-step balance/payment transitions use one IMMEDIATE transaction.
 from __future__ import annotations
 
 import os
+import hmac
+import re
 import secrets
 import sqlite3
+from datetime import datetime, timezone
 import stat
 import tempfile
 from dataclasses import dataclass
@@ -54,6 +57,13 @@ def _clean_text(value: object, *, maximum: int, required: bool = True) -> str:
     return text
 
 
+def normalize_currency_code(currency: object) -> str:
+    cleaned = str(currency or "").strip().upper()
+    if cleaned in ("تومان", "TOMAN"):
+        return "TOMAN"
+    return cleaned
+
+
 def _public_id(prefix: str) -> str:
     return f"{prefix}_{secrets.token_urlsafe(9)}"
 
@@ -73,6 +83,7 @@ class CustomerPortalService:
         self.master_admin_id = int(master_service.master_admin_id)
         self.cache_invalidator = cache_invalidator
         self.settings = PlatformSettingsService(conn)
+        self._init_sms_tables()
 
     def storefront_settings(self) -> dict[str, Any]:
         return self.settings.all()
@@ -174,7 +185,7 @@ class CustomerPortalService:
 
     def create_wallet_topup(self, actor_id: int, *, currency: str, amount: int) -> dict[str, Any]:
         customer = self._customer(actor_id)
-        code = _clean_text(currency, maximum=8).upper()
+        code = normalize_currency_code(_clean_text(currency, maximum=8))
         if int(amount) <= 0:
             raise ValueError("top-up amount must be positive")
         now = iso_utc(utcnow())
@@ -248,20 +259,71 @@ class CustomerPortalService:
         return [dict(row) for row in rows]
 
     def list_payment_methods(self, currency: str) -> list[dict[str, Any]]:
-        rows = self.conn.execute(
-            "SELECT * FROM payment_methods WHERE status = 'active' AND currency = ? ORDER BY id",
-            (str(currency).upper(),),
-        ).fetchall()
+        code = normalize_currency_code(currency)
+        if code in ("TOMAN", "IRT"):
+            rows = self.conn.execute(
+                "SELECT * FROM payment_methods WHERE status = 'active' AND currency IN ('TOMAN', 'IRT') ORDER BY id"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM payment_methods WHERE status = 'active' AND currency = ? ORDER BY id",
+                (code,),
+            ).fetchall()
         return [dict(row) for row in rows]
 
     def get_payment_method(self, method_id: int, *, currency: str) -> dict[str, Any]:
-        row = self.conn.execute(
-            "SELECT * FROM payment_methods WHERE id = ? AND status = 'active' AND currency = ?",
-            (int(method_id), str(currency).upper()),
-        ).fetchone()
+        code = normalize_currency_code(currency)
+        if code in ("TOMAN", "IRT"):
+            row = self.conn.execute(
+                "SELECT * FROM payment_methods WHERE id = ? AND status = 'active' AND currency IN ('TOMAN', 'IRT')",
+                (int(method_id),),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT * FROM payment_methods WHERE id = ? AND status = 'active' AND currency = ?",
+                (int(method_id), code),
+            ).fetchone()
         if row is None:
             raise NotFoundError("payment method not found")
         return dict(row)
+
+    def list_available_currencies(self, actor_id: int) -> list[str]:
+        self._customer(actor_id)
+        plan_rows = self.conn.execute(
+            "SELECT DISTINCT currency FROM license_plans WHERE is_public = 1"
+        ).fetchall()
+        method_rows = self.conn.execute(
+            "SELECT DISTINCT currency FROM payment_methods WHERE status = 'active'"
+        ).fetchall()
+        customer = self._customer(actor_id)
+        wallet_rows = self.conn.execute(
+            "SELECT DISTINCT currency FROM wallet_accounts WHERE customer_id = ? AND balance > 0",
+            (int(customer["id"]),),
+        ).fetchall()
+
+        found = set()
+        for r in plan_rows:
+            if r["currency"]:
+                found.add(normalize_currency_code(r["currency"]))
+        for r in method_rows:
+            if r["currency"]:
+                found.add(normalize_currency_code(r["currency"]))
+        for r in wallet_rows:
+            if r["currency"]:
+                found.add(normalize_currency_code(r["currency"]))
+
+        if "IRT" in found and "TOMAN" in found:
+            found.remove("IRT")
+        if not (found & {"TOMAN", "IRT"}):
+            found.add("TOMAN")
+        if not (found - {"TOMAN", "IRT", "IRR"}):
+            found.add("USD")
+
+        preferred = ["TOMAN", "IRT", "USD", "USDT", "EUR", "IRR"]
+        return sorted(
+            found,
+            key=lambda c: (preferred.index(c) if c in preferred else 99, c),
+        )
 
     def submit_receipt(
         self,
@@ -303,11 +365,18 @@ class CustomerPortalService:
 
     def wallet_balance(self, actor_id: int, currency: str) -> int:
         customer = self._customer(actor_id)
+        code = normalize_currency_code(currency)
+        if code in ("TOMAN", "IRT"):
+            row = self.conn.execute(
+                "SELECT SUM(balance) as total FROM wallet_accounts WHERE customer_id = ? AND currency IN ('TOMAN', 'IRT')",
+                (int(customer["id"]),),
+            ).fetchone()
+            return int(row["total"] if row and row["total"] is not None else 0)
         row = self.conn.execute(
             "SELECT balance FROM wallet_accounts WHERE customer_id = ? AND currency = ?",
-            (int(customer["id"]), str(currency).upper()),
+            (int(customer["id"]), code),
         ).fetchone()
-        return int(row["balance"] if row else 0)
+        return int(row["balance"] if row and row["balance"] is not None else 0)
 
     def pay_order_from_wallet(self, actor_id: int, order_id: int) -> dict[str, Any]:
         order = self.get_order(actor_id, order_id)
@@ -315,6 +384,7 @@ class CustomerPortalService:
             raise PaymentStateError("این سفارش از کیف پول قابل پرداخت نیست.")
         amount = int(order["amount"])
         currency = str(order["currency"])
+        code = normalize_currency_code(currency)
         customer_id = int(order["customer_id"])
         now = iso_utc(utcnow())
         final_status = "paid"
@@ -329,6 +399,15 @@ class CustomerPortalService:
                 " WHERE customer_id = ? AND currency = ? AND balance >= ?",
                 (amount, now, customer_id, currency, amount),
             )
+            if changed.rowcount != 1 and code in ("TOMAN", "IRT"):
+                alt = "IRT" if currency == "TOMAN" else "TOMAN"
+                changed = self.conn.execute(
+                    "UPDATE wallet_accounts SET balance = balance - ?, updated_at = ?"
+                    " WHERE customer_id = ? AND currency = ? AND balance >= ?",
+                    (amount, now, customer_id, alt, amount),
+                )
+                if changed.rowcount == 1:
+                    currency = alt
             if changed.rowcount != 1:
                 raise PaymentStateError("موجودی کیف پول کافی نیست.")
             balance = self.wallet_balance(actor_id, currency)
@@ -854,7 +933,7 @@ class CustomerPortalService:
         require_master_admin(actor_id, self.master_admin_id)
         if kind not in ("card", "crypto"):
             raise ValueError("invalid payment method kind")
-        code = _clean_text(currency, maximum=8).upper()
+        code = normalize_currency_code(_clean_text(currency, maximum=8))
         now = iso_utc(utcnow())
         with transaction(self.conn):
             cursor = self.conn.execute(
@@ -889,7 +968,7 @@ class CustomerPortalService:
         trial_days: int,
     ) -> dict[str, Any]:
         require_master_admin(actor_id, self.master_admin_id)
-        code = _clean_text(currency, maximum=8).upper()
+        code = normalize_currency_code(_clean_text(currency, maximum=8))
         if not 3 <= len(code) <= 8 or not code.isalnum():
             raise ValueError("currency must be 3-8 alphanumeric characters")
         if int(trial_days) < 0:
@@ -1122,17 +1201,14 @@ class CustomerPortalService:
     ) -> dict[str, Any]:
         require_master_admin(actor_id, self.master_admin_id)
         current = self.get_payment_method_admin(actor_id, method_id)
-        code = _clean_text(currency, maximum=8).upper()
+        code = normalize_currency_code(_clean_text(currency, maximum=8))
         if not 3 <= len(code) <= 8 or not code.isalnum():
             raise ValueError("currency must be 3-8 alphanumeric characters")
         clean_recipient = (
             _clean_text(recipient, maximum=100, required=False) or None
             if current["kind"] == "card" else None
         )
-        clean_network = (
-            _clean_text(network, maximum=40, required=False) or None
-            if current["kind"] == "crypto" else None
-        )
+        clean_network = _clean_text(network, maximum=40, required=False) or None
         now = iso_utc(utcnow())
         with transaction(self.conn):
             changed = self.conn.execute(
@@ -1181,6 +1257,374 @@ class CustomerPortalService:
         row = self.conn.execute("SELECT * FROM payment_methods WHERE id = ?", (int(method_id),)).fetchone()
         assert row is not None
         return dict(row)
+
+    def _init_sms_tables(self) -> None:
+        with transaction(self.conn):
+            self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS master_sms_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                enabled INTEGER NOT NULL DEFAULT 0,
+                encrypted_secret TEXT,
+                plain_secret TEXT,
+                max_pending_age_minutes INTEGER NOT NULL DEFAULT 360,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """)
+            self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS master_sms_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL UNIQUE,
+                sender TEXT NOT NULL DEFAULT '',
+                amount_raw INTEGER NOT NULL DEFAULT 0,
+                currency_raw TEXT NOT NULL DEFAULT '',
+                amount_toman INTEGER NOT NULL DEFAULT 0,
+                reference TEXT NOT NULL DEFAULT '',
+                card_last4 TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'received'
+                    CHECK (status IN (
+                        'received', 'test_received', 'invalid_amount', 'no_pending_match',
+                        'ambiguous', 'approved', 'approved_duplicate', 'attached_manual',
+                        'approve_failed'
+                    )),
+                message TEXT NOT NULL DEFAULT '',
+                matched_receipt_id INTEGER,
+                received_at INTEGER NOT NULL DEFAULT 0,
+                device_time INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+            """)
+            self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_master_sms_events_match
+                ON master_sms_events (status, amount_toman, created_at)
+            """)
+
+    SMS_SECRET_BYTES = 32
+    SMS_DEFAULT_MAX_PENDING_AGE_MINUTES = 360
+    SMS_MANUAL_ATTACH_WINDOW_MINUTES = 120
+    SMS_RECEIPT_LOOKBACK_MINUTES = 30
+
+    @staticmethod
+    def mask_sms_secret(secret: object) -> str:
+        s = str(secret or "").strip()
+        if len(s) < 10:
+            return "••••••••"
+        return f"{s[:4]}••••{s[-4:]}"
+
+    def _sms_settings_row(self) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM master_sms_settings WHERE id = 1"
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def sms_webhook_path(self) -> str:
+        return "/payment/sms/master"
+
+    def sms_status_admin(self, actor_id: int) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        row = self._sms_settings_row()
+        secret = str(row["plain_secret"] or "") if row else ""
+        return {
+            "enabled": bool(row["enabled"]) if row else False,
+            "has_secret": bool(secret),
+            "masked_secret": self.mask_sms_secret(secret) if secret else "",
+            "max_pending_age_minutes": (
+                int(row["max_pending_age_minutes"]) if row else self.SMS_DEFAULT_MAX_PENDING_AGE_MINUTES
+            ),
+            "webhook_path": self.sms_webhook_path(),
+        }
+
+    def _sms_ensure_secret_tx(self) -> str:
+        row = self._sms_settings_row()
+        if row and row.get("plain_secret"):
+            return str(row["plain_secret"])
+        secret = secrets.token_hex(self.SMS_SECRET_BYTES)
+        now = iso_utc(utcnow())
+        if row is None:
+            self.conn.execute(
+                "INSERT INTO master_sms_settings (id, enabled, plain_secret, max_pending_age_minutes, created_at, updated_at) "
+                "VALUES (1, 0, ?, ?, ?, ?)",
+                (secret, self.SMS_DEFAULT_MAX_PENDING_AGE_MINUTES, now, now),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE master_sms_settings SET plain_secret = ?, updated_at = ? WHERE id = 1",
+                (secret, now),
+            )
+        return secret
+
+    def set_sms_enabled_admin(self, actor_id: int, *, enabled: bool) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            if enabled:
+                self._sms_ensure_secret_tx()
+            row = self._sms_settings_row()
+            if row is None:
+                secret = secrets.token_hex(self.SMS_SECRET_BYTES)
+                self.conn.execute(
+                    "INSERT INTO master_sms_settings (id, enabled, plain_secret, max_pending_age_minutes, created_at, updated_at) "
+                    "VALUES (1, ?, ?, ?, ?, ?)",
+                    (1 if enabled else 0, secret, self.SMS_DEFAULT_MAX_PENDING_AGE_MINUTES, now, now),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE master_sms_settings SET enabled = ?, updated_at = ? WHERE id = 1",
+                    (1 if enabled else 0, now),
+                )
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id), tenant_id=None,
+                action="payment.sms_enabled", entity_type="platform_sms",
+                entity_id="master", metadata={"enabled": bool(enabled)},
+            )
+        return self.sms_status_admin(actor_id)
+
+    def rotate_sms_secret_admin(self, actor_id: int) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        secret = secrets.token_hex(self.SMS_SECRET_BYTES)
+        now = iso_utc(utcnow())
+        with transaction(self.conn):
+            row = self._sms_settings_row()
+            if row is None:
+                self.conn.execute(
+                    "INSERT INTO master_sms_settings (id, enabled, plain_secret, max_pending_age_minutes, created_at, updated_at) "
+                    "VALUES (1, 0, ?, ?, ?, ?)",
+                    (secret, self.SMS_DEFAULT_MAX_PENDING_AGE_MINUTES, now, now),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE master_sms_settings SET plain_secret = ?, updated_at = ? WHERE id = 1",
+                    (secret, now),
+                )
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id), tenant_id=None,
+                action="payment.sms_secret_rotate", entity_type="platform_sms",
+                entity_id="master", metadata={"status": "rotated"},
+            )
+        result = self.sms_status_admin(actor_id)
+        result["plain_secret"] = secret
+        return result
+
+    def sms_plain_secret_admin(self, actor_id: int) -> str:
+        require_master_admin(actor_id, self.master_admin_id)
+        row = self._sms_settings_row()
+        if row is None or not row.get("plain_secret"):
+            with transaction(self.conn):
+                return self._sms_ensure_secret_tx()
+        return str(row["plain_secret"])
+
+    def sms_secret_matches(self, provided: str) -> bool:
+        row = self._sms_settings_row()
+        if row is None or not row.get("plain_secret"):
+            return False
+        return hmac.compare_digest(str(provided or "").strip(), str(row["plain_secret"]).strip())
+
+    def record_sms_event(self, data: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
+        now = iso_utc(utcnow())
+        event_id = str(data.get("event_id") or "").strip()
+        try:
+            with transaction(self.conn):
+                cursor = self.conn.execute(
+                    "INSERT INTO master_sms_events "
+                    "(event_id, sender, amount_raw, currency_raw, amount_toman, "
+                    "reference, card_last4, body, status, message, matched_receipt_id, "
+                    "received_at, device_time, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        event_id,
+                        str(data.get("sender") or "")[:64],
+                        int(data.get("amount_raw") or 0),
+                        str(data.get("currency_raw") or "")[:16],
+                        int(data.get("amount_toman") or 0),
+                        str(data.get("reference") or "")[:128],
+                        str(data.get("card_last4") or "")[:8],
+                        str(data.get("body") or "")[:2000],
+                        str(data.get("status") or "received"),
+                        str(data.get("message") or "")[:255],
+                        int(data["matched_receipt_id"]) if data.get("matched_receipt_id") else None,
+                        int(data.get("received_at") or 0),
+                        int(data.get("device_time") or 0),
+                        now,
+                    ),
+                )
+            row = self.conn.execute(
+                "SELECT * FROM master_sms_events WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+            return True, dict(row) if row else None
+        except sqlite3.IntegrityError:
+            row = self.conn.execute(
+                "SELECT * FROM master_sms_events WHERE event_id = ?", (event_id,)
+            ).fetchone()
+            return False, dict(row) if row else None
+
+    def update_sms_event(self, event_id: str, **kwargs: Any) -> None:
+        fields = []
+        values = []
+        for k, v in kwargs.items():
+            if k in ("status", "message", "matched_receipt_id", "amount_toman"):
+                fields.append(f"{k} = ?")
+                values.append(v)
+        if not fields:
+            return
+        values.append(str(event_id))
+        with transaction(self.conn):
+            self.conn.execute(
+                f"UPDATE master_sms_events SET {', '.join(fields)} WHERE event_id = ?",
+                values,
+            )
+
+    def find_pending_card_receipts_for_sms(
+        self,
+        amount_toman: int,
+        *,
+        card_last4: str = "",
+        max_age_minutes: int = 360,
+        sms_time_ms: int = 0,
+    ) -> list[dict[str, Any]]:
+        amount = int(amount_toman or 0)
+        if amount <= 0:
+            return []
+        from Shared.timeutils import parse_utc
+        age = max(5, int(max_age_minutes or 360))
+        cutoff = iso_utc(utcnow() - timedelta(minutes=age))
+        rows = self.conn.execute(
+            "SELECT r.*, o.amount AS order_amount, o.currency AS order_currency, "
+            "o.customer_id, o.kind AS order_kind, c.display_name, c.username, c.telegram_user_id, "
+            "m.kind AS method_kind "
+            "FROM payment_receipts r "
+            "JOIN customer_orders o ON o.id = r.order_id "
+            "JOIN platform_customers c ON c.id = o.customer_id "
+            "JOIN payment_methods m ON m.id = r.payment_method_id "
+            "WHERE r.status = 'pending' AND o.status = 'payment_review' "
+            "AND m.kind = 'card' AND r.created_at >= ? "
+            "ORDER BY r.id DESC LIMIT 10",
+            (cutoff,),
+        ).fetchall()
+        last4 = str(card_last4 or "").strip()
+        sms_dt = None
+        if int(sms_time_ms or 0) > 0:
+            try:
+                sms_dt = datetime.fromtimestamp(int(sms_time_ms) / 1000, tz=timezone.utc).replace(tzinfo=None)
+            except (TypeError, ValueError, OverflowError, OSError):
+                sms_dt = None
+        matched = []
+        for row in rows:
+            item = dict(row)
+            curr = str(item.get("order_currency") or "").upper()
+            order_toman = int(item.get("order_amount") or 0)
+            if curr in ("IRR", "RIAL"):
+                order_toman //= 10
+            if order_toman != amount:
+                continue
+            payer_last4 = ""
+            for part in reversed(str(item.get("reference") or "").split("|")):
+                cleaned = re.sub(r"\D", "", part.strip())
+                if len(cleaned) == 4:
+                    payer_last4 = cleaned
+                    break
+            if last4:
+                if not payer_last4 or payer_last4 != last4:
+                    continue
+            elif payer_last4:
+                continue
+            if sms_dt is not None:
+                try:
+                    receipt_dt = parse_utc(str(item.get("created_at") or ""))
+                    if sms_dt < receipt_dt - timedelta(minutes=self.SMS_RECEIPT_LOOKBACK_MINUTES):
+                        continue
+                    if sms_dt > receipt_dt + timedelta(minutes=5):
+                        continue
+                except Exception:
+                    pass
+            matched.append(item)
+        return matched
+
+    def recently_approved_card_receipts_for_sms(
+        self,
+        amount_toman: int,
+        *,
+        max_age_minutes: int = 120,
+    ) -> list[dict[str, Any]]:
+        amount = int(amount_toman or 0)
+        if amount <= 0:
+            return []
+        window = max(5, min(1440, int(max_age_minutes or 120)))
+        lower = iso_utc(utcnow() - timedelta(minutes=window))
+        rows = self.conn.execute(
+            "SELECT r.*, o.amount AS order_amount, o.currency AS order_currency "
+            "FROM payment_receipts r "
+            "JOIN customer_orders o ON o.id = r.order_id "
+            "JOIN payment_methods m ON m.id = r.payment_method_id "
+            "WHERE r.status = 'approved' AND m.kind = 'card' "
+            "AND COALESCE(r.reviewed_at, '') >= ? "
+            "ORDER BY r.id DESC LIMIT 5",
+            (lower,),
+        ).fetchall()
+        matched = []
+        for row in rows:
+            item = dict(row)
+            curr = str(item.get("order_currency") or "").upper()
+            order_toman = int(item.get("order_amount") or 0)
+            if curr in ("IRR", "RIAL"):
+                order_toman //= 10
+            if order_toman == amount:
+                matched.append(item)
+        return matched
+
+    def approve_receipt_by_sms(
+        self,
+        receipt_id: int,
+        *,
+        event_id: str,
+        sender: str = "",
+    ) -> dict[str, Any]:
+        note = "تأیید خودکار SMS بانک"
+        if str(sender or "").strip():
+            note += f" ({str(sender).strip()})"
+        return self.review_receipt(
+            self.master_admin_id,
+            int(receipt_id),
+            approve=True,
+            review_note=note,
+        )
+
+    def remove_payment_method_admin(
+        self, actor_id: int, *, method_id: int
+    ) -> dict[str, Any]:
+        require_master_admin(actor_id, self.master_admin_id)
+        current = self.get_payment_method_admin(actor_id, method_id)
+        refs = self.conn.execute(
+            "SELECT COUNT(*) AS total FROM payment_receipts WHERE payment_method_id = ?",
+            (int(method_id),),
+        ).fetchone()
+        total = int(refs["total"] or 0) if refs is not None else 0
+        with transaction(self.conn):
+            if total > 0:
+                self.conn.execute(
+                    "UPDATE payment_methods SET status = 'disabled', updated_at = ? WHERE id = ?",
+                    (iso_utc(utcnow()), int(method_id)),
+                )
+                AuditRepository(self.conn).append(
+                    actor_id=int(actor_id), tenant_id=None,
+                    action="payment_method.disable", entity_type="payment_method",
+                    entity_id=str(int(method_id)), metadata={"has_receipts": True},
+                )
+                res = self.get_payment_method_admin(actor_id, method_id)
+                res["removed"] = False
+                return res
+            self.conn.execute(
+                "DELETE FROM payment_methods WHERE id = ?", (int(method_id),)
+            )
+            AuditRepository(self.conn).append(
+                actor_id=int(actor_id), tenant_id=None,
+                action="payment_method.delete", entity_type="payment_method",
+                entity_id=str(int(method_id)), metadata={"deleted": True},
+            )
+        res = dict(current)
+        res["removed"] = True
+        return res
+
 
     def list_receipts_admin(
         self,

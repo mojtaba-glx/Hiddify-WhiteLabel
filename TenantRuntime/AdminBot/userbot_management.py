@@ -937,11 +937,19 @@ def _detail_display_safe_note(note: Any) -> str:
     raw = str(note or "").strip()
     if not raw:
         return "—"
+    cleaned = re.sub(
+        r"(?i)(?:\|\s*)?whitelabel\s+tenant=\d+\s+subscription=[-\d]+(?:\s*\|)?",
+        "",
+        raw,
+    ).strip()
+    cleaned = cleaned.strip("|").strip()
+    if not cleaned:
+        return "—"
     fa_digits = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
     return re.sub(
         r"(?i)\b(HiddifyBot:\s*[\u200c\u200d\u200e\u200f]*)([0-9]+)\b",
         lambda m: f"{m.group(1)}{m.group(2).translate(fa_digits)}",
-        raw,
+        cleaned,
     )
 
 

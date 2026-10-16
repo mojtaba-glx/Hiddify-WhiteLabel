@@ -25,9 +25,12 @@ from MasterBot.customer_views import (
     orders_text,
     payment_instructions,
     payment_keyboard,
+    currency_label,
     plan_keyboard,
     plan_text,
     plans_keyboard,
+    wallet_topup_keyboard,
+    wallet_topup_text,
     services_keyboard,
     services_text,
     setup_keyboard,
@@ -231,22 +234,31 @@ async def _show_services(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def _show_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     service = portal(context)
-    plans = service.list_public_plans()
-    currencies = sorted({str(row["currency"]) for row in plans}) or ["USD"]
-    lines = ["👛 کیف پول"]
+    actor = actor_id(update)
+    currencies = service.list_available_currencies(actor)
+    lines = ["👛 کیف پول شما", ""]
     for currency in currencies:
-        lines.append(f"\n💰 موجودی {currency}: {service.wallet_balance(actor_id(update), currency):,}")
-    lines.append("\nبرای خرید می‌توانید هنگام ثبت سفارش از موجودی کافی استفاده کنید.")
-    rows = [[InlineKeyboardButton(
-        f"➕ شارژ کیف پول {currency}", callback_data=f"customer:topup:{currency}"
-    )] for currency in currencies]
+        label = currency_label(currency)
+        balance = service.wallet_balance(actor, currency)
+        suffix = "تومان" if currency.upper() in ("TOMAN", "IRT") else currency
+        lines.append(f"💰 موجودی {label}: {balance:,} {suffix}")
+    lines.extend([
+        "",
+        "💡 برای خرید یا تمدید ربات می‌توانید از موجودی کیف پول استفاده کنید.",
+    ])
+    rows = []
+    for currency in currencies:
+        label = "تومان" if currency.upper() in ("TOMAN", "IRT") else currency
+        rows.append([InlineKeyboardButton(
+            f"➕ شارژ کیف پول ({label})", callback_data=f"customer:topup:{currency}"
+        )])
     rows.extend([
         [InlineKeyboardButton("🧾 سفارش‌های من", callback_data="customer:orders")],
         [InlineKeyboardButton("🏠 منوی مشتری", callback_data="customer:home")],
     ])
     await render(
         update,
-        "".join(lines),
+        "\n".join(lines),
         InlineKeyboardMarkup(rows),
     )
 
@@ -262,6 +274,10 @@ async def handle_customer_callback(
     try:
         if data == "customer:home":
             await show_customer_home(update, context)
+            return True
+        if data == "customer:wallet":
+            context.user_data.pop("customer_flow", None)
+            await _show_wallet(update, context)
             return True
         if data == "customer:plans":
             await _show_plans(update, context)
@@ -280,10 +296,11 @@ async def handle_customer_callback(
             methods = service.list_payment_methods(str(order["currency"]))
             balance = service.wallet_balance(actor, str(order["currency"]))
             title = order.get("plan_name") or "خرید ربات"
+            curr_label = currency_label(str(order["currency"]))
             text = (
                 f"✅ سفارش {order['public_id']} ثبت شد.\n\n"
                 f"📦 پلن: {title}\n"
-                f"💰 مبلغ: {int(order['amount']):,} {order['currency']}\n\n"
+                f"💰 مبلغ: {int(order['amount']):,} {curr_label}\n\n"
                 "روش پرداخت را انتخاب کنید:"
             )
             if not methods and balance < int(order["amount"]):
@@ -298,15 +315,24 @@ async def handle_customer_callback(
             methods = service.list_payment_methods(str(order["currency"]))
             balance = service.wallet_balance(actor, str(order["currency"]))
             context.user_data.pop("customer_flow", None)
-            title = order.get("plan_name") or ("خرید ربات" if order.get("kind") == "purchase" else "سفارش")
+            curr_label = currency_label(str(order["currency"]))
+            title = order.get("plan_name") or ("شارژ کیف پول" if order.get("kind") == "wallet_topup" else ("خرید ربات" if order.get("kind") == "purchase" else "سفارش"))
             text = (
                 f"💳 سفارش {order['public_id']} · {title}\n\n"
-                f"💰 مبلغ: {int(order['amount']):,} {order['currency']}\n\n"
+                f"💰 مبلغ: {int(order['amount']):,} {curr_label}\n\n"
                 "روش پرداخت را انتخاب کنید:"
             )
             if not methods and balance < int(order["amount"]):
                 text += "\n\nفعلاً روش پرداخت فعالی برای این ارز تنظیم نشده است."
-            await render(update, text, payment_keyboard(order, methods, wallet_balance=balance))
+            await render(
+                update,
+                text,
+                payment_keyboard(
+                    order,
+                    methods,
+                    wallet_balance=(0 if order.get("kind") == "wallet_topup" else balance),
+                ),
+            )
             return True
         if data.startswith("customer:pay:"):
             _, _, order_raw, method_raw = data.split(":", 3)
@@ -320,7 +346,7 @@ async def handle_customer_callback(
             }
             await render(
                 update,
-                payment_instructions(method, order),
+                payment_instructions(method, order, settings=service.storefront_settings()),
                 InlineKeyboardMarkup([
                     [InlineKeyboardButton("↩️ تغییر روش پرداخت", callback_data=f"customer:payorder:{int(order['id'])}")],
                     [InlineKeyboardButton("❌ لغو", callback_data="customer:orders")],
@@ -353,8 +379,31 @@ async def handle_customer_callback(
             context.user_data["customer_flow"] = {"kind": "wallet_topup_amount", "currency": currency}
             await render(
                 update,
-                f"➕ مبلغ شارژ کیف پول ({currency}) را فقط به‌صورت عدد صحیح بفرستید.",
-                InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data="customer:home")]]),
+                wallet_topup_text(currency),
+                wallet_topup_keyboard(currency),
+            )
+            return True
+        if data.startswith("customer:topuppreset:"):
+            _, _, currency_raw, amount_raw = data.split(":", 3)
+            currency = currency_raw.upper()
+            amount = int(amount_raw)
+            if amount <= 0:
+                raise ValueError("invalid amount")
+            order = service.create_wallet_topup(actor, currency=currency, amount=amount)
+            context.user_data.pop("customer_flow", None)
+            methods = service.list_payment_methods(str(order["currency"]))
+            curr_title = currency_label(currency)
+            text = (
+                f"✅ سفارش شارژ {order['public_id']} ثبت شد.\n\n"
+                f"💰 مبلغ: {int(order['amount']):,} {curr_title}\n\n"
+                "روش پرداخت را انتخاب کنید:"
+            )
+            if not methods:
+                text += "\n\n⚠️ فعلاً روش پرداخت فعالی برای این ارز تنظیم نشده است."
+            await render(
+                update,
+                text,
+                payment_keyboard(order, methods, wallet_balance=0),
             )
             return True
         if data == "customer:orders":
@@ -381,10 +430,11 @@ async def handle_customer_callback(
             order = service.get_order(actor, order_id)
             if order["status"] != "pending_payment":
                 raise CustomerPortalError("فقط سفارش در انتظار پرداخت قابل لغو است.")
+            curr_label = currency_label(str(order["currency"]))
             await render(
                 update,
                 f"❌ سفارش {order['public_id']} لغو شود؟\n"
-                f"مبلغ: {int(order['amount']):,} {order['currency']}",
+                f"مبلغ: {int(order['amount']):,} {curr_label}",
                 InlineKeyboardMarkup([
                     [InlineKeyboardButton(
                         "✅ بله، لغو شود",
@@ -528,19 +578,27 @@ async def handle_customer_text(update: Update, context: ContextTypes.DEFAULT_TYP
         kind = str(flow.get("kind") or "")
         if kind == "wallet_topup_amount":
             clean_digits = _to_en_digits(text).replace(",", "").strip()
+            curr_raw = str(flow.get("currency") or "TOMAN")
+            curr_title = currency_label(curr_raw)
             if not clean_digits.isdigit() or int(clean_digits) <= 0:
                 await update.effective_message.reply_text(
-                    "❌ لطفاً مبلغ شارژ را به‌صورت یک عدد معتبر بزرگتر از صفر وارد کنید.\nبرای لغو، «لغو» را بفرستید."
+                    f"❌ لطفاً مبلغ شارژ را به‌صورت یک عدد معتبر بزرگتر از صفر (به {curr_title}) وارد کنید.\nبرای لغو، «لغو» را بفرستید."
                 )
                 return True
             amount = int(clean_digits)
-            order = service.create_wallet_topup(actor, currency=str(flow["currency"]), amount=amount)
+            order = service.create_wallet_topup(actor, currency=curr_raw, amount=amount)
             context.user_data.pop("customer_flow", None)
             methods = service.list_payment_methods(str(order["currency"]))
+            text = (
+                f"✅ سفارش شارژ {order['public_id']} ثبت شد.\n\n"
+                f"💰 مبلغ: {int(order['amount']):,} {curr_title}\n\n"
+                "روش پرداخت را انتخاب کنید:"
+            )
+            if not methods:
+                text += "\n\n⚠️ فعلاً روش پرداخت فعالی برای این ارز تنظیم نشده است."
             await render(
                 update,
-                f"➕ سفارش شارژ {order['public_id']} ثبت شد.\n"
-                f"مبلغ: {int(order['amount']):,} {order['currency']}\nروش پرداخت را انتخاب کنید:",
+                text,
                 payment_keyboard(order, methods, wallet_balance=0),
             )
             return True

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import html
 import hashlib
+import re
 import json
 import os
 import sqlite3
@@ -159,11 +161,20 @@ async def access_gate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     raise ApplicationHandlerStop
 
 
-async def _render(update: Update, text: str, keyboard: Any) -> None:
+async def _render(
+    update: Update,
+    text: str,
+    keyboard: Any,
+    parse_mode: Optional[str] = None,
+) -> None:
     if update.callback_query:
-        await update.callback_query.edit_message_text(text=text, reply_markup=keyboard)
+        await update.callback_query.edit_message_text(
+            text=text, reply_markup=keyboard, parse_mode=parse_mode
+        )
     elif update.effective_message:
-        await update.effective_message.reply_text(text=text, reply_markup=keyboard)
+        await update.effective_message.reply_text(
+            text=text, reply_markup=keyboard, parse_mode=parse_mode
+        )
 
 
 async def show_main(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -704,6 +715,54 @@ async def _show_payment_method(
     await _render(update, text, keyboard)
 
 
+
+def _bool_icon(value: object) -> str:
+    return "✅" if bool(value) else "❌"
+
+
+def _to_en_digits(text: str) -> str:
+    fa_digits = "۰۱۲۳۴۵۶۷۸۹"
+    ar_digits = "٠١٢٣٤٥٦٧٨٩"
+    res = list(str(text or ""))
+    for i, c in enumerate(res):
+        if c in fa_digits:
+            res[i] = str(fa_digits.index(c))
+        elif c in ar_digits:
+            res[i] = str(ar_digits.index(c))
+    return "".join(res)
+
+
+def _card_digits(number: str) -> str:
+    return re.sub(r"\D", "", _to_en_digits(str(number or "")))
+
+
+def _card_number_of(method: dict[str, Any]) -> str:
+    dest = str(method.get("destination") or "")
+    return dest.split("|")[0].strip()
+
+
+def _card_owner_of(method: dict[str, Any]) -> str:
+    if method.get("recipient"):
+        return str(method["recipient"]).strip()
+    parts = str(method.get("destination") or "").split("|")
+    if len(parts) > 1 and parts[1].strip():
+        return parts[1].strip()
+    return ""
+
+
+def _card_bank_of(method: dict[str, Any]) -> str:
+    if method.get("network"):
+        return str(method["network"]).strip()
+    parts = str(method.get("destination") or "").split("|")
+    if len(parts) > 2 and parts[2].strip():
+        return parts[2].strip()
+    title = str(method.get("title") or "").strip()
+    if title.startswith("کارت "):
+        words = title[5:].split()
+        if len(words) > 1:
+            return " ".join(words[:-1])
+    return title
+
 async def _show_payments(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     actor = int(_actor_id(update) or 0)
     portal = _portal(context)
@@ -726,20 +785,208 @@ async def _show_payments(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lines.append("هنوز روشی ثبت نشده است.")
     for method in methods:
         state = "🟢" if method["status"] == "active" else "⚫"
-        lines.append(f"{state} #{int(method['id'])} · {method['kind']} · {method['title']} · {method['currency']}")
+        kind_label = "کارت" if method["kind"] == "card" else "کریپتو"
+        lines.append(f"{state} #{int(method['id'])} · {kind_label} · {method['title']} · {method['currency']}")
         rows.append([InlineKeyboardButton(
             f"{state} {method['title']} · {method['currency']}",
             callback_data=f"payment:view:{int(method['id'])}",
         )])
     rows.extend([
-        [InlineKeyboardButton("📚 تاریخچه پرداخت‌ها", callback_data="payment:history")],
         [
-            InlineKeyboardButton("➕ کارت‌به‌کارت", callback_data="payment:add:card"),
-            InlineKeyboardButton("➕ ارز دیجیتال", callback_data="payment:add:crypto"),
+            InlineKeyboardButton("💳 تنظیمات کارت به کارت", callback_data="payment:card"),
+            InlineKeyboardButton("🔗 تنظیمات ارز دیجیتال", callback_data="payment:crypto"),
         ],
+        [InlineKeyboardButton("➕ افزودن روش پرداخت", callback_data="payment:add")],
+        [InlineKeyboardButton("📚 تاریخچه پرداخت‌ها", callback_data="payment:history")],
         [InlineKeyboardButton("↩️ منوی اصلی", callback_data="menu:main")],
     ])
     await _render(update, "\n".join(lines), InlineKeyboardMarkup(rows))
+
+
+async def _show_payment_card_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    actor = int(_actor_id(update) or 0)
+    portal = _portal(context)
+    settings = portal.storefront_settings()
+    cards = [m for m in portal.list_all_payment_methods(actor) if m["kind"] == "card"]
+    icon = "✅" if any(m.get("status") == "active" for m in cards) else "❌"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"پرداخت کارت به کارت | {icon}",
+            callback_data="payment:card:toggle_all",
+        )],
+        [InlineKeyboardButton(
+            f"🔐 الزام ۴ رقم آخر کارت | {_bool_icon(settings.get('require_last4_for_card_receipt'))}",
+            callback_data="payment:card:require_last4",
+        )],
+        [InlineKeyboardButton(
+            f"🔢 مشخصه تصادفی تراکنش | {_bool_icon(settings.get('random_tx_spec'))}",
+            callback_data="payment:card:random_tx_spec",
+        )],
+        [InlineKeyboardButton(
+            "🤖 تایید خودکار SMS بانک",
+            callback_data="payment:card:sms",
+        )],
+        [InlineKeyboardButton(
+            "💳 لیست کارت‌ها",
+            callback_data="payment:card:list",
+        )],
+        [InlineKeyboardButton(
+            "📝 تنظیم متن کارت به کارت",
+            callback_data="payment:card:text",
+        )],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="menu:payments")],
+    ])
+    await _render(update, "💳 تنظیمات کارت به کارت", keyboard)
+
+
+async def _show_payment_card_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    actor = int(_actor_id(update) or 0)
+    portal = _portal(context)
+    cards = [m for m in portal.list_all_payment_methods(actor) if m["kind"] == "card"]
+    rows: list[list[InlineKeyboardButton]] = []
+    for method in cards:
+        number = _card_number_of(method)
+        bank = _card_bank_of(method)
+        state = "🟢" if method["status"] == "active" else "⚫"
+        label = f"{state} {bank} · {number}" if bank else f"{state} {number}"
+        rows.append([InlineKeyboardButton(
+            label,
+            callback_data=f"payment:card:item:{int(method['id'])}",
+        )])
+    rows.append([InlineKeyboardButton("افزودن کارت➕", callback_data="payment:card:add")])
+    rows.append([InlineKeyboardButton("حذف کارت➖", callback_data="payment:card:delete")])
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="payment:card")])
+    await _render(update, "💳 لیست کارت‌ها", InlineKeyboardMarkup(rows))
+
+
+async def _show_payment_card_item(update: Update, context: ContextTypes.DEFAULT_TYPE, mid: int) -> None:
+    actor = int(_actor_id(update) or 0)
+    portal = _portal(context)
+    item = portal.get_payment_method_admin(actor, mid)
+    number = _card_number_of(item) or "-"
+    owner = _card_owner_of(item) or "-"
+    bank = _card_bank_of(item) or "-"
+    state_text = "فعال 🟢" if item["status"] == "active" else "غیرفعال ⚫"
+    text = (
+        f"❖ نام بانک: {bank}\n"
+        f"❖ شماره کارت: <code>{number}</code>\n"
+        f"❖ نام صاحب کارت: {owner}\n"
+        f"❖ ارز: {item['currency']}\n"
+        f"❖ وضعیت: {state_text}"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 ویرایش شماره کارت", callback_data=f"payment:card:edit_number:{mid}")],
+        [InlineKeyboardButton("🧑 ویرایش نام صاحب کارت", callback_data=f"payment:card:edit_owner:{mid}")],
+        [InlineKeyboardButton("🏦 ویرایش نام بانک", callback_data=f"payment:card:edit_bank:{mid}")],
+        [InlineKeyboardButton("⏸/▶️ تغییر وضعیت", callback_data=f"payment:card:toggle:{mid}")],
+        [InlineKeyboardButton("🗑 حذف / غیرفعال امن", callback_data=f"payment:card:remove:{mid}")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="payment:card:list")],
+    ])
+    await _render(update, text, keyboard, parse_mode="HTML")
+
+
+async def _show_payment_sms_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    actor = int(_actor_id(update) or 0)
+    portal = _portal(context)
+    status = portal.sms_status_admin(actor)
+    base = str(os.getenv("SMART_SUB_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    path = portal.sms_webhook_path()
+    endpoint = f"{base}{path}" if base else path
+    enabled = "فعال ✅" if status.get("enabled") else "غیرفعال ❌"
+    secret_status = "تنظیم شده ✅" if status.get("masked_secret") else "تنظیم‌نشده ❌"
+    age = int(status.get("max_pending_age_minutes") or 360)
+    text = (
+        "🤖 تایید خودکار کارت‌به‌کارت با SMS بانک\n\n"
+        f"وضعیت: {enabled}\n"
+        f"Secret Key: {secret_status}\n"
+        f"مهلت تطبیق پرداخت: {age} دقیقه\n\n"
+        "آدرس Webhook برای اپ اندروید:\n"
+        f"<pre><code>{html.escape(endpoint)}</code></pre>\n\n"
+        "Secret و وضعیت روشن/خاموش از همین منو ساخته می‌شود و مخصوص ربات مستر است."
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"تایید خودکار SMS | {_bool_icon(status.get('enabled'))}",
+            callback_data="payment:card:sms:toggle",
+        )],
+        [InlineKeyboardButton(
+            "🔑 ساخت / تعویض Secret",
+            callback_data="payment:card:sms:regen",
+        )],
+        [InlineKeyboardButton(
+            "👁 نمایش Secret برای اپ",
+            callback_data="payment:card:sms:show",
+        )],
+        [InlineKeyboardButton(
+            "📱 راهنمای اتصال اپ",
+            callback_data="payment:card:sms:help",
+        )],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="payment:card")],
+    ])
+    await _render(update, text, keyboard, parse_mode="HTML")
+
+
+async def _show_payment_crypto_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    actor = int(_actor_id(update) or 0)
+    portal = _portal(context)
+    methods = [m for m in portal.list_all_payment_methods(actor) if m["kind"] == "crypto"]
+    icon = "✅" if any(m.get("status") == "active" for m in methods) else "❌"
+    rows = [
+        [InlineKeyboardButton(
+            f"پرداخت ارز دیجیتال | {icon}",
+            callback_data="payment:crypto:toggle_all",
+        )]
+    ]
+    for m in methods:
+        state = "🟢" if m.get("status") == "active" else "⚫"
+        rows.append([InlineKeyboardButton(
+            f"{state} 🪙 {m['title']} · {m['currency']}",
+            callback_data=f"payment:crypto:item:{int(m['id'])}",
+        )])
+    rows.append([InlineKeyboardButton("➕ افزودن روش ارز دیجیتال", callback_data="payment:crypto:add")])
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu:payments")])
+    await _render(update, "🔗 تنظیمات پرداخت ارز دیجیتال", InlineKeyboardMarkup(rows))
+
+
+async def _show_payment_crypto_item(update: Update, context: ContextTypes.DEFAULT_TYPE, mid: int) -> None:
+    actor = int(_actor_id(update) or 0)
+    portal = _portal(context)
+    item = portal.get_payment_method_admin(actor, mid)
+    state_text = "فعال 🟢" if item["status"] == "active" else "غیرفعال ⚫"
+    text = (
+        f"🪙 <b>{html.escape(item['title'])}</b>\n"
+        f"💱 <b>ارز:</b> {item['currency']}\n"
+        f"📍 <b>آدرس کیف پول:</b> <code>{html.escape(item['destination'])}</code>\n"
+        f"🌐 <b>شبکه:</b> {html.escape(item.get('network') or '-')}\n"
+        f"📝 <b>توضیحات:</b> {html.escape(item.get('instructions') or '-')}\n"
+        f"📊 <b>وضعیت:</b> {state_text}"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✏️ عنوان", callback_data=f"payment:crypto:edit:{mid}:title"),
+            InlineKeyboardButton("💱 ارز", callback_data=f"payment:crypto:edit:{mid}:currency"),
+        ],
+        [
+            InlineKeyboardButton("📍 آدرس ولت", callback_data=f"payment:crypto:edit:{mid}:destination"),
+            InlineKeyboardButton("🌐 شبکه", callback_data=f"payment:crypto:edit:{mid}:network"),
+        ],
+        [
+            InlineKeyboardButton("📝 توضیحات", callback_data=f"payment:crypto:edit:{mid}:instructions"),
+        ],
+        [InlineKeyboardButton("⏸/▶️ تغییر وضعیت", callback_data=f"payment:crypto:toggle:{mid}")],
+        [InlineKeyboardButton("🗑 حذف / غیرفعال امن", callback_data=f"payment:crypto:remove:{mid}")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="payment:crypto")],
+    ])
+    await _render(update, text, keyboard, parse_mode="HTML")
+
+
+async def _show_payment_add_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 کارت به کارت", callback_data="payment:card:add")],
+        [InlineKeyboardButton("🪙 ارز دیجیتال", callback_data="payment:crypto:add")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="menu:payments")],
+    ])
+    await _render(update, "💳 نوع روش پرداخت را انتخاب کنید:", keyboard)
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -770,6 +1017,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await _show_plans(update, context)
             elif target == "licenses":
                 await _show_licenses(update, context)
+            elif target == "payment:card":
+                await _show_payment_card_menu(update, context)
+            elif target == "payment:crypto":
+                await _show_payment_crypto_menu(update, context)
+            elif target.startswith("payment:card:item:"):
+                mid = int(target.rsplit(":", 1)[1])
+                await _show_payment_card_item(update, context, mid)
+            elif target.startswith("payment:crypto:item:"):
+                mid = int(target.rsplit(":", 1)[1])
+                await _show_payment_crypto_item(update, context, mid)
+            elif target in ("payments", "menu:payments"):
+                await _show_payments(update, context)
             else:
                 await show_main(update, context)
             return
@@ -841,41 +1100,298 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if data == "menu:payments":
             await _show_payments(update, context)
             return
-        if data.startswith("payment:view:"):
-            await _show_payment_method(
-                update, context, _parse_int(data.rsplit(":", 1)[1], "method id")
+        if data == "payment:card":
+            await _show_payment_card_menu(update, context)
+            return
+        if data == "payment:card:toggle_all":
+            cards = [m for m in _portal(context).list_all_payment_methods(actor) if m["kind"] == "card"]
+            new_status = "disabled" if any(m["status"] == "active" for m in cards) else "active"
+            for m in cards:
+                _portal(context).set_payment_method_status(actor, int(m["id"]), new_status)
+            await _show_payment_card_menu(update, context)
+            return
+        if data == "payment:card:require_last4":
+            cur = _portal(context).storefront_settings().get("require_last4_for_card_receipt", False)
+            _portal(context).settings.set_bool("require_last4_for_card_receipt", not cur)
+            await _show_payment_card_menu(update, context)
+            return
+        if data == "payment:card:random_tx_spec":
+            cur = _portal(context).storefront_settings().get("random_tx_spec", False)
+            _portal(context).settings.set_bool("random_tx_spec", not cur)
+            await _show_payment_card_menu(update, context)
+            return
+        if data == "payment:card:sms":
+            await _show_payment_sms_menu(update, context)
+            return
+        if data == "payment:card:sms:toggle":
+            cur = _portal(context).sms_status_admin(actor).get("enabled", False)
+            _portal(context).set_sms_enabled_admin(actor, enabled=not cur)
+            await _show_payment_sms_menu(update, context)
+            return
+        if data == "payment:card:sms:regen":
+            res = _portal(context).rotate_sms_secret_admin(actor)
+            secret = res["plain_secret"]
+            text = (
+                "🔑 <b>کلید Secret جدید ساخته شد:</b>\n\n"
+                f"<code>{html.escape(secret)}</code>\n\n"
+                "⚠️ این کلید را در اپلیکیشن SMS Verifier در هدر X-WhiteLabel-Sms-Secret قرار دهید."
             )
+            await _render(update, text, InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 بازگشت به تنظیمات SMS", callback_data="payment:card:sms")
+            ]]), parse_mode="HTML")
+            return
+        if data == "payment:card:sms:show":
+            secret = _portal(context).sms_plain_secret_admin(actor)
+            base = str(os.getenv("SMART_SUB_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+            path = _portal(context).sms_webhook_path()
+            endpoint = f"{base}{path}" if base else path
+            text = (
+                "🔑 <b>مشخصات اتصال اپ SMS Verifier:</b>\n\n"
+                f"آدرس Webhook:\n<pre><code>{html.escape(endpoint)}</code></pre>\n\n"
+                f"کلید Secret:\n<code>{html.escape(secret or 'تنظیم‌نشده')}</code>\n\n"
+                "هدر احراز هویت:\n<code>X-WhiteLabel-Sms-Secret</code>"
+            )
+            await _render(update, text, InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 بازگشت", callback_data="payment:card:sms")
+            ]]), parse_mode="HTML")
+            return
+        if data == "payment:card:sms:help":
+            base = str(os.getenv("SMART_SUB_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+            path = _portal(context).sms_webhook_path()
+            endpoint = f"{base}{path}" if base else path
+            text = (
+                "📱 <b>راهنمای اتصال اپ SMS Verifier</b>\n\n"
+                "۱. اپلیکیشن <b>SMS Forwarder</b> یا <b>SMS Verifier</b> را روی گوشی که پیامک‌های بانک را دریافت می‌کند نصب کنید.\n\n"
+                "۲. یک Webhook جدید با مشخصات زیر بسازید:\n"
+                f"• <b>URL:</b> <pre><code>{html.escape(endpoint)}</code></pre>\n"
+                "• <b>Method:</b> <code>POST</code>\n"
+                "• <b>Headers:</b>\n"
+                "  <code>X-WhiteLabel-Sms-Secret: &lt;کلید شما&gt;</code>\n"
+                "  <code>Content-Type: application/json</code>\n\n"
+                "۳. فرمت بدنه JSON پیامک:\n"
+                "<pre><code>{\n"
+                '  "event_id": "[msg_id]",\n'
+                '  "amount": "[amount]",\n'
+                '  "currency": "rial",\n'
+                '  "card_last4": "[card_last4]",\n'
+                '  "reference": "[ref_num]",\n'
+                '  "sender": "[sender]",\n'
+                '  "body": "[body]"\n'
+                "}</code></pre>\n\n"
+                "۴. با ارسال یک رویداد آزمایشی، اتصال را بررسی کنید."
+            )
+            await _render(update, text, InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 بازگشت", callback_data="payment:card:sms")
+            ]]), parse_mode="HTML")
+            return
+        if data == "payment:card:list":
+            await _show_payment_card_list(update, context)
+            return
+        if data.startswith("payment:card:item:"):
+            mid = _parse_int(data.rsplit(":", 1)[1], "method id")
+            await _show_payment_card_item(update, context, mid)
+            return
+        if data in ("payment:card:add", "payment:add:card"):
+            context.user_data["flow"] = {
+                "kind": "payment_card_bank",
+                "cancel_target": "payment:card",
+            }
+            await _prompt_flow(
+                update,
+                "⬇️ لطفا اطلاعات زیر را برای افزودن کارت وارد کنید\n"
+                "🏦 لطفا نام بانک را وارد کنید:",
+            )
+            return
+        if data == "payment:card:delete":
+            context.user_data["flow"] = {
+                "kind": "payment_card_delete",
+                "cancel_target": "payment:card",
+            }
+            await _prompt_flow(
+                update,
+                "➖ حذف کارت\nشماره کارت را ارسال کنید:",
+            )
+            return
+        if data.startswith("payment:card:edit_number:"):
+            mid = _parse_int(data.rsplit(":", 1)[1], "method id")
+            _portal(context).get_payment_method_admin(actor, mid)
+            context.user_data["flow"] = {
+                "kind": "payment_card_edit",
+                "method_id": mid,
+                "field": "number",
+                "cancel_target": f"payment:card:item:{mid}",
+            }
+            await _prompt_flow(update, "💳 شماره کارت جدید را وارد کنید:")
+            return
+        if data.startswith("payment:card:edit_owner:"):
+            mid = _parse_int(data.rsplit(":", 1)[1], "method id")
+            _portal(context).get_payment_method_admin(actor, mid)
+            context.user_data["flow"] = {
+                "kind": "payment_card_edit",
+                "method_id": mid,
+                "field": "owner",
+                "cancel_target": f"payment:card:item:{mid}",
+            }
+            await _prompt_flow(update, "👤 نام جدید صاحب کارت را وارد کنید:")
+            return
+        if data.startswith("payment:card:edit_bank:"):
+            mid = _parse_int(data.rsplit(":", 1)[1], "method id")
+            _portal(context).get_payment_method_admin(actor, mid)
+            context.user_data["flow"] = {
+                "kind": "payment_card_edit",
+                "method_id": mid,
+                "field": "bank",
+                "cancel_target": f"payment:card:item:{mid}",
+            }
+            await _prompt_flow(update, "🏦 نام جدید بانک را وارد کنید:")
+            return
+        if data.startswith("payment:card:toggle:"):
+            mid = _parse_int(data.rsplit(":", 1)[1], "method id")
+            item = _portal(context).get_payment_method_admin(actor, mid)
+            new_st = "disabled" if item["status"] == "active" else "active"
+            _portal(context).set_payment_method_status(actor, mid, new_st)
+            await _show_payment_card_item(update, context, mid)
+            return
+        if data.startswith("payment:card:remove:"):
+            mid = _parse_int(data.rsplit(":", 1)[1], "method id")
+            item = _portal(context).get_payment_method_admin(actor, mid)
+            num = _card_number_of(item)
+            text = (
+                f"⚠️ حذف کارت «{num}»؟\n"
+                "اگر سابقه مالی داشته باشد حذف نمی‌شود و فقط غیرفعال خواهد شد."
+            )
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ تأیید", callback_data=f"payment:card:remove_confirm:{mid}")],
+                [InlineKeyboardButton("❌ لغو", callback_data=f"payment:card:item:{mid}")],
+            ])
+            await _render(update, text, keyboard)
+            return
+        if data.startswith("payment:card:remove_confirm:"):
+            mid = _parse_int(data.rsplit(":", 1)[1], "method id")
+            res = _portal(context).remove_payment_method_admin(actor, method_id=mid)
+            msg = (
+                "✅ کارت حذف شد."
+                if res.get("removed")
+                else "✅ کارت دارای سابقه تراکنش بود و برای حفظ تاریخچه غیرفعال شد."
+            )
+            await _render(update, msg, InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 لیست کارت‌ها", callback_data="payment:card:list")
+            ]]))
+            return
+        if data == "payment:card:text":
+            cur = str(_portal(context).storefront_settings().get("card_to_card_text") or "").strip()
+            if cur.lower() in {"none", "null", "0"}:
+                cur = ""
+            context.user_data["flow"] = {
+                "kind": "payment_card_text",
+                "cancel_target": "payment:card",
+            }
+            await _prompt_flow(
+                update,
+                "⚙️ در تعریف متن کارت به کارت، به جایگذاری مقادیر زیر توجه کنید:\n"
+                "- شماره کارت: {CARD}\n"
+                "- نام صاحب کارت: {OWNER}\n"
+                "- نام بانک: {BANK}\n"
+                "- مبلغ: {AMOUNT}\n\n"
+                f"متن فعلی:\n{cur or 'پیش‌فرض سیستم'}\n\n"
+                "متن جدید را وارد کنید (یا 0 برای بازنشانی به پیش‌فرض):",
+            )
+            return
+        if data == "payment:crypto":
+            await _show_payment_crypto_menu(update, context)
+            return
+        if data == "payment:crypto:toggle_all":
+            cryptos = [m for m in _portal(context).list_all_payment_methods(actor) if m["kind"] == "crypto"]
+            new_status = "disabled" if any(m["status"] == "active" for m in cryptos) else "active"
+            for m in cryptos:
+                _portal(context).set_payment_method_status(actor, int(m["id"]), new_status)
+            await _show_payment_crypto_menu(update, context)
+            return
+        if data in ("payment:crypto:add", "payment:add:crypto"):
+            context.user_data["flow"] = {
+                "kind": "payment_crypto_title",
+                "cancel_target": "payment:crypto",
+            }
+            await _prompt_flow(
+                update,
+                "📝 عنوان روش پرداخت ارز دیجیتال را وارد کنید:\n"
+                "💡 مثال: تتر ترون یا تتر تون",
+            )
+            return
+        if data.startswith("payment:crypto:item:"):
+            mid = _parse_int(data.rsplit(":", 1)[1], "method id")
+            await _show_payment_crypto_item(update, context, mid)
+            return
+        if data.startswith("payment:crypto:edit:"):
+            parts = data.split(":")
+            mid = _parse_int(parts[3], "method id")
+            field = parts[4]
+            if field not in {"title", "currency", "destination", "network", "instructions"}:
+                raise ValueError("invalid crypto edit field")
+            item = _portal(context).get_payment_method_admin(actor, mid)
+            context.user_data["flow"] = {
+                "kind": "payment_crypto_edit",
+                "method_id": mid,
+                "field": field,
+                "cancel_target": f"payment:crypto:item:{mid}",
+            }
+            field_fa = {
+                "title": "عنوان", "currency": "ارز", "destination": "آدرس کیف پول",
+                "network": "نام شبکه", "instructions": "توضیحات",
+            }.get(field, field)
+            cur_val = item.get(field) or "-"
+            await _prompt_flow(update, f"✏️ مقدار فعلی: {cur_val}\nمقدار جدید برای {field_fa} را ارسال کنید:")
+            return
+        if data.startswith("payment:crypto:toggle:"):
+            mid = _parse_int(data.rsplit(":", 1)[1], "method id")
+            item = _portal(context).get_payment_method_admin(actor, mid)
+            new_st = "disabled" if item["status"] == "active" else "active"
+            _portal(context).set_payment_method_status(actor, mid, new_st)
+            await _show_payment_crypto_item(update, context, mid)
+            return
+        if data.startswith("payment:crypto:remove:"):
+            mid = _parse_int(data.rsplit(":", 1)[1], "method id")
+            item = _portal(context).get_payment_method_admin(actor, mid)
+            text = (
+                f"⚠️ حذف روش پرداخت «{item['title']}»؟\n"
+                "اگر سابقه مالی داشته باشد حذف نمی‌شود و فقط غیرفعال خواهد شد."
+            )
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ تأیید", callback_data=f"payment:crypto:remove_confirm:{mid}")],
+                [InlineKeyboardButton("❌ لغو", callback_data=f"payment:crypto:item:{mid}")],
+            ])
+            await _render(update, text, keyboard)
+            return
+        if data.startswith("payment:crypto:remove_confirm:"):
+            mid = _parse_int(data.rsplit(":", 1)[1], "method id")
+            res = _portal(context).remove_payment_method_admin(actor, method_id=mid)
+            msg = (
+                "✅ روش پرداخت حذف شد."
+                if res.get("removed")
+                else "✅ روش دارای سابقه تراکنش بود و برای حفظ تاریخچه غیرفعال شد."
+            )
+            await _render(update, msg, InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 لیست ارز دیجیتال", callback_data="payment:crypto")
+            ]]))
+            return
+        if data == "payment:add":
+            await _show_payment_add_menu(update, context)
+            return
+        if data.startswith("payment:view:"):
+            mid = _parse_int(data.rsplit(":", 1)[1], "method id")
+            method = _portal(context).get_payment_method_admin(actor, mid)
+            if method["kind"] == "card":
+                await _show_payment_card_item(update, context, mid)
+            else:
+                await _show_payment_crypto_item(update, context, mid)
             return
         if data.startswith("payment:edit:"):
             method_id = _parse_int(data.rsplit(":", 1)[1], "method id")
             method = _portal(context).get_payment_method_admin(actor, method_id)
-            context.user_data["flow"] = {
-                "kind": "payment_method_edit",
-                "method_id": method_id,
-                "payment_kind": str(method["kind"]),
-            }
-            instructions = (
-                "عنوان | ارز | شماره کارت | نام صاحب کارت | توضیح اختیاری"
-                if method["kind"] == "card" else
-                "عنوان | ارز | آدرس کیف پول | شبکه | توضیح اختیاری"
-            )
-            await _render(
-                update,
-                f"✏️ ویرایش روش پرداخت #{method_id}\n\n{instructions}",
-                back_keyboard(f"payment:view:{method_id}"),
-            )
-            return
-        if data.startswith("payment:add:"):
-            kind = data.rsplit(":", 1)[1]
-            if kind not in ("card", "crypto"):
-                raise ValueError("invalid payment kind")
-            context.user_data["flow"] = {"kind": "payment_method_new", "payment_kind": kind}
-            instructions = (
-                "عنوان | ارز | شماره کارت | نام صاحب کارت | توضیح اختیاری"
-                if kind == "card" else
-                "عنوان | ارز | آدرس کیف پول | شبکه | توضیح اختیاری"
-            )
-            await _render(update, f"➕ ثبت روش پرداخت\n\n{instructions}", back_keyboard("menu:payments"))
+            if method["kind"] == "card":
+                await _show_payment_card_item(update, context, method_id)
+            else:
+                await _show_payment_crypto_item(update, context, method_id)
             return
         if data.startswith("payment:method:"):
             _, _, method_raw, status = data.split(":", 3)
@@ -1555,6 +2071,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 target = "plans"
             elif kind.startswith("license_new_"):
                 target = "licenses"
+            elif kind.startswith("payment_card"):
+                target = "payment:card"
+            elif kind.startswith("payment_crypto"):
+                target = "payment:crypto"
             else:
                 target = "main"
         context.user_data.pop("flow", None)
@@ -1566,6 +2086,18 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_plans(update, context)
         elif target == "licenses":
             await _show_licenses(update, context)
+        elif target == "payment:card":
+            await _show_payment_card_menu(update, context)
+        elif target == "payment:crypto":
+            await _show_payment_crypto_menu(update, context)
+        elif target.startswith("payment:card:item:"):
+            mid = int(target.rsplit(":", 1)[1])
+            await _show_payment_card_item(update, context, mid)
+        elif target.startswith("payment:crypto:item:"):
+            mid = int(target.rsplit(":", 1)[1])
+            await _show_payment_crypto_item(update, context, mid)
+        elif target in ("payments", "menu:payments"):
+            await _show_payments(update, context)
         else:
             await show_main(update, context)
         return
@@ -1858,6 +2390,198 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             context.user_data.pop("flow", None)
             await _show_plan(update, context, plan_id)
+            return
+        if kind == "payment_card_bank":
+            digits = _card_digits(text)
+            if len(digits) == 16:
+                flow["number"] = digits
+                flow["bank"] = ""
+                flow["kind"] = "payment_card_owner"
+                await _prompt_flow(update, "👤 نام صاحب کارت را وارد کنید (برای رد شدن - بفرستید):")
+                return
+            if not text or len(text) > 40:
+                raise ValueError("نام بانک نامعتبر است.")
+            flow["bank"] = text
+            flow["kind"] = "payment_card_number"
+            await _prompt_flow(update, "💳 لطفا شماره کارت (۱۶ رقمی) را وارد کنید:")
+            return
+        if kind == "payment_card_number":
+            digits = _card_digits(text)
+            if len(digits) != 16:
+                raise ValueError("شماره کارت باید ۱۶ رقم باشد.")
+            flow["number"] = digits
+            flow["kind"] = "payment_card_owner"
+            await _prompt_flow(update, "👤 نام صاحب کارت را وارد کنید (برای رد شدن - بفرستید):")
+            return
+        if kind == "payment_card_owner":
+            flow["owner"] = "" if text in {"-", "—"} else text.strip()
+            flow["kind"] = "payment_card_currency"
+            await _prompt_flow(update, "💱 ارز کارت را وارد کنید (پیش‌فرض TOMAN؛ برای تأیید 0 بفرستید):")
+            return
+        if kind == "payment_card_currency":
+            curr = text.strip().upper()
+            if curr in {"0", "-", "—", "", "تومان"}:
+                curr = "TOMAN"
+            if not 3 <= len(curr) <= 8:
+                raise ValueError("ارز نامعتبر است.")
+            bank = str(flow.get("bank") or "").strip()
+            number = str(flow["number"])
+            owner = str(flow.get("owner") or "").strip()
+            title = f"کارت {bank} {number[-4:]}" if bank else f"کارت {number[-4:]}"
+            destination = f"{number} | {owner} | {bank}" if (owner or bank) else number
+            _portal(context).add_payment_method(
+                actor,
+                kind="card",
+                title=title,
+                currency=curr,
+                destination=destination,
+                recipient=owner or None,
+                network=bank or None,
+                instructions="",
+            )
+            context.user_data.pop("flow", None)
+            await _remove_flow_keyboard(update, "✅ کارت اضافه شد.")
+            await _show_payment_card_list(update, context)
+            return
+        if kind == "payment_card_edit":
+            mid = int(flow["method_id"])
+            field = str(flow["field"])
+            item = _portal(context).get_payment_method_admin(actor, mid)
+            dest_parts = str(item.get("destination") or "").split("|")
+            num = dest_parts[0].strip() if dest_parts else ""
+            owner = item.get("recipient") or (dest_parts[1].strip() if len(dest_parts) > 1 else "")
+            bank = item.get("network") or (dest_parts[2].strip() if len(dest_parts) > 2 else "")
+            if field == "number":
+                digits = _card_digits(text)
+                if len(digits) != 16:
+                    raise ValueError("شماره کارت باید ۱۶ رقم باشد.")
+                num = digits
+            elif field == "owner":
+                owner = "" if text in {"-", "—"} else text.strip()
+            elif field == "bank":
+                bank = "" if text in {"-", "—"} else text.strip()
+            destination = f"{num} | {owner} | {bank}" if (owner or bank) else num
+            title = f"کارت {bank} {num[-4:]}" if bank else f"کارت {num[-4:]}"
+            _portal(context).update_payment_method(
+                actor,
+                mid,
+                title=title,
+                currency=item["currency"],
+                destination=destination,
+                recipient=owner or None,
+                network=bank or None,
+                instructions=item.get("instructions") or "",
+            )
+            context.user_data.pop("flow", None)
+            await _remove_flow_keyboard(update, "✅ کارت ویرایش شد.")
+            await _show_payment_card_item(update, context, mid)
+            return
+        if kind == "payment_card_delete":
+            cards = [m for m in _portal(context).list_all_payment_methods(actor) if m["kind"] == "card"]
+            digits = _card_digits(text)
+            matched = None
+            for m in cards:
+                m_digits = _card_digits(str(m.get("destination") or ""))
+                if digits and (m_digits == digits or m_digits.endswith(digits)):
+                    matched = m
+                    break
+            if matched is None:
+                raise ValueError("کارتی با این مشخصات پیدا نشد.")
+            mid = int(matched["id"])
+            context.user_data.pop("flow", None)
+            await _remove_flow_keyboard(update, "کارت انتخاب شد.")
+            num = _card_number_of(matched)
+            t = f"⚠️ حذف کارت «{num}»؟\nاگر سابقه مالی داشته باشد حذف نمی‌شود و فقط غیرفعال خواهد شد."
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ تأیید", callback_data=f"payment:card:remove_confirm:{mid}")],
+                [InlineKeyboardButton("❌ لغو", callback_data="payment:card:list")],
+            ])
+            await _render(update, t, kb)
+            return
+        if kind == "payment_card_text":
+            val = "" if text in {"0", "-", "—"} else text
+            _portal(context).settings.set_text("card_to_card_text", val, maximum=1000)
+            context.user_data.pop("flow", None)
+            await _remove_flow_keyboard(update, "✅ متن کارت به کارت ذخیره شد.")
+            await _show_payment_card_menu(update, context)
+            return
+        if kind == "payment_crypto_title":
+            if not text or len(text) > 80:
+                raise ValueError("عنوان روش پرداخت نامعتبر است.")
+            flow["title"] = text
+            flow["kind"] = "payment_crypto_currency"
+            await _prompt_flow(update, "💱 ارز را وارد کنید؛ مثال USDT:")
+            return
+        if kind == "payment_crypto_currency":
+            curr = text.strip().upper()
+            if not 3 <= len(curr) <= 8:
+                raise ValueError("کد ارز نامعتبر است.")
+            flow["currency"] = curr
+            flow["kind"] = "payment_crypto_destination"
+            await _prompt_flow(update, "📍 آدرس کیف پول مقصد را وارد کنید:")
+            return
+        if kind == "payment_crypto_destination":
+            if not text or len(text) > 180:
+                raise ValueError("آدرس مقصد نامعتبر است.")
+            flow["destination"] = text
+            flow["kind"] = "payment_crypto_network"
+            await _prompt_flow(update, "🌐 نام شبکه را وارد کنید؛ مثال TRC20 یا TON:")
+            return
+        if kind == "payment_crypto_network":
+            net = "" if text in {"0", "-", "—"} else text.strip()
+            flow["network"] = net
+            flow["kind"] = "payment_crypto_instructions"
+            await _prompt_flow(update, "📝 توضیحات پرداخت را وارد کنید یا 0 برای بدون توضیح:")
+            return
+        if kind == "payment_crypto_instructions":
+            inst = "" if text in {"0", "-", "—"} else text.strip()
+            _portal(context).add_payment_method(
+                actor,
+                kind="crypto",
+                title=str(flow["title"]),
+                currency=str(flow["currency"]),
+                destination=str(flow["destination"]),
+                network=str(flow.get("network") or "") or None,
+                instructions=inst,
+            )
+            context.user_data.pop("flow", None)
+            await _remove_flow_keyboard(update, "✅ روش پرداخت ارز دیجیتال اضافه شد.")
+            await _show_payment_crypto_menu(update, context)
+            return
+        if kind == "payment_crypto_edit":
+            mid = int(flow["method_id"])
+            field = str(flow["field"])
+            item = _portal(context).get_payment_method_admin(actor, mid)
+            val = "" if text in {"-", "—"} else text.strip()
+            kwargs = {
+                "title": item["title"],
+                "currency": item["currency"],
+                "destination": item["destination"],
+                "network": item.get("network"),
+                "instructions": item.get("instructions") or "",
+            }
+            if field == "currency":
+                kwargs["currency"] = val.upper()
+            elif field == "title":
+                kwargs["title"] = val
+            elif field == "destination":
+                kwargs["destination"] = val
+            elif field == "network":
+                kwargs["network"] = val or None
+            elif field == "instructions":
+                kwargs["instructions"] = "" if val == "0" else val
+            _portal(context).update_payment_method(
+                actor,
+                mid,
+                title=kwargs["title"],
+                currency=kwargs["currency"],
+                destination=kwargs["destination"],
+                network=kwargs["network"],
+                instructions=kwargs["instructions"],
+            )
+            context.user_data.pop("flow", None)
+            await _remove_flow_keyboard(update, "✅ روش پرداخت ارز دیجیتال ویرایش شد.")
+            await _show_payment_crypto_item(update, context, mid)
             return
         if kind in ("payment_method_new", "payment_method_edit"):
             fields = _split_fields(text, 4, 5)

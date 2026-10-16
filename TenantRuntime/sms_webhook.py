@@ -32,6 +32,8 @@ provisioning, referral credit and audit behave identically.
 from __future__ import annotations
 
 import json
+import os
+import hmac
 import re
 import sqlite3
 import urllib.parse
@@ -233,6 +235,298 @@ def _load_business(
         return None
 
 
+
+def _notify_master_approved(
+    *,
+    customer: dict[str, Any],
+    receipt: dict[str, Any],
+    amount_toman: int,
+    amount_raw: int,
+    currency_raw: str,
+    reference: str,
+    sender: str,
+) -> None:
+    try:
+        token = str(os.getenv("MASTER_BOT_TOKEN") or "").strip()
+        if not token:
+            return
+        chat_id = int(customer.get("telegram_user_id") or 0)
+        if chat_id > 0:
+            _telegram_api(
+                token,
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": (
+                        "✅ پرداخت شما به‌صورت خودکار با SMS بانک تایید شد.\n"
+                        f"💰 مبلغ تاییدشده: {int(amount_toman):,} تومان"
+                    ),
+                },
+            )
+        admin_id = int(os.getenv("MASTER_ADMIN_ID") or 0)
+        if admin_id > 0:
+            display = str(customer.get("display_name") or customer.get("username") or chat_id)
+            has_receipt = bool(
+                str(receipt.get("telegram_file_id") or "").strip()
+                or str(receipt.get("reference") or "").strip()
+            )
+            text = (
+                "✅ پرداخت کارت‌به‌کارت مستر با SMS تایید شد.\n"
+                f"🧾 سفارش: #{int(receipt.get('order_id') or 0)}\n"
+                f"👤 کاربر: {display}\n"
+                f"💰 مبلغ: {int(amount_toman):,} تومان\n"
+                f"📨 سرشماره SMS: {sender or '-'}\n"
+                f"🏦 مبلغ خام SMS: {int(amount_raw):,} {currency_raw or ''}\n"
+                f"🔖 پیگیری SMS: {reference or '-'}\n"
+                f"🖼 رسید کاربر: {'پیوست شد' if has_receipt else 'در دسترس نیست'}"
+            )
+            _telegram_api(
+                token,
+                "sendMessage",
+                {"chat_id": admin_id, "text": text},
+            )
+    except Exception:
+        pass
+
+
+def _handle_master_sms_post(
+    conn: sqlite3.Connection,
+    headers: dict[str, str],
+    body: bytes,
+    *,
+    cipher: Any = None,
+) -> tuple[int, dict[str, Any]]:
+    settings_table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='master_sms_settings'"
+    ).fetchone()
+    if settings_table is None:
+        return 403, {"ok": False, "error": "sms_webhook_disabled"}
+
+    row = conn.execute(
+        "SELECT enabled, plain_secret, max_pending_age_minutes FROM master_sms_settings WHERE id = 1"
+    ).fetchone()
+    if row is None or not bool(row["enabled"]):
+        return 403, {"ok": False, "error": "sms_webhook_disabled"}
+
+    provided = ""
+    lowered = {str(k).lower(): str(v) for k, v in dict(headers or {}).items()}
+    for name in SMS_SECRET_HEADERS:
+        if lowered.get(name.lower(), "").strip():
+            provided = lowered[name.lower()].strip()
+            break
+    secret = str(row["plain_secret"] or "").strip()
+    if not secret or not hmac.compare_digest(provided, secret):
+        return 401, {"ok": False, "error": "invalid_secret"}
+
+    if not body or len(body) > MAX_BODY_BYTES:
+        return 400, {"ok": False, "error": "invalid_body"}
+
+    try:
+        payload = json.loads(bytes(body).decode("utf-8", errors="ignore"))
+    except (TypeError, ValueError):
+        return 400, {"ok": False, "error": "invalid_json"}
+    if not isinstance(payload, dict):
+        return 400, {"ok": False, "error": "invalid_payload"}
+
+    event_id = str(payload.get("event_id") or "").strip()
+    if (
+        not event_id
+        or len(event_id) > 128
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in event_id)
+    ):
+        return 400, {"ok": False, "error": "event_id_required"}
+    amount_raw = _to_int(payload.get("amount"), 0)
+    currency_raw = normalize_sms_currency(payload.get("currency"))
+    reference = str(payload.get("reference") or "").strip()
+    sender = str(payload.get("sender") or "").strip()
+    card_last4 = re.sub(r"\D", "", str(payload.get("card_last4") or ""))[-4:]
+    sms_body = str(payload.get("body") or "")
+    received_at_ms = _to_int(payload.get("received_at"), 0)
+    device_time_ms = _to_int(payload.get("device_time"), 0)
+    sms_time_ms = int(received_at_ms or device_time_ms or 0)
+
+    from MasterBot.service import MasterService
+    from MasterBot.customer_service import CustomerPortalService
+    admin_id = int(os.getenv("MASTER_ADMIN_ID") or 0)
+    if admin_id <= 0:
+        row_admin = conn.execute("SELECT telegram_user_id FROM platform_customers WHERE status='active' ORDER BY id ASC LIMIT 1").fetchone()
+        admin_id = int(row_admin["telegram_user_id"]) if row_admin else 1
+    if cipher is None:
+        from Shared.crypto import FernetTokenCipher, generate_key
+        cipher = FernetTokenCipher(generate_key())
+    master_service = MasterService(conn, master_admin_id=admin_id, cipher=cipher)
+    portal = CustomerPortalService(conn, master_service=master_service)
+
+    if bool(payload.get("test")):
+        inserted, _ = portal.record_sms_event({
+            "event_id": event_id,
+            "sender": sender,
+            "amount_raw": amount_raw,
+            "currency_raw": currency_raw,
+            "amount_toman": 0,
+            "reference": reference,
+            "card_last4": card_last4,
+            "body": sms_body,
+            "status": "test_received",
+            "message": "test webhook received",
+            "received_at": received_at_ms,
+            "device_time": device_time_ms,
+        })
+        return 200, {"ok": True, "test": True, "duplicate": not inserted}
+
+    candidates = sms_amount_candidates_toman(amount_raw, currency_raw)
+    if not candidates:
+        portal.record_sms_event({
+            "event_id": event_id,
+            "sender": sender,
+            "amount_raw": amount_raw,
+            "currency_raw": currency_raw,
+            "amount_toman": 0,
+            "reference": reference,
+            "card_last4": card_last4,
+            "body": sms_body,
+            "status": "invalid_amount",
+            "message": "amount not found or invalid",
+            "received_at": received_at_ms,
+            "device_time": device_time_ms,
+        })
+        return 422, {"ok": False, "error": "invalid_amount"}
+
+    inserted, existing = portal.record_sms_event({
+        "event_id": event_id,
+        "sender": sender,
+        "amount_raw": amount_raw,
+        "currency_raw": currency_raw,
+        "amount_toman": int(candidates[0]),
+        "reference": reference,
+        "card_last4": card_last4,
+        "body": sms_body,
+        "status": "received",
+        "message": "received",
+        "received_at": received_at_ms,
+        "device_time": device_time_ms,
+    })
+    if not inserted:
+        status = str((existing or {}).get("status") or "")
+        matched = (existing or {}).get("matched_receipt_id")
+        return 200, {
+            "ok": True,
+            "duplicate": True,
+            "status": status,
+            "matched_receipt_id": matched,
+        }
+
+    for amount_toman in candidates:
+        for approved in portal.recently_approved_card_receipts_for_sms(
+            int(amount_toman),
+            max_age_minutes=CustomerPortalService.SMS_MANUAL_ATTACH_WINDOW_MINUTES,
+        ):
+            portal.update_sms_event(
+                event_id,
+                status="attached_manual",
+                message="bank SMS attached to admin-approved receipt",
+                amount_toman=int(amount_toman),
+                matched_receipt_id=int(approved["id"]),
+            )
+            return 200, {
+                "ok": True,
+                "matched": True,
+                "status": "attached_manual",
+                "receipt_id": int(approved["id"]),
+                "amount_toman": int(amount_toman),
+            }
+
+    max_age = int(row["max_pending_age_minutes"] or CustomerPortalService.SMS_DEFAULT_MAX_PENDING_AGE_MINUTES)
+    matches: list[dict[str, Any]] = []
+    matched_amount = 0
+    for amount_toman in candidates:
+        matches = portal.find_pending_card_receipts_for_sms(
+            int(amount_toman),
+            card_last4=card_last4,
+            max_age_minutes=max_age,
+            sms_time_ms=sms_time_ms,
+        )
+        if matches:
+            matched_amount = int(amount_toman)
+            break
+
+    if not matches:
+        portal.update_sms_event(
+            event_id,
+            status="no_pending_match",
+            message=f"no pending card receipt for candidates={candidates}",
+            amount_toman=int(candidates[0]),
+        )
+        return 202, {
+            "ok": True,
+            "matched": False,
+            "status": "no_pending_match",
+            "amount_candidates_toman": candidates,
+        }
+
+    if len(matches) > 1:
+        portal.update_sms_event(
+            event_id,
+            status="ambiguous",
+            message=f"multiple pending card receipts matched amount={matched_amount}",
+            amount_toman=matched_amount,
+        )
+        return 409, {
+            "ok": False,
+            "matched": False,
+            "error": "ambiguous_pending_payments",
+            "amount_toman": matched_amount,
+            "count": len(matches),
+        }
+
+    receipt = matches[0]
+    try:
+        portal.approve_receipt_by_sms(
+            int(receipt["id"]),
+            event_id=event_id,
+            sender=sender,
+        )
+    except Exception as exc:
+        portal.update_sms_event(
+            event_id,
+            status="approve_failed",
+            message=str(exc)[:200],
+            amount_toman=matched_amount,
+            matched_receipt_id=int(receipt["id"]),
+        )
+        return 500, {
+            "ok": False,
+            "matched": True,
+            "error": "approve_failed",
+            "receipt_id": int(receipt["id"]),
+        }
+
+    portal.update_sms_event(
+        event_id,
+        status="approved",
+        message="approved via bank SMS",
+        amount_toman=matched_amount,
+        matched_receipt_id=int(receipt["id"]),
+    )
+
+    _notify_master_approved(
+        customer=dict(receipt),
+        receipt=dict(receipt),
+        amount_toman=matched_amount,
+        amount_raw=amount_raw,
+        currency_raw=currency_raw,
+        reference=reference,
+        sender=sender,
+    )
+
+    return 200, {
+        "ok": True,
+        "matched": True,
+        "status": "approved",
+        "receipt_id": int(receipt["id"]),
+        "amount_toman": matched_amount,
+    }
+
 def handle_sms_post(
     db_path: str,
     tenant_public_id: str,
@@ -245,6 +539,9 @@ def handle_sms_post(
     conn = open_database(str(db_path))
     try:
         conn.row_factory = sqlite3.Row
+        target = str(tenant_public_id or "").strip()
+        if target == "master":
+            return _handle_master_sms_post(conn, headers, body, cipher=cipher)
         row = conn.execute(
             "SELECT id FROM tenants WHERE public_id=?",
             (str(tenant_public_id or "").strip(),),
