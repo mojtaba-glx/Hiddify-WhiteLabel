@@ -40,8 +40,8 @@ The presence of adapter code or offline tests does not, by itself, prove compati
 
 The repository is already public, but the following items must be resolved before promoting it as a fully licensed open-source project or inviting external contributions:
 
-1. **Choose and add a license.** There is currently no `LICENSE` file and GitHub reports no detected repository license. Do not claim an OSI-approved license until the rights holder has chosen and added one.
-2. **Confirm code provenance and attribution.** A source comment in `TenantRuntime/UserBot/qr_and_configs.py` explicitly says the module was ported from `Hiddify-SellBot`. Confirm ownership and permission for all reused or adapted material, then add accurate attribution where required. The README and architecture statements must not contradict this provenance.
+1. **License added on the preparation branch.** The maintainer selected MIT and a `LICENSE` file has been added to this branch. It is not yet on `main`; merge the reviewed pull request before claiming the default branch is MIT-licensed. The license covers project-owned material, not third-party dependencies or separately identified third-party works.
+2. **Code provenance and attribution.** The maintainer confirms ownership and permission to publish the Hiddify-SellBot-derived module. Retain any applicable upstream notices and complete a repository-wide check for other copied or adapted material and contributor rights.
 3. **Complete a full history secret scan.** Review all branches, tags and Git history with GitHub secret scanning or an equivalent local scanner. A clean current working tree does not prove that an old commit contains no exposed credential.
 4. **Complete live staging acceptance.** Record provider, rollback and operational results for the release candidate.
 5. **Review public examples and documentation.** Confirm that all URLs, sample values, screenshots, logs, test fixtures and workflow artifacts are intentionally public and contain no customer or infrastructure data.
@@ -63,4 +63,4 @@ All 62 branches were enumerated. They are currently unprotected. This preparatio
 
 ## Publication rule
 
-The repository is currently public by owner decision. Keep the limitations above visible. Do not describe it as fully open source until a license and code-provenance review are complete, and do not describe provider integrations as production-validated until the live acceptance record is complete.
+The repository is currently public by owner decision. Keep the limitations above visible. The preparation branch now contains an MIT license, but `main` remains unchanged until the pull request is merged. Describe the project as MIT-licensed only after that merge. Do not describe provider integrations as production-validated until the live acceptance record is complete.
