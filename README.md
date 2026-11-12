@@ -84,6 +84,7 @@ For a complete test run and the staged acceptance process, see:
 - [Threat model](docs/THREAT_MODEL.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Roadmap](docs/ROADMAP.md)
+- [Dependency and third-party license review](docs/DEPENDENCIES.md)
 
 ## Installation
 
