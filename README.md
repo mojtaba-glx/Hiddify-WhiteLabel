@@ -84,6 +84,7 @@ For a complete test run and the staged acceptance process, see:
 - [Threat model](docs/THREAT_MODEL.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Roadmap](docs/ROADMAP.md)
+- [Dependency and third-party license review](docs/DEPENDENCIES.md)
 
 ## Installation
 
@@ -113,7 +114,7 @@ The current Telegram bot interface is Persian. This repository's developer-facin
 
 ## License
 
-A license has not yet been selected for this repository. Until a license is added, the source is not offered under an open-source license. See [Project status](docs/PROJECT_STATUS.md) for release-readiness items.
+This project is licensed under the [MIT License](LICENSE). The MIT license applies to project-owned material in this repository. Third-party dependencies and separately identified third-party materials remain under their respective licenses; see [Dependency and third-party license review](docs/DEPENDENCIES.md).
 
 ## Contributions and issue reports
 

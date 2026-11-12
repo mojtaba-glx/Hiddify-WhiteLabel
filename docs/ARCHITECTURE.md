@@ -1,158 +1,83 @@
 # Architecture
 
-Version: 0.9.0 | Status: Phase 0 through Phase 9 security boundary implemented
+**Repository version:** see the root `VERSION` file (currently `1.3.18` in this review).  
+**Project state:** active development; live provider and operational acceptance is not complete.
 
-## 1. Context
+## 1. Product overview
 
-`Hiddify-WhiteLabel` is a monthly-subscription SaaS that provisions an
-independent VPN-sales stack per customer (tenant). The reference project
-(`Hiddify-SellBot`, single-owner, 4 bots incl. `AgentBot`) was studied
-**read-only** for healthy patterns: Hiddify/X-UI panel calls, plan/wizard
-sales flow, card-to-card receipts, tickets, service enforcement. No code,
-schema or secret was copied.
+Hiddify-WhiteLabel is a Telegram-based, multi-tenant platform for operating branded VPN subscription services. The platform owner uses **MasterBot** to manage tenants, plans, licenses and platform operations. Each tenant is provisioned with a tenant-scoped **AdminBot** and **UserBot**. Tenant bots are hosted by a shared, fixed-shard runtime rather than one operating-system process per tenant.
 
-Key product differences:
+The repository is a single versioned codebase. Its components are separated by responsibility, while sharing migrations, licensing rules and release procedures.
 
-- No `AgentBot`. Each tenant gets up to two bots: `TenantAdminBot`
-  (full admin of that tenant) and `TenantUserBot` (end-user shop),
-  at most one per role.
-- `MasterBot` is role-based: the platform owner manages tenants and licenses;
-  normal users use the customer storefront for plans, payment and setup.
-- Expiry never deletes data; it only limits update processing for that
-  tenant. In the shared runtime, expiry is **not** a process stop.
+## 2. Main components
 
-## 2. Logical components (one repo for now)
+| Component | Responsibility |
+|---|---|
+| `MasterBot/` | Platform-owner administration, tenant and plan management, license operations, audit/history, platform settings and customer storefront workflows |
+| `LicenseService/` | License state transitions, grace periods, scheduled expiry notifications, retry/lease handling and runtime access decisions |
+| `Provisioning/` | Tenant and bot enrollment, credential verification, runtime namespace creation and reversible lifecycle operations |
+| `Gateway/` | Bot identity catalog, tenant routing and current tenant/owner/license policy checks |
+| `TenantRuntime/` | Fixed-shard supervisor and tenant-specific Telegram applications |
+| `TenantRuntime/AdminBot/` | Tenant-owner workflows for servers, customers, subscriptions, payments and operations |
+| `TenantRuntime/UserBot/` | End-user storefront, purchase/renewal, payment, wallet, support and subscription workflows |
+| `Database/` + `Migrations/` | SQLite connection/repositories and versioned schema migrations |
+| `Shared/` | Typed configuration, cryptography helpers, access controls, UTC utilities and redacted logging |
+| `Ops/`, scripts and shell entry points | Installation, systemd integration, health checks, backup/restore, release checks and rollback tooling |
+| `Tests/` | Offline automated regression and contract tests |
 
-All four are logically independent but versioned together so migrations
-and license semantics stay in sync (ADR-0001):
+## 3. Runtime and tenant isolation
 
-| Component | Responsibility | Phase |
-|---|---|---|
-| `MasterBot/` | owner-only CRUD for tenants/plans/licenses, staged full provisioning, secure token/secret rotation, confirm steps, pagination/search, statistics, warnings and audit | 2 + 4 (implemented) |
-| `LicenseService/` | license state machine, scheduled transitions, durable 7/3/1-day warnings, lease recovery/retry, short cache and runtime gate | 1 + 3 (implemented) |
-| `Gateway/` | validate encrypted credentials, assign bot ids to fixed shards, route to `tenant_id`, and enforce current route/owner/license policy | 5 (implemented) |
-| `Provisioning/` | atomic tenant + namespace + two-bot enrollment, reversible lifecycle and private one-time webhook handoff | 4 (implemented) |
-| `TenantRuntime/` | fixed-process supervisor, one in-process Telegram Application per active tenant bot, isolated state and tenant-specific Admin/User handlers | 5 (implemented) |
-| `Shared/` | typed settings, redacted logging, token crypto, UTC time, access guard | 1 |
-| `Database/` + `Migrations/` | connection, repositories, versioned migrations (`schema_migrations`) | 1 |
-| `Ops/` + `install.sh` | process locks, systemd rendering, health, authenticated encrypted backup, validated restore and operational rollback | 6 (implemented) |
+The runtime uses a configured, fixed number of operating-system shards. A bot is assigned to a shard from its stable bot identity. Each shard supervises multiple Telegram applications and reconciles provisioned, changed or disabled bot records.
 
-## 3. Data model (authoritative)
+Before a tenant update reaches its feature handlers, the runtime checks the current bot route and tenant state. AdminBot updates are also checked against the tenant owner identity. License policy is evaluated at update time, with a bounded cache that must not extend access beyond the license/grace cutoff. Runtime state is scoped by tenant, bot role and Telegram user so identical Telegram user IDs in different tenants do not share conversation state.
 
-See `Migrations/0001_init.sql` and `docs/decisions/`. Summary:
+A tenant license expiry does not require terminating a shared worker process. Access is restricted at the update-policy boundary; renewal can restore access without restarting unrelated tenants.
 
-- `tenants(id, public_id UNIQUE non-guessable, name, slug UNIQUE, owner_telegram_id, status, created_at, updated_at)` — `status ∈ {active, suspended, disabled}`.
-- `tenant_bots(id, tenant_id FK RESTRICT, role ∈ {admin,user}, encrypted_token, token_fingerprint UNIQUE, token_tail, telegram_bot_id UNIQUE-when-set, telegram_username, status ∈ {active,disabled,revoked}, webhook_secret_hash, created_at, updated_at)` — `UNIQUE(tenant_id, role)` allows **at most one bot per role**; `readiness()` reports both roles active.
-- `license_plans(id, name UNIQUE, duration_days>0, price>=0, max_servers, max_users, features JSON, status ∈ {active,archived,disabled})`.
-- `licenses(id, tenant_id FK RESTRICT, plan_id FK RESTRICT, status ∈ {pending,active,grace,suspended,expired,cancelled}, starts_at, expires_at, grace_until NULL, suspended_at NULL, created_at, updated_at)` — at most **one current (active/grace)** license per tenant (partial unique index `idx_licenses_one_current`); history rows are unlimited.
-- `audit_events(id, actor_id, tenant_id NULL FK SET NULL, action, entity_type, entity_id, safe_metadata JSON non-sensitive, created_at)`.
-- `notification_events(id, tenant_id FK RESTRICT, event_type, event_key UNIQUE, scheduled_at, sent_at NULL, status ∈ {pending,processing,sent,failed,skipped}, locked_at NULL, next_attempt_at NULL, retry_count)`.
-- `tenant_runtime_configs(tenant_id PK/FK RESTRICT, data_namespace UNIQUE non-guessable, status ∈ {provisioning,ready,disabled,error}, created_at, updated_at)` — one logical data namespace per provisioned tenant; future tenant-owned tables remain in the shared database and carry `tenant_id`.
-- `tenant_user_state(tenant_id FK RESTRICT, bot_role, telegram_user_id, state_json, updated_at)` — composite primary key `(tenant_id, bot_role, telegram_user_id)` prevents state collision between tenants and bot roles.
-- `tenant_servers`, `tenant_nodes`, `tenant_sale_plans`, `tenant_customers`,
-  `tenant_payment_methods`, `tenant_orders`, `tenant_receipts`,
-  `tenant_subscriptions`, `tenant_tickets`, and `tenant_smart_links` all have
-  a required `tenant_id` FK. Their repository/service methods are permanently
-  bound to a runtime tenant scope.
-- `schema_migrations(version PK, applied_at, checksum)`.
+## 4. Data model and persistence
 
-All timestamps are ISO-8601 UTC (`+00:00`). Display converts to
-`Asia/Tehran` only at presentation (ADR-0004).
+The current implementation uses **SQLite**. PostgreSQL support, PostgreSQL migrations and PostgreSQL row-level security are not implemented and must not be advertised as available.
 
-## 4. License lifecycle
+The schema includes platform tenants, tenant bot identities, license plans and licenses, audit and notification events, tenant runtime configuration, tenant user state, and tenant-scoped business records such as servers, nodes, plans, customers, payment methods, orders, receipts, subscriptions, tickets and smart links.
 
-States: `pending → active ⇄ grace → expired → suspended`, plus
-`cancelled` as terminal side-state. Every change is atomic
-(`UPDATE ... WHERE status = expected` + audit insert in one locked
-transaction, tenant re-verified from the row read), audited, and tested.
-At most one current license per tenant. Detail: `LicenseService/states.py`.
+Tenant-owned repositories and service operations are expected to carry an explicit tenant scope. See the SQL migrations and architecture decision records for the authoritative schema and design decisions.
 
-Expiry behavior:
+## 5. License and provisioning lifecycle
 
-1. Warnings at 7 / 3 / 1 days before `expires_at` use an expiry-specific
-   `event_key` (`license:<id>:expiring:<n>d:<period-hash>`). Each period/stage
-   is sent at most once, renewal gets a fresh sequence, and queued warnings
-   from an older period are skipped before delivery.
-2. After `expires_at`: `active → grace` if `grace_until` is in the future,
-   else `active → expired`.
-3. After `grace_until`: `grace → expired`, then operator/job moves
-   `expired → suspended` (tenant limited, data kept).
-4. Renew (`expired|suspended|grace|active → active` with new
-   `expires_at`/`grace_until`) re-enables the tenant. Nothing is deleted
-   on suspend/expire.
-5. `TenantRuntimeGate` answers per update from the database with a bounded
-   cache. Positive cache entries never outlive expiry/grace. Database errors
-   fail closed for that tenant while healthy tenants remain independent.
-6. Notification delivery uses a claim lease, stale-lease recovery,
-   exponential retry and a maximum attempt count. A Telegram outage does not
-   roll back license transitions or lose the queued warning.
+License records support pending, active, grace, expired, suspended and cancelled states. State changes are guarded by expected-state updates and audit records. Expiry notifications use deduplication keys and retry/lease handling so a transient Telegram delivery failure does not reverse a license transition.
 
-## 5. Security outline
+Provisioning verifies the tenant's bot identities before committing the tenant, runtime namespace, encrypted bot credentials, webhook-secret hashes and audit event as one unit. Sensitive operations require explicit confirmation and are recorded in the audit trail.
 
-Full model: `docs/THREAT_MODEL.md`. Essentials:
+## 6. VPN provider integrations
 
-- Tokens encrypted with Fernet (`TOKEN_ENCRYPTION_KEY` outside DB,
-  file mode `0600`); DB holds ciphertext + SHA-256 fingerprint only.
-- `MASTER_ADMIN_ID` is enforced by an application-wide handler before every
-  command/message/callback and repeated inside every Master service operation.
-- Callback data is untrusted: ids, license status and tenant ownership
-  are re-checked from DB.
-- Logs/exceptions redacted; DB queries parameterized; sensitive
-  renew/suspend wrapped in transactions with confirm + audit.
-- Full provisioning verifies both tokens before writing, then creates the
-  tenant, runtime namespace, two encrypted bot credentials, webhook hashes
-  and audit event in one transaction. A failure rolls the whole unit back.
-- Raw webhook secrets are returned once. The CLI writes them to a new `0600`
-  handoff inside a `0700` directory; MasterBot marks the Telegram message as
-  protected. Secret rotation requires explicit confirmation.
-- TenantRuntime decrypts a bot token only while constructing its Telegram
-  Application and verifies its SHA-256 fingerprint before use. Public runtime
-  specs hide ciphertext and fingerprints from `repr`.
-- Every update is checked against the current database route before a handler
-  runs. Admin updates additionally require the tenant owner's Telegram id.
-  Missing identities, changed tokens, disabled rows and database errors fail
-  closed.
+The source tree contains provider adapters and offline contract coverage for:
 
-## 6. Shared runtime topology
+- Hiddify Manager
+- X-UI Sanaei
+- X-UI Alireza
+- X-NET
 
-`RUNTIME_SHARD_COUNT` fixes the number of operating-system processes. Each bot
-belongs to exactly one shard by `bot_id % shard_count`; both tenant roles may
-live in different shards. Inside a shard, `RuntimeSupervisor` reconciles many
-independent Telegram Applications. It starts newly provisioned bots, restarts
-changed routes/tokens and stops disabled bots. A bad credential or one failed
-Telegram startup is isolated to that bot.
+The existence of an adapter or a passing offline test does **not** establish compatibility with every panel release or prove production readiness. Provider support must be reported as live-validated only after the provider-specific disposable staging procedure has passed for the same candidate commit. Otherwise record it as `not executed` or `not accepted`.
 
-License expiry deliberately does not kill the worker. The application-wide
-access handler invokes `RuntimePolicy` for each update, so expired or suspended
-tenants are blocked while renewals take effect without a process restart. A
-short license cache reduces database reads and never outlives the stored
-expiry/grace cutoff.
+Multi-node mappings, managed smart-subscription links, usage aggregation and lifecycle enforcement are part of the implemented product scope, but their operational acceptance remains governed by the staged release record.
 
-The runtime handlers include tenant-scoped inventory, sales plans,
-card/crypto payment instructions, receipt review, pending subscriptions,
-tickets and smart links. Full Hiddify/X-UI API credentials, provisioning and
-usage synchronization remain independent integration work; no panel
-credential is currently accepted or stored.
+## 7. Security design
 
-## 7. Operations and recovery
+The implementation includes encrypted bot-token storage, token fingerprints, webhook-secret hashes, owner checks, tenant-scoped routing/state, callback revalidation, parameterized database access, redacted logging, audit events, restricted secret handoff files, encrypted backup archives and staged restore validation.
 
-One systemd unit runs MasterBot and its embedded license jobs. A templated unit
-runs indexes `0..RUNTIME_SHARD_COUNT-1`; command-local environment assignment
-prevents `.env` from overriding `%i`. File locks reject a duplicate MasterBot
-or duplicate `(shard_count, shard_index)` process even outside systemd.
+These are implementation design controls, not a claim of independent security certification. The current repository snapshot, selected source/configuration files and ignore rules have been reviewed, but a complete scan of every Git object, historical commit, branch, tag and workflow artifact is still required before publication can be considered fully cleared.
 
-Health checks validate private permissions, typed environment settings,
-SQLite integrity, foreign keys, migration presence/checksums and candidate bot
-credential integrity. They return names/counts only and never secret values.
+The codebase contains a source comment identifying a UserBot config/QR delivery module as ported from Hiddify-SellBot. The precise provenance, rights and required attribution for adapted material must be confirmed by the maintainers before selecting a license or claiming the repository is fully open source.
 
-Backups use SQLite's online backup API, package the database and `.env` with a
-SHA-256 manifest, then authenticate and encrypt the complete archive with a
-Fernet key derived from the operator passphrase using PBKDF2-HMAC-SHA256. A
-restore validates everything in a private staging directory, migrates the
-staged database, snapshots current files for rollback and then uses atomic
-replacement. Full procedure: `docs/OPERATIONS.md`.
+## 8. Operations and recovery
 
-## 8. Non-goals of this snapshot
+The repository provides Ubuntu/Debian installation/bootstrap tooling, systemd units, process locks, health checks, database migrations, encrypted backup/restore and guarded update rollback. The documented staging procedure requires a disposable host and test panel accounts. Never run destructive acceptance or rollback drills against production tenants or customer accounts.
 
-Full tenant business modules and final live multi-tenant drills remain deferred
-per `docs/ROADMAP.md`.
+## 9. Current limitations
+
+- SQLite is the implemented database backend; PostgreSQL is not implemented.
+- The Telegram bot interface is currently Persian. English developer documentation does not imply English bot localization.
+- Provider adapters and offline tests do not replace live provider acceptance.
+- The final live staging, backup/restore and rollback acceptance record remains outstanding.
+- No repository license has been selected or added yet.
+
+For current acceptance status, consult [Project Status](PROJECT_STATUS.md), [Roadmap](ROADMAP.md) and [Staged Release Drill](STAGED_RELEASE_DRILL.md).
